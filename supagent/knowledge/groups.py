@@ -11,6 +11,7 @@ aggregations the connectors push down (one per window and field).
 from __future__ import annotations
 
 import datetime as dt
+import json
 import math
 import re
 import statistics
@@ -1187,3 +1188,26 @@ def follows_the_stage(now: dict[str, tuple[int, int]], days: list[dict[str, int]
         if n >= max(3.0, 0.02 * total):
             kinds.add(reached >= n - slack)
     return kinds == {True, False}
+
+
+FIRST_OFF = re.compile(r"In the order of the stages, ([@\w.]+) is the first that is clearly off")
+RUN_STAGE = re.compile(r"START|BEGIN|RUN|PICK", re.I)
+
+
+def before_start(content: str) -> str | None:
+    """The first stage a compare_groups result found off, when it comes before the stage at which the rows start
+    to run (they were late before they could run: they waited for their inputs, not for a slot), or None. The
+    stages' order is the result's own (its stage lines, one per time field)."""
+    m = FIRST_OFF.search(content or "")
+    if not m:
+        return None
+    try:
+        lines = json.loads(content).get("stages") or []
+    except (ValueError, AttributeError):
+        return None
+    order = [x.group(1) for x in (re.match(r"\s*([@\w.]+)", str(line)) for line in lines) if x]
+    start = next((i for i, f in enumerate(order) if RUN_STAGE.search(f)), None)
+    first = m.group(1)
+    if start is None or first not in order:
+        return None
+    return first if order.index(first) < start else None

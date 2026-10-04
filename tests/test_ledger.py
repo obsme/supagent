@@ -219,3 +219,148 @@ def test_the_plan_comes_with_the_last_calls(ctx, monkeypatch):
     a.ask("Why did the jobs fail?")
     told = [m for m in a.llm.seen[-1] if m["role"] == "user" and m["content"].startswith(LAST_CALLS)]
     assert told and "Your work plan (kept by the system)" in told[0]["content"] and "[ ] 5. Deeper" in told[0]["content"]
+
+
+def test_a_turn_that_only_keeps_the_plan_is_not_one_of_the_calls(ctx, monkeypatch):
+    """The investigation budget counts turns: on the 152, four of six investigations hit it after 4 to 8 turns spent
+    only on work_plan. Such a turn gives its turn back (FREE_PLAN_TURNS at most); a plan update sent with another
+    call counts as before."""
+    from supagent import agent as agent_mod
+
+    wp1 = {"tasks": [{"title": "Revenue of the week", "status": "in_progress"}]}
+    wp2 = {"tasks": [{"title": "Revenue of the week", "status": "done", "note": "3"}]}
+    sql = {"request": {"database_id": 1, "sql": "SELECT SUM(x) FROM orders"}}
+    q = "Give me the revenue, the orders, the refunds and the returns of the week, and the share of each country."
+    replies = [call("work_plan", wp1), call("execute_sql", sql), call("work_plan", wp2), say("Revenue: 3.")]
+    a, ran = agent_with(monkeypatch, replies)
+    a.max_steps = 2                                   # a request of many parts: 3 turns
+    answer, _trace = a.ask(q)
+    out_of_turns = lambda x: any(str(m.get("content")).startswith(agent_mod.OUT_OF_STEPS) for m in x.llm.seen[-1])  # noqa: E731
+    assert answer.startswith("Revenue: 3.") and len(ran) == 1 and not out_of_turns(a)   # 2 turns given back
+    monkeypatch.setattr(agent_mod, "FREE_PLAN_TURNS", 0)
+    b, _ran = agent_with(monkeypatch, replies + [say("What was done: the revenue, 3.")])
+    b.max_steps = 2
+    b.ask(q)
+    assert out_of_turns(b)                                      # without it: out of turns after the third
+
+
+def test_out_of_calls_the_answer_keeps_what_the_plan_found(ctx, monkeypatch):
+    """Two investigations of the team comparison ran out of calls with the cause in their plan's notes and answered
+    nothing ("The model wrote no text") or "Let me check ...". Out of calls, the model gets its plan, and when it
+    still writes nothing or only announces a step, the answer is what the plan's done tasks noted, said as such."""
+    from supagent import agent as agent_mod
+
+    monkeypatch.setattr(agent_mod, "FREE_PLAN_TURNS", 0)
+    wp = {"tasks": [{"title": "Revenue of the week", "status": "done", "note": "3 EUR, all from shop A"},
+                    {"title": "Refunds of the week", "status": "in_progress"}]}
+    sql = {"request": {"database_id": 1, "sql": "SELECT SUM(x) FROM orders"}}
+    q = "Give me the revenue, the orders, the refunds and the returns of the week, and the share of each country."
+    for last in ("", "I have the revenue. Let me check the refunds now."):
+        a, _ran = agent_with(monkeypatch, [call("work_plan", wp), call("execute_sql", sql), call("execute_sql", sql),
+                                           say(last)])
+        a.max_steps = 2                                   # 3 turns, then out of calls
+        answer, _trace = a.ask(q)
+        assert "Revenue of the week: 3 EUR, all from shop A" in answer and "Not checked: Refunds of the week" in answer
+        assert "Your work plan (kept by the system)" in a.llm.seen[-1][-1]["content"]   # given its plan first
+    b, _ran = agent_with(monkeypatch, [call("work_plan", wp), call("execute_sql", sql), call("execute_sql", sql),
+                                       say("The revenue was 3 EUR; the refunds were not reached.")])
+    b.max_steps = 2
+    answer, _trace = b.ask(q)
+    assert answer.startswith("The revenue was 3 EUR; the refunds were not reached.")       # its own answer: kept
+
+
+def test_a_long_conversation_is_shortened_early_with_its_plan(ctx, monkeypatch):
+    """Past agent.compact_at prompt tokens the older tool results are cut to their first lines and the plan is given
+    again, once per level, long before the context is full (models read long contexts worse)."""
+    from supagent import agent as agent_mod
+
+    big = "R" * 6000
+    wp = {"tasks": [{"title": "Revenue of the week", "status": "in_progress"}]}
+    q = "Give me the revenue, the orders, the refunds and the returns, and the share of each country."
+    sqls = [{"request": {"database_id": 1, "sql": f"SELECT SUM(x) AS part_{i} FROM orders"}} for i in range(6)]
+    replies = [call("work_plan", wp)] + [call("execute_sql", x) for x in sqls] + [say("Revenue: 3.")]
+    a, _ran = agent_with(monkeypatch, replies, results=lambda n, args: big)
+    used = iter([1000, 9000, 26000, 27000, 28000, 37000, 38000, 39000, 39500, 40000])
+    real_chat = a.llm.chat
+
+    def chat(*args, **kw):
+        out = real_chat(*args, **kw)
+        a.llm.last_usage = {**a.llm.last_usage, "prompt_tokens": next(used)}
+        return out
+
+    monkeypatch.setattr(a.llm, "chat", chat)
+    answer, _trace = a.ask(q)
+    last = a.llm.seen[-1]
+    notes = [m["content"] for m in last if m["role"] == "user" and m["content"].startswith("(The conversation was getting long")]
+    assert len(notes) == 2 and "Your work plan (kept by the system)" in notes[0]       # at 26K, then at 37K (>36K)
+    cut = [m for m in last if m["role"] == "tool" and "[shortened" in str(m["content"])]
+    whole = [m for m in last if m["role"] == "tool" and "[shortened" not in str(m["content"])
+             and len(str(m["content"])) > 2000]                     # the latest ones, as the tool gave them
+    assert cut and len(whole) >= agent_mod.COMPACT_KEPT - 1 and answer.startswith("Revenue: 3.")
+
+
+def test_the_last_calls_are_said_once_when_plan_turns_move_the_end(ctx, monkeypatch):
+    """A plan-only turn at the end gives its turn back: "the last calls" is still said once, not at every turn
+    the end moves by one."""
+    from supagent.agent import LAST_CALLS
+    from test_agent_loop import agent_with, call, say
+
+    sql = [{"request": {"database_id": 1, "sql": f"SELECT {i} AS n"}} for i in range(18)]
+    wp = [{"tasks": [{"title": f"Step {k}", "status": "in_progress"}]} for k in range(4)]
+    a, _ran = agent_with(monkeypatch, [call("execute_sql", q) for q in sql] + [call("work_plan", w) for w in wp]
+                         + [say("The cause is in the results above.")] * 3)
+    a.ask("Why did the jobs fail?")
+    told = [m for m in a.llm.seen[-1] if m["role"] == "user" and str(m["content"]).startswith(LAST_CALLS)]
+    assert len(told) == 1
+
+
+def test_an_answer_whose_time_is_up_answers_with_what_it_found(ctx, monkeypatch):
+    """agent.answer_seconds: on a slow LLM server an investigation ran past the harness's 45 minutes and gave no
+    answer at all (its plan's notes held the cause). Past the time, two calls are left, then the answer."""
+    from supagent import agent as agent_mod, settings
+    from test_agent_loop import agent_with, call, say
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(agent_mod.time, "time", lambda: clock["t"])
+    real = settings.get
+    monkeypatch.setattr(settings, "get", lambda key: 60 if key == "agent.answer_seconds" else real(key))
+    sql = [{"request": {"database_id": 1, "sql": f"SELECT {i} AS n"}} for i in range(12)]
+    a, ran = agent_with(monkeypatch, [call("execute_sql", q) for q in sql] + [say("What was found: 5 and 6.")] * 3)
+
+    real_call = a._call
+
+    def timed(name, args):                               # each call: 25 s
+        clock["t"] += 25
+        return real_call(name, args)
+
+    monkeypatch.setattr(a, "_call", timed)
+    answer, _trace = a.ask("Why did the jobs fail?")
+    told = [m["content"] for m in a.llm.seen[-1] if m["role"] == "user" and str(m["content"]).startswith(agent_mod.TIME_UP)]
+    assert len(told) == 1 and len(ran) <= 6 and answer.strip()     # 12 calls scripted: it stopped, with an answer
+
+
+def test_past_its_time_an_answer_is_marked_not_sent_back(ctx, monkeypatch):
+    """Past agent.answer_seconds the checks no longer send the answer back (each costs a turn; a live run went on
+    20 minutes past the time, sent back by one check after another): what they would send back is marked."""
+    from supagent import agent as agent_mod, settings
+    from test_agent_loop import agent_with, call, say
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(agent_mod.time, "time", lambda: clock["t"])
+    real = settings.get
+    monkeypatch.setattr(settings, "get", lambda key: 60 if key == "agent.answer_seconds" else real(key))
+    sql = [{"request": {"database_id": 1, "sql": f"SELECT {i} AS n"}} for i in range(3)]
+    a, _ran = agent_with(monkeypatch, [call("execute_sql", q) for q in sql]
+                         + [say("Found 4,567 failed jobs and 8,912 retries.")] * 3)
+    real_call = a._call
+
+    def timed(name, args):
+        clock["t"] += 25
+        return real_call(name, args)
+
+    monkeypatch.setattr(a, "_call", timed)
+    answer, _trace = a.ask("How many jobs failed and how many were retried?")
+    after = a.llm.seen[-1]
+    sent_back = [m for m in after if m["role"] == "user" and str(m["content"]).startswith("(Check before")]
+    assert answer.startswith("Found 4,567 failed jobs") and "(Check:" in answer and not sent_back
+    assert len(a.llm.seen) == 4                          # 3 calls, then the answer: no turn more

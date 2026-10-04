@@ -1,5 +1,122 @@
 # Changes
 
+## 0.9.4 — 2026-10-04
+
+Two candidates in one release: 0.9.3 (investigations that follow the inputs of late rows, long work that keeps its
+results, answers given again or claimed and not done sent back) was measured and NOT released (its held-out
+questions below 0.9.2's: right in both runs 60 of 75 against 65); 0.9.4 adds to it the general fixes of 21 failure
+classes, found by tracing the misses of two probes written for the purpose (dev4, dev5: general failure
+scenarios) and of the earlier measurements to their causes, each replayed on every stored query before it was kept.
+
+Measured on 2026-10-04 with the frozen question sets and the model of 0.9.2's measurement:
+
+* **Held-out questions** (75, sealed: never used to shape a change, opened only after the code was frozen): 0.9.4's
+  first run **69 right**, 1 wrong but marked as unsure, **5 wrong without a mark**; 0.9.2's two runs: 69 and 65
+  right, 5 and 9 wrong without a mark. The bar of this release was written before that run: at least 67 right and
+  at most 7 wrong without a mark (0.9.2's mean per run). The rest of the measurement (the second held-out run, the
+  main set of 156 questions twice, the 25 investigation scenarios) is still running; its results come with the next
+  release notes.
+* **0.9.3 was measured on all of them and not released**: held-out questions right in both runs 60 of 75 (0.9.2: 65),
+  wrong without a mark in either run 12 (0.9.2: 9), main set right in both runs 141 of 156 (0.9.2: 142), although
+  its investigations scored higher (1,875 points against 1,755 on the dev and test scenarios, 415 against 390 on the
+  held-out ones).
+* **Two probes of general failure scenarios** written for this release (62 and 27 questions; in-sample: their misses
+  were traced to find the fixes below): 0.9.4 59/62 (twice) and 25/27, 0.9.3 56/62 and 22/27. They ran 0.9.4 before
+  its last change (a count said in words supports its condition), which was replayed instead on the 4,765 stored
+  queries: 9 conditions no longer flagged, none newly flagged.
+
+Investigations
+* **Rows late before they were ready get their inputs** (`agent.inputs_walk`, on): when `compare_groups` finds the
+  rows late at a stage before they could run (waiting for their inputs, not for a slot), the inputs of the parts in
+  its scope, two steps up the System map (what they depend on, read from, receive data from), come with its result.
+* **And what those inputs' logs say** (`agent.inputs_logs`, on): the system calls `compare_logs` itself on the inputs'
+  log table over the comparison's window, first where the change is concentrated (the pool the rows waited on), then
+  everywhere, at most three calls: a new pattern ("<name> still waiting for its inputs after # min: <feed>",
+  "commit to <database> took # s", "slow I/O on <share>") comes with the inputs; nothing new, one short line. On the
+  stored scenarios of the simulated platform it brings the cause's own lines in three of the six where it fires and
+  stays quiet in the others.
+* **A pool's capacity blamed for rows that were not ready** is sent back once to follow their inputs (a pool cannot
+  hold rows that are not ready).
+* **`records_about`**: the changes, releases, restarts, alerts and incidents recorded on the parts an answer blames,
+  over the days before the effect (every record table of the data dictionary, by its keyword fields and its text):
+  the record behind the cause, not only the applications asked about.
+* **The calendar of the days looked at** (`agent.calendar_facts`, on): the third Friday, the last business day of the
+  month or quarter... when the team's knowledge literally speaks of such a day, comes with an investigation, with the
+  effect the team documented.
+* **Logs read everywhere while the change is in one place** (one pool) are read again there, once.
+* **A comparison's result keeps 12,000 characters** (its findings, its stages, the rows outside its scope), and the
+  system's notes after it reach the model whole (the result cut to make room, not the notes).
+* **The calls of an investigation go to the work**: a turn that only keeps the work plan does not count against the
+  calls (six at most); when the calls run out before the answer, the answer is what the plan's notes say was found,
+  and what was not checked, rather than nothing; "the last calls" is said once.
+* **Past its time** (`agent.answer_seconds`, 1,500 s), an answer answers with what it found: two more calls at most,
+  the checks that would send it back mark it instead, and the work plan's notes make the answer if the model writes
+  nothing.
+* **Long work shortened early** (`agent.compact_at`, 24,000 prompt tokens, then half as many again): the older tool
+  results are cut to their first lines with the work plan given again, long before the context is full (models read
+  long contexts worse well before their limit).
+* `agent.ledger_investigations` (on): with it off, investigations run without the work plan (a comparison of the two
+  on the 20 incidents decides the default of the next version).
+
+Answers (0.9.3)
+* **An answer given again for a new question** (the previous figure repeated word for word, no tool) is sent back
+  with a query made compulsory; so is a follow-up that asks for a new value and is answered with figures and no
+  query.
+* **"And its average latency, in seconds?"** after "which error code came up most often?" is a new question about
+  that subject (its, their, son, sa, leur...), not the previous question again; when both readings are possible the
+  answer gives the figure for both.
+* **"And the longest one?"** keeps the unit the question before asked (minutes, not hours).
+* **An action said done with no tool doing it** ("the chart is saved", "added to the dashboard", "the query is
+  saved") is sent back to be done, not only marked.
+* **osagg's refusal of a LEFT JOIN condition that keeps the empty rows** comes with a hint that writes the join (an
+  inner join on the key, the right table's condition in WHERE, one aggregating query; never a hand-made list of keys).
+* **"What share of those sales was refunded?"** with the part and the whole read from two tables apart is sent back
+  once to count the part within those rows.
+* **A SUM, AVG or COUNT over a join that repeats the rows** (the other table has several rows for the key) is sent
+  back before it runs (`agent.join_check`, on; one probe query per table and key, kept 10 minutes).
+
+Dates and periods
+* **A field that holds days is shown and compared as dates.** Its learned range was shown at 02:00 (midnight UTC in
+  Paris time) while osagg (0.2.10+) compares such a field as dates: answers copied the 02:00 onto their bounds and
+  moved the period by a day (the 1st of the month left out; the 23rd read for the 22nd). Shown as dates now, a bound
+  with a time of day on such a field is sent back once, and a right equality with a date is no longer refused.
+* **BETWEEN or <= at the next midnight** on a field of days (which takes in that whole day) is sent back.
+* **"last Monday", "on Monday", "lundi dernier"** name the most recent such day; the period check holds the query to
+  it (a model counted a Tuesday).
+* **A question about the future** answered with past figures says so first (sent back once, then marked).
+* **A sum of nothing for a period before (or after) the data** says that the data does not cover it, rather than 0,
+  also on a second date field of the index.
+* **An open question** (why, is it usual) may compare its day with the days around it; for a count of that day a
+  window of several days is refused and said so.
+
+Queries
+* **a OR b AND c** in a WHERE (AND binds first: the team's conditions on one branch only) is sent back before it runs.
+* **A value the field never holds** (express as a value of the channel field) is sent back before it runs, with the
+  field's values and the field that holds it (small vocabularies only; not in investigations, where looking a host
+  up and finding nothing is an answer).
+* **An average per day computed over the records** is sent back with both readings.
+* **A column named for one extreme computed with the other** (MAX(...) AS min_...) is sent back.
+* **A count said in words** ("more than one order", "at least twice") supports its condition: the check of
+  conditions nobody asked for no longer sends back HAVING COUNT(*) > 1 for "more than one".
+
+Follow-ups and grounding
+* **A follow-up that keeps the previous period keeps the previous question's other conditions.**
+* **A follow-up about a field the previous queries never read** gets a compulsory query.
+* **"The ratio of the first to the second", "the former", "both of them"** refer to the answers before.
+* **A value the question leaves out** ("cancelled trades left out") is met by any condition on its field.
+* **The check of conditions nobody asked for** reads durations in words (an hour = 3,600 s), the ranks an inner
+  query computes, and French words for a flag; a memory that applies "when the user says X" is no support without X.
+* **A question back about which data to use**, when the value named is in one of them only, is sent back.
+
+Actions
+* **A chart is saved with the name the request gave**; "the chart has been renamed" or "the chart is now a pie
+  chart" with no call is a claimed change (sent back to be done).
+
+Pages
+* **The top bar shows the supagent version.**
+
+From 0.9.2: `pip install` on every host and restart (no schema change).
+
 ## 0.9.2 — 4 Oct 2026
 
 Reliability: the answers were measured three times over (the 156 questions of the end-to-end suite, a held-out set

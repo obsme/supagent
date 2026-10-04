@@ -27,6 +27,7 @@
     <a href="{{ url_for('AdminView.usage') }}" class="{{ 'on' if nav.active == 'usage' }}">LLM usage</a>{% endif %}
   </nav>
   <span class="grow"></span>
+  <span class="ver" title="supagent version">supagent {{ nav.version }}</span>
   <span class="who" title="The agent acts with this account's permissions">{{ nav.user }}</span>
 </header>
 {% endif %}

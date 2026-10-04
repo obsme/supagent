@@ -443,6 +443,37 @@ def named_line(question: str) -> str:
     return text[:ROUTER_CHARS]
 
 
+INPUT_KINDS = ("depends_on", "reads_from")          # what a part takes in (and what sends data to it)
+
+
+def inputs_of(names: list[str], hops: int = 2, limit: int = 14) -> list[tuple[str, str, str]]:
+    """(an input, its category, the part it feeds) for these parts, up to `hops` steps up the system map: what they
+    depend on, read from, or receive data from. What rows that were late before they were ready waited for. A part
+    that has members (a family, a group of applications) stands for its members."""
+    g = _graph()
+    V = g["values"]
+    frontier: list[int] = []
+    for raw in names[:8]:
+        for i in (named(str(raw), g) or g["names"].get(" ".join(str(raw).lower().split()), []))[:2]:
+            takes_in = any(kind in INPUT_KINDS for kind, _b, _n in g["out"].get(i, []))
+            frontier += [i] if takes_in or not g["children"].get(i) else g["children"][i][:12]
+    seen, out = set(frontier), []
+    for _ in range(max(1, hops)):
+        nxt: list[int] = []
+        for i in frontier:
+            ups = [b for kind, b, _n in g["out"].get(i, []) if kind in INPUT_KINDS]
+            ups += [a for kind, a, _n in g["in"].get(i, []) if kind == "sends_to"]
+            for b in ups:
+                if b not in seen:
+                    seen.add(b)
+                    nxt.append(b)
+                    out.append((V[b]["name"], V[b]["cat"], V[i]["name"]))
+        frontier = nxt
+        if len(out) >= limit or not frontier:
+            break
+    return out[:limit]
+
+
 def links_of(names: list[str]) -> dict[str, Any]:
     """What the system map says of these parts (the tool system_links): each one's category, what it is, what it
     is part of and consists of, its interactions both ways, where its category is in the data."""

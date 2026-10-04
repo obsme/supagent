@@ -30,7 +30,22 @@ VALUE_WORDS = {
     "uat": {"uat", "acceptance", "recette"},
     "dev": {"dev", "development", "developpement"},
     "critic": {"critic", "critical", "critique"},
+    "relaunch": {"relaunch", "relaunched", "rerun", "retry", "retried", "restart", "restarted", "relanc", "relance",
+                 "relancee", "relancees", "relances", "redemar", "redemarre"},
 }
+# a duration said in words ("more than an hour", "half an hour", "une heure"): its number, for the unit factors
+DURATION_WORDS = re.compile(r"\b(an?|one|une?|two|deux|three|trois|half|demi|une demi)[\s-]+(?:an?\s+)?"
+                            r"(hours?|heures?|minutes?|seconds?|secondes?|days?|jours?|weeks?|semaines?)\b", re.I)
+WORD_NUMBER = {"a": 1.0, "an": 1.0, "one": 1.0, "un": 1.0, "une": 1.0, "two": 2.0, "deux": 2.0, "three": 3.0,
+               "trois": 3.0, "half": 0.5, "demi": 0.5, "une demi": 0.5}
+# a number said in words anywhere in people's words ("more than one order", "at least two", "twice"): that number
+# (not its unit factors: only a duration in words gets those)
+COUNT_WORDS = {"one": 1.0, "two": 2.0, "three": 3.0, "four": 4.0, "five": 5.0, "six": 6.0, "seven": 7.0, "eight": 8.0,
+               "nine": 9.0, "ten": 10.0, "eleven": 11.0, "twelve": 12.0, "twenty": 20.0, "thirty": 30.0, "hundred": 100.0,
+               "once": 1.0, "twice": 2.0, "dozen": 12.0, "deux": 2.0, "trois": 3.0, "quatre": 4.0, "cinq": 5.0,
+               "sept": 7.0, "huit": 8.0, "neuf": 9.0, "dix": 10.0, "douze": 12.0, "vingt": 20.0, "trente": 30.0,
+               "cent": 100.0}
+COUNT_WORD = re.compile(r"\b(" + "|".join(COUNT_WORDS) + r")\b", re.I)
 TIME_LIKE = re.compile(r"^\d{4}-\d{2}-\d{2}|^\d{8}$|^\d{1,2}:\d{2}")
 DB_VALUE_LISTS = (re.compile(r";\s*values:[^)\n]*"),                               # where_block field lines
                   re.compile(r"tenants \(__tenant_id__[^)]*\):[^;\n)]*"),          # where_block metric lines
@@ -76,7 +91,11 @@ class Support:
         if people:                                      # "45 minutes" is 2,700 seconds
             raw = {w for w in re.findall(r"[a-z0-9\u00c0-\u00ff]+", low) if len(w) >= 2}
             self.words |= raw | {stem(w) for w in raw}
+            found = list(found) + [WORD_NUMBER[m.group(1).lower()] for m in DURATION_WORDS.finditer(low)
+                                   if m.group(1).lower() in WORD_NUMBER]   # "more than an hour": 1 -> 3,600 s
+            self.numbers |= set(found)
             self.numbers |= {v * f for v in found for f in FACTORS}
+            self.numbers |= {COUNT_WORDS[m.group(1).lower()] for m in COUNT_WORD.finditer(low)}   # "more than one"
 
     def add_result(self, content: str, query: str = "") -> None:
         """What a query of this answer found (its rows, a PromQL result's series): the next queries may use
@@ -107,14 +126,39 @@ class Support:
             self.add(" ".join(values))
 
 
+MEMORY_LINE = re.compile(r"^- \((?:team|this user), [a-z]+\) (.*)$", re.M)
+TRIGGER = re.compile(r"\b(?:when|whenever|if)\s+(?:the\s+user|i|we)\s+(?:says?|writes?|asks?(?:\s+for)?|mentions?)\s+"
+                     r"['\"\u00ab\u2018\u201c]?([^'\"\u00bb\u2019\u201d,.;:]{2,40}?)['\"\u00bb\u2019\u201d]?(?=[\s,.;:]|$)|"
+                     r"\b(?:quand|lorsque|si)\s+(?:l'utilisateur|je|on)\s+(?:dit|dis|écrit|ecrit|demande|mentionne)\s+"
+                     r"['\"\u00ab\u2018\u201c]?([^'\"\u00bb\u2019\u201d,.;:]{2,40}?)['\"\u00bb\u2019\u201d]?(?=[\s,.;:]|$)", re.I)
+
+
+def untriggered(text: str, asked: str) -> str:
+    """The memory lines that apply only when the user says X ("When the user says 'NOVA', filter by
+    APPLICATION='NOVA'") taken out of what was said when the question and the chat do not say X: the memory
+    block tells the model so, and an answer still added that application's filter to a question that never named
+    it, unseen by this check (the memory's own words said the value)."""
+    low = (asked or "").lower()
+
+    def keep(m: re.Match) -> str:
+        t = TRIGGER.search(m.group(1))
+        if t is None:
+            return m.group(0)
+        trigger = (t.group(1) or t.group(2) or "").strip().lower()
+        return m.group(0) if trigger and trigger in low else ""
+    return MEMORY_LINE.sub(keep, text or "")
+
+
 def build(messages: list[dict], people: list[str]) -> Support:
     """The support of a question: the messages given to the LLM before its first call (instructions, chat,
     the question with its blocks) without the dictionary's lists of values, and the people's words."""
     support = Support()
+    asked = " ".join(p for p in people if p and "asked to remember" not in p)   # the question and the chat
     for m in messages:
         content = m.get("content")
         if not isinstance(content, str):
             continue
+        content = untriggered(content, asked)
         if m.get("role") == "system":                   # the instructions: their formulas only ('idle')
             content = " ".join(re.findall(r"'[^'\n]{1,40}'", content))
         for rx in DB_VALUE_LISTS:
@@ -122,7 +166,7 @@ def build(messages: list[dict], people: list[str]) -> Support:
         content = NOTE_LINES.sub(" ", content)          # a user's note is not verified: never a condition's source
         support.add(content)
     for text in people:
-        support.add(text, people=True)
+        support.add(untriggered(text, asked), people=True)
     try:                                                # the team's rules, however the prompt was made
         from supagent.knowledge.rulecheck import team_rules
 
@@ -162,6 +206,16 @@ def sql_conditions(sql: str) -> list[Condition]:
     except Exception:  # pylint: disable=broad-except
         return []
     out = []
+    def inner_computed(node: Any) -> set[str]:
+        """The columns an inner query computes (ROW_NUMBER() OVER (...) AS rn in a subquery or CTE), as the
+        enclosing query sees them: a rank, not a data value. A field of the same name in the query that computes
+        the alias is the field (COUNT(*) FILTER (WHERE "EXPRESS" = true) AS express)."""
+        sel = node.find_ancestor(exp.Select)
+        if sel is None:
+            return set()
+        return {a.alias.lower() for a in sel.find_all(exp.Alias)
+                if a.alias and not isinstance(a.this, exp.Column) and a.find_ancestor(exp.Select) is not sel}
+
     pairs = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.Like, exp.ILike)
     for node in tree.find_all(*pairs, exp.In, exp.Between):
         negated = isinstance(node.parent, exp.Not)
@@ -182,6 +236,8 @@ def sql_conditions(sql: str) -> list[Condition]:
             continue
         if isinstance(target, exp.Column):
             column = target.name
+            if not target.table and column.lower() in inner_computed(node):
+                continue                                    # WHERE rn = 1 on an inner query's ROW_NUMBER()
         elif isinstance(target, exp.AggFunc):
             column = target.sql(dialect="duckdb")
         else:
@@ -211,8 +267,16 @@ def _value_said(value: Any, column: str, support: Support) -> bool:
 
     if isinstance(value, float) and value == 0.0:
         return True                                     # > 0, <> 0: not a choice of the data
+    if isinstance(value, float) and value == 1.0 and "(" in column and any(abs(n - 1.0) <= 1e-9 for n in support.numbers):
+        return True                                     # COUNT(*) > 1 for "more than one order": a count, not a flag
     if isinstance(value, bool) or (isinstance(value, float) and value == 1.0):
-        return bool(set(name_tokens(column)) & support.words)   # a flag (RELAUNCHED = true): its field said
+        tokens = set(name_tokens(column))                  # a flag (RELAUNCHED = true): its field said
+        if tokens & support.words:
+            return True
+        families = [v | {k} for k, v in VALUE_WORDS.items() if tokens & (v | {k}) or
+                    any(stem(t) in v or stem(t) == k for t in tokens)]
+        return any(w in fam or any(len(f) >= 5 and w.startswith(f) for f in fam)
+                   for fam in families for w in support.words)          # "relancée": the relaunch family
     if isinstance(value, float):
         if value.is_integer() and 19000101 <= value <= 21001231:
             return True                                 # 20260923: a date (the period check)

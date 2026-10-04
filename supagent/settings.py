@@ -113,9 +113,32 @@ SPECS: list[Spec] = [
          "investigation and each finding of compare_groups, the results of its tools attached to them, the plan given "
          "back when the conversation is shortened, the tasks left and the findings not explained sent back once "
          "before the answer, the plan shown in the answer's steps; \"continue\" takes up its open tasks"),
+    Spec("agent.ledger_investigations", True, "bool", "With agent.ledger: investigations get the work plan too (their "
+         "steps and each finding of the first comparison as tasks). Off: an investigation runs on its own steps and "
+         "checks, with no plan to keep (the plan's calls and its check before the answer cost an investigation time "
+         "and calls)"),
     Spec("agent.ask_unclear", True, "bool", "A question that names one thing several values match (\"the options "
          "book\" when five books are options books; \"the pricer\" on a day's data) or that starts a conversation "
          "with something never said (\"show me the late ones\") is asked back with the candidates, not guessed"),
+    Spec("agent.compact_at", 24000, "int", "Prompt tokens of an answer's conversation from which the older tool "
+         "results are cut to their first lines (then again at half as much more), the work plan given again: models "
+         "read long contexts worse well before their limit (0: only when the context is full)"),
+    Spec("agent.answer_seconds", 1500, "int", "After this long, an answer still calling tools is told to answer "
+         "now (two calls left, then its answer from what it found and its work plan's notes): on a slow or busy LLM "
+         "server an investigation ends with an answer, not a time-out. 0: no limit (the calls only)"),
+    Spec("agent.inputs_walk", True, "bool", "Investigations: when compare_groups finds the rows late before they "
+         "were ready, the inputs of the parts in its scope (two steps up the system map: what they depend on, read "
+         "from, receive data from) are given with its result"),
+    Spec("agent.inputs_logs", True, "bool", "With agent.inputs_walk: the logs of those inputs (compare_logs "
+         "called by the system on the first log table that has a field of their category, over the comparison's "
+         "window, first where the change is concentrated, then everywhere; at most three calls) are given too: a "
+         "late input often says what it waits for"),
+    Spec("agent.join_check", True, "bool", "A SUM, AVG or COUNT over a JOIN whose other table has several rows "
+         "for the key (the rows summed repeat: double counting) is sent back before it runs (one probe query per "
+         "table and key, kept 10 minutes)"),
+    Spec("agent.calendar_facts", True, "bool", "Investigations: the calendar facts of the days looked at (the "
+         "third Friday, the last business day of the month...) that the team's knowledge speaks of are given with "
+         "the question"),
     Spec("agent.definition_links", True, "bool", "When a question uses a term the glossary defines as a relation "
          "between rows (\"the refunds of those orders\") and the answer read the tables apart (no JOIN, no key IN "
          "(SELECT ...)), the answer is sent back once to link them on their key (by code, no LLM call)"),

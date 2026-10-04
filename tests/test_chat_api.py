@@ -356,6 +356,19 @@ def test_pages_follow_supersets_theme(app, monkeypatch):
     assert page.index("theme.js") < page.index("supagent.css")          # before the styles: no flash
 
 
+def test_pages_show_the_supagent_version(app):
+    """The top bar says which supagent runs (a small label next to the user)."""
+    from conftest import login
+
+    from supagent import __version__
+
+    with app.test_client() as c:
+        login(c, "alice")
+        for path in ("/supagent/", "/supagent/dictionary/"):
+            page = c.get(path).get_data(as_text=True)
+            assert f'<span class="ver" title="supagent version">supagent {__version__}</span>' in page
+
+
 def test_page_files_carry_their_content_hash(app):
     """Superset lets browsers keep static files for a year: after an upgrade, only a new URL makes
     them load the new CSS and JavaScript (a stale stylesheet gave half-dark pages)."""

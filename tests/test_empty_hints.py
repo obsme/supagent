@@ -111,3 +111,59 @@ def test_a_result_the_sqls_own_limit_cut_says_it_is_not_all(world, monkeypatch):
         whole = tools_superset.execute_sql(tools_superset.ExecuteSqlRequest(
             database_id=world["jobs"].id, sql='SELECT "ERROR", COUNT(*) FROM "jobs" GROUP BY 1'))
     assert "The SQL's own LIMIT 100 was reached" in cut["note"] and "note" not in whole
+
+
+def test_a_time_field_of_days_is_said_as_dates(world, monkeypatch):
+    """The learned range of a time field that holds days (midnight UTC shown in Paris: 02:00) is said as dates in the
+    hint, as SQL compares them (osagg 0.2.10 and later), not as 02:00 that answers copied onto their bounds."""
+    from superset.extensions import db
+
+    from supagent.knowledge import period
+    from supagent.knowledge.empty import why_empty
+    from supagent.models import KObject
+
+    monkeypatch.setattr(period, "osagg_reads_days", lambda: True)
+    idx = db.session.query(KObject).filter_by(kind="index", name="jobs").one()
+    old_idx = dict(idx.stats or {})
+    day = KObject(source_id=idx.source_id, kind="field", parent="jobs", name="RUN_DATE", data_type="date",
+                  stats={"min": "2026-09-01 02:00", "max": "2026-09-24 02:00"})
+    idx.stats = {**old_idx, "time_field": "RUN_DATE", "time_range": ["2026-09-01 02:00", "2026-09-24 02:00"]}
+    db.session.add(day)
+    db.session.commit()
+    try:
+        hint = why_empty(world["jobs"], 'SELECT COUNT(*) FROM "jobs" WHERE "RUN_DATE" >= \'2026-08-01\' AND '
+                                        '"RUN_DATE" < \'2026-08-15\'')
+        assert "jobs has data from 2026-09-01 only" in hint and "02:00" not in hint
+    finally:
+        idx.stats = old_idx
+        db.session.delete(day)
+        db.session.commit()
+
+
+def test_a_day_before_the_data_on_another_date_field_says_so(world, monkeypatch):
+    """"What was our revenue on 15 August?" (the orders start on 27 August): SUM = 0 on ORDER_DATE = '...-08-15',
+    and the answer said "Revenue was EUR 0": the hint looked at the index's main time field only and was dropped for
+    a sum of 0. Another date field's learned range counts too, and a sum of 0 before the data says so."""
+    from superset.extensions import db
+
+    from supagent.knowledge import period
+    from supagent.knowledge.empty import why_empty
+    from supagent.models import KObject
+
+    monkeypatch.setattr(period, "osagg_reads_days", lambda: True)
+    idx = db.session.query(KObject).filter_by(kind="index", name="jobs").one()
+    day = KObject(source_id=idx.source_id, kind="field", parent="jobs", name="RUN_DATE", data_type="date",
+                  stats={"min": "2026-09-01 02:00", "max": "2026-09-24 02:00"})
+    db.session.add(day)
+    db.session.commit()
+    try:
+        sql = 'SELECT SUM("COST") FROM "jobs" WHERE "RUN_DATE" = \'2026-08-15\''
+        empty = why_empty(world["jobs"], sql)
+        assert "jobs has data (RUN_DATE) from 2026-09-01 only" in empty
+        zero = why_empty(world["jobs"], sql, counted=True)
+        assert zero.startswith("Nothing matched (0)") and "does not cover that period" in zero
+        inside = 'SELECT SUM("COST") FROM "jobs" WHERE "RUN_DATE" = \'2026-09-15\''
+        assert why_empty(world["jobs"], inside, counted=True) == ""                         # a real 0
+    finally:
+        db.session.delete(day)
+        db.session.commit()

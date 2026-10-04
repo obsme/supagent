@@ -26,13 +26,18 @@ from supagent.llm import LLM, EmptyAnswer, LLMError, add_usage
 
 log = logging.getLogger(__name__)
 MAX_TOOL_CHARS = 8000
-TOOL_CHARS = {"describe_data": 16000}
+TOOL_CHARS = {"describe_data": 16000, "compare_groups": 12000}   # (a comparison is an investigation's evidence:
+#                                   its findings, its stages, the rows outside the scope, with the system's notes)
 HISTORY_MESSAGES = 40      # of the chat given with a question at most (the runner gives its subject's: knowledge.topics)
 HISTORY_CHARS = 3000      # of one earlier message given with the question
 REPLY_WORDS = 25          # a reply to the agent's question back is at most this long
 MANY_PARTS = 4            # a question of this many parts (commas, "and") gets half as many calls more
 LEDGER_WORDS = 60         # a request this long gets a work plan (agent.ledger)
 INVESTIGATION_STEPS = 2   # an investigation gets this many times the calls of an answer
+FREE_PLAN_TURNS = 6       # turns whose only call is work_plan that do not count against those calls
+UPSTREAM_LOG_CALLS = 3    # compare_logs calls by code on the logs of the inputs of late rows (agent.inputs_logs)
+# compare_groups: 'on "POOL", concentrated on GRID_A (82 against 0 usually)': where the change is
+CONCENTRATED = re.compile(r'on \\?"([@\w.]+)\\?", concentrated on ([\w.\-]+(?:, [\w.\-]+)*)')
 RETRY_TOKENS = 2048       # tokens of the step after an unreadable tool call, at least
 FRAGMENT_WORDS = 8        # "The failed jobs.", "Only PROD.": completes the previous question
 FRAGMENT = re.compile(r"^\s*(?:and|et|or|ou|only|just|but|mais|the|le|la|les|for|pour|in|on|with|without|avec|"
@@ -201,7 +206,8 @@ Investigations ("why is ... late, slow, failing", "what happened", "find the cau
    application, the alerts of those servers); what it depends on, runs on, reads or calls in the system picture
    (system_links for any part) and the health of those servers or services in that window (check_health with
    entities = their names) and their logs (compare_logs: what they say that they do not usually); the changes
-   recorded before it started; what the team wrote of such a day (memory, documents, notes: a month end). A level is a finding only against its usual:
+   recorded before it started (records_about with the parts you blame, not only the applications asked); what
+   the team wrote of such a day (memory, documents, notes: a month end). A level is a finding only against its usual:
    promql_query says whether each series is "as on the previous days" (a pool that is full every night, a queue
    as long as every night are not what changed), check_health marks the breaches that happen on most days.
 4) Check a cause before naming it: it must concern the same rows (those servers, that step, that application)
@@ -294,8 +300,8 @@ TOOLS_OF = {
     "status": {"get_chart_data", "get_chart_info", "list_charts", "list_dashboards", "get_dashboard_info",
                "chart_image", "compare_to_usual", "chart_anomalies", "compare_groups", "compare_logs", "system_links"},
     "investigation": {"compare_to_usual", "chart_anomalies", "search_notes", "compare_groups", "compare_logs",
-                      "system_links"},
-    "system": {"system_links"},
+                      "system_links", "records_about"},
+    "system": {"system_links", "records_about"},
     "history": {"search_my_chats"},
     "notes": {"search_notes", "read_note", "add_note", "change_note", "delete_note"},
 }
@@ -322,7 +328,13 @@ REFERS_BACK = re.compile(
     r"\bthis\b(?!\s+(week|month|year|morning|afternoon|evening|night|quarter)\b)|"
     r"\b(cela|ça|celui|celle|ceux|m[êe]mes?|pr[ée]c[ée]dente?s?|ci-dessus|r[ée]sultats?|trouvailles?)\b|"
     r"\b(cet|cette|ces)\b(?!\s+(semaine|ann[ée]e|matin|nuit|apr[èe]s-midi)\b)|"
-    r"\bce\s+(graphique|chiffre|r[ée]sultat|tableau|calcul|constat)", re.I)
+    r"\bce\s+(graphique|chiffre|r[ée]sultat|tableau|calcul|constat)|"
+    # "the ratio of the first to the second", "the former", "both of them": earlier answers by their place (a probe
+    # question was routed to a new subject and computed a temperature over a latency)
+    r"\bthe (?:first|second)(?: one)? (?:to|and|vs\.?|versus|over|divided by|compared (?:to|with)|minus) the "
+    r"(?:first|second|other)\b|\bthe (?:former|latter)\b|\b(?:both|the two) (?:of them|figures|values|numbers|"
+    r"results|answers)\b|\b(?:le|du|au) premier\b[^?.]{0,20}\b(?:au|et|sur|par rapport au|du) (?:le )?second\b|"
+    r"\bles deux (?:chiffres|valeurs|r[ée]sultats|nombres)\b|\b(?:ce dernier|cette derni[èe]re)\b", re.I)
 
 
 # "What was its failure rate?", "And their notional?", "Quel est son taux ?": a possessive with nothing before it that
@@ -648,8 +660,12 @@ class ChartGuard:
                 errors += self._period_missing(ds, config)
             if not errors and name == "generate_chart" and req.get("save_chart") and \
                     not str(req.get("chart_name") or "").strip():
-                errors.append("a saved chart needs a chart_name that says what it shows and its period (Superset's "
-                              "automatic names repeat: \"Sum(x) by y\" for two different charts)")
+                named = name_asked(getattr(self.agent, "question", "") or "")
+                if named:                              # "save it as 'X'": the name the user gave (a model that left
+                    req["chart_name"] = named          # it out sent the same call again and again)
+                else:
+                    errors.append("a saved chart needs a chart_name that says what it shows and its period (Superset's "
+                                  "automatic names repeat: \"Sum(x) by y\" for two different charts)")
             if errors and "create_virtual_dataset" in self.agent.names and any(
                     k in e for e in errors for k in ("unknown column", "is not a saved metric", "cannot run")):
                 errors.append("a calculation (a percentage, a ratio, PromQL) is not a field of this dataset: save "
@@ -851,6 +867,17 @@ def trim_tables(answer: str, keep: int = 10) -> str:
     return "\n".join(out)
 
 
+NAME_ASKED = re.compile(r"\b(?:save[ds]? (?:it|this|the chart)? ?as|name[ds]? (?:it)?|call(?:ed)?(?: it)?|"
+                        r"titled?|entitled|sous le nom|nomm[ée]e?|appel[ée]e?|intitul[ée]e?)\s*[\"'«“‘]\s*([^\"'»”’\n]{3,120}?)"
+                        r"\s*[\"'»”’]", re.I)
+
+
+def name_asked(question: str) -> str | None:
+    """The name a request gives what it saves ("... and save it as 'Late parcels per carrier'")."""
+    m = NAME_ASKED.search(question or "")
+    return m.group(1).strip() if m else None
+
+
 SAVED_CHART_ASK = re.compile(
     r"\bsuperset\b[^.?!\n]{0,40}\b(chart|graph|dashboard)|\b(create|save|make|build|add)\b[^.?!\n]{0,60}"
     r"\b(chart|dashboard)\b[^.?!\n]{0,40}\b(named|called|titled|in superset|(on|to|in) (a|the|my) dashboard)|"
@@ -859,9 +886,13 @@ CHART_CLAIM = re.compile(r"\b(chart|graph)\b[^.\n]{0,40}\b(has been|was|is)\s+(c
                          r"\bgraphique\b[^.\n]{0,40}\b(a [ée]t[ée]|est)\s+(cr[ée][ée]|enregistr[ée])", re.I)
 # "The chart has been updated to a pie chart", "I changed the chart to a table", "le graphique a été modifié"
 CHART_CHANGE_CLAIM = re.compile(r"\b(chart|graph)\b[^.\n]{0,60}\b(has been|was|is now|now)\s+(updated|changed|converted|"
-                                r"switched|turned|modified|made)\b|\bI(?:'ve| have)?\s+(updated|changed|converted|switched|"
-                                r"turned|modified|made)\s+(the|your|it|this)\b[^.\n]{0,40}\b(chart|graph|into|to)\b|"
-                                r"\bgraphique\b[^.\n]{0,60}\b(a [ée]t[ée]|est)\s+(modifi[ée]|transform[ée]|chang[ée])", re.I)
+                                r"switched|turned|modified|made|renamed|retitled)\b|\bI(?:'ve| have)?\s+(updated|changed|"
+                                r"converted|switched|turned|modified|made|renamed|retitled)\s+(the|your|it|this)\b[^.\n]{0,40}"
+                                r"\b(chart|graph|into|to)\b|"
+                                r"\bgraphique\b[^.\n]{0,60}\b(a [ée]t[ée]|est)\s+(modifi[ée]|transform[ée]|chang[ée]|renomm[ée])|"
+                                r"\b(chart|graph)\b[^.\n]{0,40}\bis now (?:shown as |displayed as )?an?\b|"   # "is now a pie chart"
+                                r"\bgraphique\b[^.\n]{0,40}\best (?:maintenant|d[ée]sormais) une?\b",
+                                re.I)
 PREVIEW_ASK = re.compile(r"\b(preview|aper[çc]u|without saving|sans (?:l')?enregistrer|do not save|don't save|not save it|"
                          r"just show|show me how it would look|ne l'enregistre pas)\b", re.I)
 
@@ -927,13 +958,33 @@ CARRY_NUDGE = ("(Check before answering: this message goes on from the previous 
                "the user removes them: run the queries again with them. If the user asks a new question, answer it "
                "and say in one line that {them} no longer {apply}. Write the whole answer for the user as if for the "
                "first time: they see neither the one above nor this check.)")
+CARRY_HALF_NUDGE = ("(Check before answering: the queries of this answer keep the previous question's period, which "
+                    "this message does not say, so they take it as going on from the previous question; that answer "
+                    "counted with {conds} too, and these queries drop {them}. If the message goes on from it, run the "
+                    "queries again with {them}; if it is a question of its own, say in one line which period and "
+                    "scope you used. Write the whole answer for the user as if for the first time: they see neither "
+                    "the one above nor this check.)")
 CARRY_NOTE = "\n\n(Check: the previous question counted with {conds}; this answer does not.)"
 NAMED_NUDGE = ("(Check before answering: the question names {value} ({field} of {table}), and no query of this "
                "answer has a condition with it nor is per {field}: the figures above count every {field}. Run the "
                "query again with {field} = '{value}', or, if the question means something else, say so in one line. "
                "Write the whole answer for the user as if for the first time: they see neither the one above nor "
                "this check.)")
+NAMED_OUT_NUDGE = ("(Check before answering: the question leaves out {value} ({field} of {table}), and no query of "
+                   "this answer has a condition on {field}: the figures above count {value} too. Run the query again "
+                   "with {field} <> '{value}', or, if the question means something else, say so in one line. Write "
+                   "the whole answer for the user as if for the first time: they see neither the one above nor this "
+                   "check.)")
 NAMED_NOTE = "\n\n(Check: the question names {value} ({field}); no query of this answer filters on it.)"
+FUTURE_NUDGE = ("(Check before answering: the question asks about a period that has not happened yet (from {start}), "
+                "and the figures of this answer are past ones. The data cannot tell the future: say so first, in one "
+                "line; then, if useful, give the past figures as a reference and say which period they are. Write the "
+                "whole answer for the user as if for the first time: they see neither the one above nor this check.)")
+FUTURE_NOTE = "\n\n(Check: the question asks about the future; the figures above are past ones, not a forecast.)"
+NEEDLESS_ASK_NUDGE = ("(Check before answering: the question names {value}, a value of {field} in {table}; of the data "
+                      "you offer, only that one holds it, so there is nothing to choose. Answer the question from "
+                      "{table}, with its queries; ask back only about what the question leaves open. Write the whole "
+                      "answer for the user as if for the first time: they see neither the one above nor this check.)")
 NOTE_CLAIM_NUDGE = ("(Check before answering: your answer says a note was {what}, and no {tool} call did it in this "
                     "answer. Call {tool} now ({how}), or tell the user it was not done. Write the whole answer for "
                     "the user as if for the first time: they see neither the one above nor this check.)")
@@ -970,6 +1021,26 @@ def note_claim(answer: str, trace: list[dict]) -> tuple[str, str] | None:
                 if not any(_note_done(trace, tool, key) for tool, key in calls):
                     return word.lower(), calls[0][0]
                 break
+    return None
+
+
+ACTION_NUDGE = ("(Check before answering: your answer says that {what}, but no tool did it in this answer. Do it "
+                "now ({tool}), then answer from what the tool returns. Write the whole answer for the user as if for "
+                "the first time: they see neither the one above nor this check.)")
+
+
+def action_claim(answer: str, trace: list[dict]) -> tuple[str, str] | None:
+    """An action the answer says was done (a chart saved or changed, a dashboard made or changed, a query saved)
+    that no tool of this answer did: (what, the tool that does it)."""
+    if CHART_CLAIM.search(answer or "") and not saved_chart(trace):
+        return "a chart was saved", "generate_chart with save_chart true and its chart_name"
+    if CHART_CHANGE_CLAIM.search(answer or "") and not changed_chart(trace):
+        return "the chart was changed", "update_chart with generate_preview false"
+    if DASHBOARD_CLAIM.search(answer or "") and not saved_dashboard(trace):
+        return "a dashboard was made or changed", "generate_dashboard, or add_chart_to_existing_dashboard"
+    if SQLLAB_CLAIM.search(answer or "") and not any((t.get("called") or t["tool"]) == "save_sql_query" and
+                                                     t.get("status") == "done" for t in trace):
+        return "the query was saved in SQL Lab", "save_sql_query"
     return None
 
 
@@ -1068,6 +1139,61 @@ NOTHING_WRONG = re.compile(r"\bnothing (?:is )?(?:unusual|abnormal|wrong)\b|\bno
                            r"(?:delay|slowdown|problem|incident)\b|\bas (?:usual|expected|every (?:month|week))\b|"
                            r"\b(?:is|are|looks?) normal\b|\bon time\b|\bdocumented\b|\bexpected (?:effect|monthly|every)\b|"
                            r"\brien d'anormal\b|\bcomme d'habitude\b|\battendu\b", re.I)
+STAGE_NUDGE = ("(Check before answering: compare_groups says {stage} is the first stage that is off: the rows were late "
+               "before they could run, so they waited for their inputs (what feeds them, what runs before them), not for a "
+               "slot or a queue: a pool cannot hold rows that are not ready, and a wait for capacity shows as rows ready "
+               "but not started. Follow their inputs: which feed or upstream job was late, by how much, and the record "
+               "behind it (system_links of those jobs, the feeds' and upstream jobs' own times and alerts). If those "
+               "inputs did wait for this pool themselves, say so with the figure that shows it. Then write the whole "
+               "answer for the user as if for the first time: they see neither the one above nor this check.)")
+# capacity named as the cause: in a sentence that says cause, not one that says it was as usual
+CAPACITY_WORDS = re.compile(r"\b(slots?|congest\w*|queue backlog|file d'attente|"     # a pool's, not a cache's
+                            r"(?:pool|grid|queue|file)\b[^.\n]{0,40}\b(?:satur\w*|full|plein\w*|capacit\w*)|"
+                            r"(?:satur\w*|capacit\w*)\b[^.\n]{0,40}\b(?:pool|grid|queue|slots?))\b", re.I)
+CAUSE_WORDS = re.compile(r"\b(caus\w*|because|due to|explains?|expliqu\w*|origin\w*|à cause|dû|car|raison|"
+                         r"responsable|driv\w+|led to|leads? to|resulting|result\w* from|stems? from|comes? from|"
+                         r"provoqu\w*|entra[iî]n(?:e|ent|é|ée|és|ées|ait|aient)|vient de|li[ée]e?s? à|parce)\b", re.I)
+# the capacity said as an effect, or said not to be the cause: no blame
+CAPACITY_EFFECT = re.compile(r"\b(not the (?:main |primary |root |real )?cause|pas (?:la|une) cause|consequences?|"
+                             r"conséquences?|symptoms?|symptômes?|a result of|the result of|le résultat|effects? of|effets?)\b",
+                             re.I)
+# said as usual, or denied, near the capacity words (not a negation of another clause: "the jobs do not start
+# because the pool is full" blames the pool)
+AS_USUAL_WORDS = re.compile(r"\b(fine|normal\w*|usual\w*|as usual|ok|free|available|libres?|disponibles?|"
+                            r"habituel\w*|comme d'habitude|comme chaque)\b", re.I)
+CAPACITY_DENIED = re.compile(r"\b(no|not|never|nor|n'|pas|aucun\w*|ni|sans|without|rather than|plutôt que)\b"
+                             r"(?:(?!\b(?:car|because|since|parce|puisque|due|dû|as)\b)[^.\n,;:]){0,30}$", re.I)
+
+
+LOGS_LEAD = re.compile(r'say that they do not usually[^:]*\):[^"]*?\(1\) "([^"]{5,200})"')
+
+
+def logs_lead(note: str) -> tuple[str, list[str]] | None:
+    """The first new pattern of the inputs' logs note ("(1) \"<name> still waiting for its inputs after # min:
+    <name>\" ..."), as (a short title, the words an answer that explains or rules it out would say), or None."""
+    m = LOGS_LEAD.search(note or "")
+    if not m:
+        return None
+    pattern = m.group(1)
+    words = [w for w in re.findall(r"[A-Za-z][\w.]{4,}", pattern) if w.lower() not in ("<name>", "name")]
+    return f'"{pattern[:120]}" (new)', list(dict.fromkeys(words))[:6]
+
+
+def capacity_blamed(answer: str) -> bool:
+    """A sentence of the answer that names capacity (a full pool, slots, a queue) as a cause: not said as usual near
+    it, not denied right before it."""
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", answer or ""):
+        m = CAPACITY_WORDS.search(sentence)
+        if not m or not CAUSE_WORDS.search(sentence) or CAPACITY_EFFECT.search(sentence):
+            continue
+        before, around = sentence[max(0, m.start() - 40):m.start()], sentence[max(0, m.start() - 50):m.end() + 50]
+        if CAPACITY_DENIED.search(before) or AS_USUAL_WORDS.search(around) or \
+                re.search(r"\b(?:not|no|never|n'|pas|jamais|aucun\w*)\b", m.group(0), re.I):   # "the pool was not full"
+            continue
+        return True
+    return False
+
+
 LEDGER_NUDGE = ("(Check before answering: your work plan is not finished: {gaps}. Do what is left now (a call each), "
                 "or mark it dropped with work_plan and say why in the answer; the answer covers every task and explains "
                 "or rules out each finding. Write the whole answer for the user as if for the first time: they see neither "
@@ -1084,12 +1210,14 @@ CONTEXT_FULL = re.compile(r"exceeds? the available context|exceed_context_size|c
                           r"(?:exceeded|is exceeded)|maximum context length|too many tokens|prompt is too long", re.I)
 SHRUNK = (1500, 500)       # chars kept of the older tool results when the context is full, then again
 KEPT_WHOLE = 3             # the latest tool results kept whole the first time
+COMPACT_KEPT = 4           # the latest tool results kept whole when a long conversation is shortened early
 CONTEXT_FULL_NUDGE = ("(The conversation became longer than the model can read: the older results above were "
                       "shortened. Make no more calls unless one is essential; write the answer for the user now from "
                       "the results above, and say what could not be checked.)")
 UNREADABLE_CALL = ("(Your last reply could not be read: the arguments of its tool call were not valid JSON (too long, "
                    "or cut). Call the tool again with short arguments: a chart config names columns and aggregates, "
                    "never the data rows. Or write the answer with what you have.)")
+TIME_UP = "(The time for this answer is up.) "
 LAST_CALLS = ("(Two tool calls are left for this answer: write the answer for the user now from the results above "
               "(what they show, what is known and what is not); call a tool only if the answer cannot be written "
               "without it.)")
@@ -1259,6 +1387,47 @@ def unsupported_answer(answer: str, trace: list[dict], question: str = "") -> st
 
 EMPTY_RICH = "(The model wrote no text for this answer, even when asked again: the result of its last query is below.)"
 EMPTY_PLAIN = "(The model wrote no text for this answer, even when asked again: here is the result of its last query.)"
+ECHO_NUDGE = ("(Check before answering: your answer gives the previous answer again, word for word, but the "
+              "question is a new one: \"{question}\". Answer this question, from the tools (a query for any number "
+              "or name it asks for). Write the answer for the user as if for the first time: they see neither the one "
+              "above nor this check.)")
+AGAIN = re.compile(r"\b(again|repeat|once more|same answer|summar\w*|recap\w*|encore|répète|redis|rappelle|"
+                   r"résum\w*)\b", re.I)
+
+
+UNIT_ASKED = re.compile(r"\b(?:in|en)\s+(minutes?|seconds?|secondes?|hours?|heures?|days?|jours?|milliseconds?|"
+                        r"millisecondes?|ms|GiB|GB|Go|MiB|MB|Mo|TB|percent|pourcentage|%|EUR|euros?|USD|dollars?)(?!\w)",
+                        re.I)
+
+
+POSSESSIVE_FOLLOW_UP = re.compile(r"^\s*(?:and\s+|et\s+)?(?:its|their|son|sa|ses|leur|leurs)\b", re.I)
+NOT_SAME_KIND = re.compile(r"\b(how many|combien|which|who|quel(?:le)?s?|qui|unrelated|back to|something else|"
+                           r"another question|different|revenons|autre question|retour)\b", re.I)
+
+
+def unit_carried(question: str, history: list[dict] | None) -> str | None:
+    """The unit the previous question asked its figure in ("..., in minutes?"), when this one is a short follow-up
+    that says none ("And the longest one?"): the answer keeps it."""
+    if UNIT_ASKED.search(question or "") or len((question or "").split()) > 12 or NOT_SAME_KIND.search(question or ""):
+        return None                                    # a unit said, a new question, a count, another subject
+    before = next((str(h.get("content") or "") for h in reversed(history or []) if h.get("role") == "user"), "")
+    m = UNIT_ASKED.search(before)
+    return m.group(1) if m else None
+
+
+def echoes(answer: str, previous: str) -> bool:
+    """The answer is the previous answer given again (its first 300 characters, the check marks left out)."""
+    def norm(text: str) -> str:
+        text = re.sub(r"\(Check:[^)]*\)", " ", text or "")
+        return " ".join(text.lower().split())
+
+    a, b = norm(answer), norm(previous)
+    if len(b) < 120 or len(a) < 120:
+        return False
+    head = b[:300]
+    return a.startswith(head) or (head in a and len(a) <= len(b) * 1.3)
+
+
 UNSUPPORTED_NOTE = ("\n\n(Check: no query ran in this answer: numbers or rows shown here do not come from the "
                     "data. Ask again to have them read from the data.)")
 
@@ -1805,8 +1974,17 @@ class Agent:
             except Exception:  # pylint: disable=broad-except   (no dictionary: as before)
                 log.debug("supagent: new values of a follow-up not read", exc_info=True)
             adds = bool(self.new_values)
+        self.new_fields: list[str] = []
+        if before and self.prev_queries:                # "Which error code came up most often?": a field the
+            try:                                        # previous queries never read: the chat cannot hold it
+                from supagent.knowledge.carry import new_fields
+
+                self.new_fields = new_fields(question, self.prev_queries)
+            except Exception:  # pylint: disable=broad-except   (no dictionary: as before)
+                log.debug("supagent: new fields of a follow-up not read", exc_info=True)
         completes = bool(before) and bool(said) and not answered and not adds and \
-            len(question.split()) <= FRAGMENT_WORDS and bool(FRAGMENT.match(question or ""))
+            len(question.split()) <= FRAGMENT_WORDS and bool(FRAGMENT.match(question or "")) and \
+            not POSSESSIVE_FOLLOW_UP.search(question or "")   # "And its average latency?" asks a new measure
         # "And on the 23rd?", "And yesterday?": the previous question again, for another day (its own query)
         another_day = bool(before) and adds and len(question.split()) <= FRAGMENT_WORDS and \
             bool(FRAGMENT.match(question or ""))
@@ -1870,12 +2048,30 @@ class Agent:
 
             note = ROUTE_NOTES.get(self.moa.route, "")
             blocks = f"{blocks}\n\n{note}" if blocks and note else (note or blocks)
+        if settings.get("agent.calendar_facts") and self._investigating(question):
+            try:                                        # the third Friday, the month end: what the team wrote of it
+                from supagent.knowledge.calendar_facts import documented, note as calendar_note
+
+                cal = documented(self.intent_text, now().date())
+                if cal:
+                    blocks = f"{blocks}\n\n{calendar_note(cal)}" if blocks else calendar_note(cal)
+            except Exception:  # pylint: disable=broad-except   (a note, never a lost question)
+                log.debug("supagent: the calendar facts not read", exc_info=True)
         asked = question
         if answered:                                    # the question, then the reply that settles it
             back = next((ln.strip() for ln in reversed(said.strip().splitlines()) if ln.strip()), "")[:400]
             asked = f"{before}\n(You asked: \"{back}\" My reply: {question}) Answer my question with this reading."
         elif completes:                                 # the question, then what the user adds to it
             asked = f"{before}\n(About your answer above: {question}) Answer my question again with this."
+        if history and not (answered or completes) and POSSESSIVE_FOLLOW_UP.search(question or "") and \
+                len((question or "").split()) <= 10:      # "And its average latency?" after the top error code
+            asked += ("\n(\"its\"/\"their\" here may stand for the subject of this conversation or for what the "
+                      "answer before named last: when both readings are possible, give the figure for both, each "
+                      "said as such.)")
+        unit = unit_carried(question, history)
+        if unit and not (answered or completes):        # "in minutes?" then "And the longest one?": in minutes
+            asked += (f"\n(The question before asked for its figure in {unit}: give this one in {unit} too, if it is "
+                      "of the same kind.)")
         self.unclear = self._ask_first(question, history) if not (answered or completes) else None
         if self.unclear:                                # one thing named, several match; nothing to refer to
             from supagent.knowledge.ambiguity import note as ask_note
@@ -1931,7 +2127,7 @@ class Agent:
         asked_at = self._asked_at = len(messages)      # what the LLM was given, before its own words
         trace: list[dict] = []
         nudged = announced = numbers_asked = rules_asked = count_asked = looped = limit_asked = notes_asked = False
-        named_asked = carry_asked = tie_asked = False
+        named_asked = carry_asked = tie_asked = echoed = action_asked = future_asked = source_asked = False
         about_notes = notes_request(getattr(self, "intent_text", None) or question)
         done: set[str] = set()                         # identical successful calls: not run twice
         saved_calls: set[str] = set()                   # identical saving calls: not run again either
@@ -1946,7 +2142,9 @@ class Agent:
         elif not building and len(re.findall(r",|;|\band\b|\bet\b", question or "")) >= MANY_PARTS:
             steps = int(steps * 1.5)                   # a report of many figures: more calls
         unreadable = full = 0
-        forced = force_tool = ledger_asked = unclear_asked = grain_asked = definition_asked = False   # (each: once)
+        forced = force_tool = ledger_asked = unclear_asked = grain_asked = definition_asked = stage_asked = False
+        self.waiting_stage = None                      # the first stage off before the rows run (compare_groups)
+        self.concentrated, self.scope_hinted = [], False   # where its change is; the logs scope said once
         self.ledger = self._new_ledger(question, history, building)
         if self.ledger is not None:                   # a big request: its tasks, notes and results kept by the system
             from supagent.ledger import RULES, SPEC
@@ -1957,10 +2155,25 @@ class Agent:
             text = messages[-1]["content"]
             at = text.rfind("(Now: ")
             messages[-1]["content"] = (text[:at] + plan + "\n\n" + text[at:]) if at >= 0 else f"{plan}\n\n{text}"
-        for i in range(steps):
+        i, plan_turns, compacted, last_said, timed_out = -1, 0, 0, False, False
+        budget, began = int(settings.get("agent.answer_seconds") or 0), time.time()
+        while i + 1 < steps:                           # (a while: a turn that only kept the plan adds one)
+            i += 1
             self._check_stop()
-            if i == steps - 2 and steps >= 4 and trace:   # the answer before the calls run out, not after
-                messages.append({"role": "user", "content": LAST_CALLS + self._plan_note()})
+            if budget and trace and not timed_out and time.time() - began > budget:
+                timed_out = True                       # the answer's time is up: this turn and one more, then it
+                steps = min(steps, i + 2)              # answers (a slow LLM server: an answer, not a time-out)
+                log.info("supagent: the answer's time is up (%d s): it answers now", budget)
+                # and no check sends it back any more (each would cost a turn): what one would send back is marked
+                # on the answer instead (the checks' second pass), and no tool call is made compulsory
+                looped = notes_asked = unclear_asked = nudged = announced = rules_asked = carry_asked = echoed = True
+                named_asked = tie_asked = numbers_asked = limit_asked = ledger_asked = stage_asked = future_asked = True
+                source_asked = True
+                grain_asked = definition_asked = count_asked = forced = action_asked = True
+            if i >= steps - 2 and steps >= 4 and trace and not last_said:   # the answer before the calls run out
+                last_said = True                       # (once: a plan-only turn there moves the end by one)
+                messages.append({"role": "user", "content": (TIME_UP if timed_out else "") + LAST_CALLS
+                                 + self._plan_note()})
             choice, force_tool = ("required" if force_tool else None), False
             try:
                 msg = self.llm.chat(messages, tools=specs, max_tokens=self._answer_tokens(short=bool(unreadable)),
@@ -2027,15 +2240,38 @@ class Agent:
                 # subject: "10,000" from an older answer is no VaR of the book asked about)
                 previous = next(([m] for m in reversed(messages[:asked_at]) if m.get("role") == "assistant"
                                  and m.get("content")), [])
+                earlier = [m["content"] for m in messages[:asked_at] if m.get("role") == "assistant"
+                           and isinstance(m.get("content"), str)][-3:]
+                one = None if source_asked or trace or not asks_back(answer) else self._needless_ask(question, answer)
+                if one:                                # once: "which of these sources?" when the value is in one
+                    source_asked = True
+                    if not forced and settings.get("agent.force_tool"):
+                        forced = force_tool = True     # the next step runs a query
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (a question back about sources; %s is in %s only)", one[0], one[2])
+                    messages.append({"role": "user", "content": NEEDLESS_ASK_NUDGE.format(value=one[0], field=one[1],
+                                                                                          table=one[2])})
+                    continue
+                if earlier and not echoed and not trace and any(echoes(answer, e) for e in earlier) and \
+                        not AGAIN.search(question or ""):   # once: an earlier answer given again for a new question
+                    echoed = nudged = True
+                    if not forced and settings.get("agent.force_tool"):
+                        forced = force_tool = True     # the next step runs a query
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (the previous answer given again)")
+                    messages.append({"role": "user", "content": ECHO_NUDGE.format(question=(question or "")[:300])})
+                    continue
                 if nudge in (NO_TOOL_NUDGE, NO_QUERY_NUDGE) and self.follow_up and \
+                        not getattr(self, "new_fields", None) and \
                         settings.get("agent.check_numbers") and previous and not self._ungrounded(answer, previous) \
                         and not self._invented(answer, previous + [{"role": "user", "content": question}]):
                     nudge = None                       # (never a "no such field" or a query written, not run, nor
                     #                                    names or times the previous answer does not hold)
                 if nudge:                              # once: an answer from the tools, not from the summary
                     nudged = True
-                    if (nudge == WRITTEN_SQL_NUDGE or (nudge == NO_TOOL_NUDGE and self.asks_new)) and not forced \
-                            and settings.get("agent.force_tool"):
+                    if (nudge == WRITTEN_SQL_NUDGE or (nudge in (NO_TOOL_NUDGE, NO_QUERY_NUDGE) and
+                                                         (self.asks_new or getattr(self, "new_fields", None)))) \
+                            and not forced and settings.get("agent.force_tool"):
                         forced = force_tool = True     # a query written, not run, or a follow-up that asks for
                         #                                another day, value or period: the next step runs one
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
@@ -2061,8 +2297,10 @@ class Agent:
                     carry_asked = True
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
                     said = ", ".join(c.said() for c in lost[:4])
-                    log.info("supagent: answer sent back (previous conditions dropped: %s)", said)
-                    messages.append({"role": "user", "content": CARRY_NUDGE.format(
+                    half = getattr(self, "half_carried", False)
+                    log.info("supagent: answer sent back (previous conditions dropped%s: %s)",
+                             ", the period kept" if half else "", said)
+                    messages.append({"role": "user", "content": (CARRY_HALF_NUDGE if half else CARRY_NUDGE).format(
                         conds=said, them="them" if len(lost) > 1 else "it",
                         apply="apply" if len(lost) > 1 else "applies")})
                     continue
@@ -2071,8 +2309,17 @@ class Agent:
                     named_asked = True
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
                     log.info("supagent: answer sent back (a named value not in the queries: %s)", gap)
-                    messages.append({"role": "user", "content": NAMED_NUDGE.format(value=gap[0], field=gap[1],
-                                                                                   table=gap[2])})
+                    from supagent.knowledge.named import left_out
+
+                    nudge = NAMED_OUT_NUDGE if left_out(question, gap[0]) else NAMED_NUDGE
+                    messages.append({"role": "user", "content": nudge.format(value=gap[0], field=gap[1], table=gap[2])})
+                    continue
+                ahead = None if future_asked else self._future(question, answer, trace)
+                if ahead:                              # once: next week answered with last week, silently
+                    future_asked = True
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (the future answered with past figures, not said)")
+                    messages.append({"role": "user", "content": FUTURE_NUDGE.format(start=ahead)})
                     continue
                 loose = None if tie_asked else self._untied(question, answer, trace)
                 if loose:                              # once: a cause that nothing ties to the question's parts
@@ -2103,6 +2350,16 @@ class Agent:
                     log.info("supagent: answer sent back (names or times no tool gave): %s", invented)
                     messages.append({"role": "user", "content": INVENTED_NUDGE.format(names=", ".join(invented[:8]))})
                     continue
+                claimed_action = None if action_asked or asks_back(answer) else action_claim(answer, trace)
+                if claimed_action:                     # once: "added to the dashboard" with no such call: do it
+                    action_asked = True
+                    if not forced and settings.get("agent.force_tool"):
+                        forced = force_tool = True
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (an action claimed, not done: %s)", claimed_action[0])
+                    messages.append({"role": "user", "content": ACTION_NUDGE.format(what=claimed_action[0],
+                                                                                    tool=claimed_action[1])})
+                    continue
                 read_as_count = limit_as_count(answer, trace, question)
                 if read_as_count and not limit_asked:  # once: the rows a LIMIT let through read as a count
                     limit_asked = True
@@ -2116,6 +2373,13 @@ class Agent:
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
                     log.info("supagent: answer sent back (work plan: %s)", gaps[:200])
                     messages.append({"role": "user", "content": LEDGER_NUDGE.format(gaps=gaps)})
+                    continue
+                stage = getattr(self, "waiting_stage", None)
+                if stage and not stage_asked and not asks_back(answer) and capacity_blamed(answer):
+                    stage_asked = True                 # once: a full pool blamed for rows that were not ready
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (capacity blamed, the first stage off is %s)", stage)
+                    messages.append({"role": "user", "content": STAGE_NUDGE.format(stage=stage)})
                     continue
                 bucket = None if grain_asked else self._time_from_bucket(question, answer, trace)
                 if bucket:                             # once: "at 04:00" read from hourly buckets
@@ -2172,6 +2436,8 @@ class Agent:
                 still = self._unnamed(question, trace) if named_asked else None
                 if still:                              # still not in the queries after asking: marked
                     note += NAMED_NOTE.format(value=still[0], field=still[1])
+                if future_asked and self._future(question, answer, trace):
+                    note += FUTURE_NOTE                # still past figures for the future, not said: marked
                 loose = self._untied(question, answer, trace) if tie_asked else None
                 if loose:                              # still blamed after asking: marked
                     note += TIE_NOTE.format(names=loose[0], scope=loose[1], it="them" if "," in loose[0] else "it")
@@ -2266,24 +2532,54 @@ class Agent:
                         empty = self._window_note(called, args, content)
                         if empty:                      # no sample in the default window: no absence from it
                             content += "\n" + empty
+                notes: list[str] = []                  # the system's own notes: after the result, never cut with it
+                inputs_logs = None
+                if called == "compare_groups" and step["status"] == "done" and getattr(self, "waiting_stage", None) \
+                        is None and self._investigating(question):   # (the question's own comparison: the first)
+                    from supagent.knowledge.groups import before_start
+
+                    self.waiting_stage = before_start(content)
+                    self.concentrated = CONCENTRATED.findall(content)[:3]   # where the change is: logs read there
+                    if self.waiting_stage:             # late before ready: what they wait for, from the map
+                        note = self._inputs_note(args, content)
+                        if note:
+                            notes.append(note)
+                            inputs_logs = logs_lead(note)
+                if called == "compare_logs" and step["status"] == "done" and getattr(self, "concentrated", None) \
+                        and not getattr(self, "scope_hinted", False):
+                    hint = self._logs_scope_hint(args)
+                    if hint:                           # once: the logs read everywhere, the change is in one place
+                        self.scope_hinted = True
+                        notes.append(hint)
                 if self.ledger is not None and name != "work_plan":
                     self.ledger.attach(called, content)
                     if called == "compare_groups" and step["status"] == "done" and self._investigating(question):
                         made = self.ledger.seed_findings(content)
+                        if inputs_logs:                # what the inputs' logs say that they do not usually: a lead
+                            t = self.ledger.add(f"Explain or rule out: the logs of the inputs say {inputs_logs[0]}",
+                                                by="system", keys=inputs_logs[1])
+                            made += [t] if t is not None else []
                         if made:
-                            content += ("\n(Added to your work plan: " + "; ".join(f"{t.id}. {t.title[:90]}" for t in made)
-                                        + ": explain each, or rule it out, in the answer.)")
+                            notes.append("\n(Added to your work plan: " + "; ".join(f"{t.id}. {t.title[:90]}" for t in made)
+                                         + ": explain each, or rule it out, in the answer.)")
                     from supagent.ledger import REMIND_EVERY
 
                     if self.ledger.tasks and self.ledger.calls_since_update >= REMIND_EVERY:
                         self.ledger.calls_since_update = 0
-                        content += "\n" + self.ledger.reminder()
+                        notes.append("\n" + self.ledger.reminder())
                 limit = TOOL_CHARS.get(name, MAX_TOOL_CHARS)
-                if len(content) > limit:
-                    content = content[:limit] + "\n...[truncated]"
+                room = max(limit // 2, limit - sum(len(n) for n in notes))
+                if len(content) > room:
+                    content = content[:room] + "\n...[truncated]"
+                content += "".join(notes)
                 step.update(called=called, seconds=round(time.time() - t0, 1), result=content[:4000])
                 self._report(trace)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id", name), "content": content})
+            if self.ledger is not None and plan_turns < FREE_PLAN_TURNS and not timed_out and \
+                    all(tc["function"]["name"] == "work_plan" for tc in calls[:CALLS_AT_ONCE]):
+                plan_turns += 1                        # a turn that only kept the plan: not one of the calls
+                steps += 1
+            compacted = self._compact(messages, compacted)    # long before full: the older results cut, the plan kept
         out = self._out_of_steps(messages, trace)
         self._keep_ledger(trace)
         return out, trace
@@ -2292,7 +2588,7 @@ class Agent:
         """No calls left: the LLM says, without tools, what was done (what is saved, with its links) and
         what remains, instead of an answer that only says it stopped."""
         given = self._given(messages)
-        messages.append({"role": "user", "content": OUT_OF_STEPS})
+        messages.append({"role": "user", "content": OUT_OF_STEPS + self._plan_note()})
         try:
             msg = self.llm.chat(messages, tools=None, max_tokens=self._answer_tokens())
             add_usage(self.usage, self.llm.last_usage)
@@ -2306,6 +2602,9 @@ class Agent:
         if cut is not None:
             text = text[:cut].rstrip()
         text = without_preamble(text)
+        found = self._ledger_findings() if not text or (announces_action(text) and len(text) < 800) else ""
+        if found:                                      # nothing written, or only "let me check ...": what the
+            text = found                               # work found, from its plan's notes, rather than nothing
         if not text:
             got = self._empty_fallback(trace)          # what the queries gave, rather than nothing
             if got:
@@ -2375,20 +2674,56 @@ class Agent:
         return args
 
     def _dropped(self, question: str, trace: list[dict]) -> list:
-        """The previous answer's conditions this follow-up's queries lost (knowledge.carry)."""
-        if not getattr(self, "goes_on", False) or not getattr(self, "prev_queries", None):
+        """The previous answer's conditions this follow-up's queries lost (knowledge.carry). A message the subjects
+        found on the same data with no word that refers back ("Top two products by number of trades?" after two
+        questions on one desk and day) is checked too when this answer's queries carry the previous answer's period
+        that the message does not say: they took it as going on from it, and then lost its other conditions."""
+        if not getattr(self, "prev_queries", None):
             return []
         try:
-            from supagent.knowledge.carry import dropped
+            from supagent.knowledge.carry import carries_period, dropped
             from supagent.knowledge.rulecheck import _queries
 
-            return dropped(question, self.prev_queries, _queries(trace))
+            current = _queries(trace)
+            self.half_carried = False
+            if not getattr(self, "goes_on", False):
+                from supagent.knowledge.period import has_period
+
+                if has_period(question, now().date()) or not carries_period(self.prev_queries, current):
+                    return []
+                self.half_carried = True
+            return dropped(question, self.prev_queries, current)
         except Exception:  # pylint: disable=broad-except   (never an answer lost for a check)
             from superset.extensions import db
 
             db.session.rollback()
             log.warning("supagent: the check of a follow-up's conditions failed", exc_info=True)
             return []
+
+    def _needless_ask(self, question: str, answer: str):
+        """A question back about which data to use when the value the question names is in one of them only
+        (knowledge.resolve.needless_ask): (value, field, table) or None."""
+        try:
+            from supagent.knowledge.resolve import needless_ask
+
+            return needless_ask(getattr(self, "raw_question", None) or question, answer)
+        except Exception:  # pylint: disable=broad-except   (never an answer lost for a check)
+            from superset.extensions import db
+
+            db.session.rollback()
+            log.warning("supagent: the check of a question back failed", exc_info=True)
+            return None
+
+    def _future(self, question: str, answer: str, trace: list[dict]):
+        """A question about the future answered with past figures and nothing said about it (knowledge.period)."""
+        try:
+            from supagent.knowledge.period import future_unsaid
+            from supagent.knowledge.rulecheck import _queries
+
+            return future_unsaid(getattr(self, "raw_question", None) or question, answer, _queries(trace), now().date())
+        except Exception:  # pylint: disable=broad-except   (never an answer lost for a check)
+            log.warning("supagent: the check of a question about the future failed", exc_info=True)
+            return None
 
     def _unnamed(self, question: str, trace: list[dict]) -> tuple[str, str, str] | None:
         """The first value the question names that this answer's queries never use (knowledge.named)."""
@@ -2437,14 +2772,22 @@ class Agent:
                 return delete_refusal(getattr(self, "raw_question", ""), getattr(self, "chat_history", []), args)
             reasons = [refusal(self.scope, name, args) if self.scope is not None else None,
                        period_refusal(getattr(self, "period_text", None) or question, name, args,
-                                      prior=getattr(self, "prev_queries", None)),
+                                      prior=getattr(self, "prev_queries", None),
+                                      comparing=getattr(self, "open_question", False)),
                        self._day_by_day(name, args),
                        self._counted_samples(name, args, question),
                        None if getattr(self, "open_question", False) else
                        condition_refusal(getattr(self, "support", None), name, args)]
-            from supagent.knowledge.sqllint import duplicate_refusal
+            from supagent.knowledge.sqllint import duplicate_refusal, extreme_refusal, or_and_refusal, per_day_refusal
+            from supagent.knowledge.values import refusal as value_refusal
 
             reasons.append(duplicate_refusal(name, args))      # two columns, one aggregate: a condition lost
+            reasons.append(or_and_refusal(name, args))         # a OR b AND c: c on b only
+            reasons.append(per_day_refusal(question, name, args))   # an average per day as AVG over the records
+            reasons.append(extreme_refusal(name, args))        # MAX(...) AS min_...: the other extreme
+            if not getattr(self, "open_question", False):    # an investigation looks values up: none is news
+                reasons.append(value_refusal(name, args))      # a field compared with a value it does not have
+            reasons.append(self._fanout(name, args))           # a join that repeats the rows it sums
             if name in ("generate_chart", "update_chart"):
                 req = args.get("request", args)
                 config = req.get("config") if isinstance(req, dict) else None
@@ -2527,6 +2870,143 @@ class Agent:
             return None
         return count_of_counter(database, sqls[-1], question) or rate_as_count(database, sqls[-1], question)
 
+    def _compact(self, messages: list[dict], done: int) -> int:
+        """Long before the context is full (agent.compact_at prompt tokens, then half as much again): the tool
+        results but the latest COMPACT_KEPT cut to their first characters (their conclusion comes first), once per
+        level, with the work plan given again; models read long contexts worse well before their limit. How many
+        levels are done."""
+        try:
+            at = int(settings.get("agent.compact_at") or 0)
+        except Exception:  # pylint: disable=broad-except
+            return done
+        used = int((getattr(self.llm, "last_usage", None) or {}).get("prompt_tokens") or 0)
+        if not at or done >= len(SHRUNK) or used < at * (1 + 0.5 * done):
+            return done
+        n = shortened(messages, SHRUNK[done], COMPACT_KEPT)
+        if not n:
+            return done                                # (nothing old enough to cut yet: the next turn)
+        log.info("supagent: %d older tool results shortened at %d prompt tokens", n, used)
+        messages.append({"role": "user", "content": "(The conversation was getting long: older results were cut to "
+                         "their first lines." + self._plan_note() + " Go on from there.)"})
+        return done + 1
+
+    def _inputs_note(self, args: dict, content: str = "") -> str:
+        """The inputs of the parts a comparison was scoped to (the values its scope names), two steps up the system
+        map, when its rows were late before they were ready (agent.inputs_walk)."""
+        if not settings.get("agent.inputs_walk"):
+            return ""
+        try:
+            from supagent.knowledge.brief import inputs_of
+
+            req = args.get("request") if isinstance(args.get("request"), dict) else args
+            names = re.findall(r"'([^']{2,80})'", str((req or {}).get("where") or ""))
+            found = inputs_of(names) if names else []
+            if not found:
+                return ""
+            said = "; ".join(f"{name} ({cat}), which {fed} takes in" for name, cat, fed in found)
+            return ("\n(The rows were late before they were ready: they waited for their inputs. What the system map "
+                    f"says they take in: {said}. Check whether those were late themselves (their own times against "
+                    "usual, their records) before naming a capacity or a slowness.)") + self._upstream_logs(
+                found, req, CONCENTRATED.findall(content or "")[:2])
+        except Exception:  # pylint: disable=broad-except   (a note, never a lost result)
+            log.debug("supagent: the inputs of the scope not read", exc_info=True)
+            return ""
+
+    def _logs_scope_hint(self, args: dict) -> str:
+        """compare_logs read every value of a field the first comparison found the change concentrated on (the pool
+        the rows waited on): the same lines of the other values can hide what is new there (a live answer said the
+        logs show nothing new; the same call on that pool shows a new pattern)."""
+        try:
+            from supagent.knowledge.linkfinder import log_tables
+
+            req = args.get("request") if isinstance(args.get("request"), dict) else args
+            table, where = str((req or {}).get("table") or ""), str((req or {}).get("where") or "")
+            owners = next((t.get("owners") or {} for t in log_tables() if t.get("table") == table), {})
+            for f, values in getattr(self, "concentrated", None) or []:
+                vals = [v.strip() for v in values.split(",") if v.strip()][:3]
+                if f in owners and vals and not re.search(rf'\b{re.escape(f)}\b', where):
+                    listed = ", ".join("'" + v.replace("'", "''") + "'" for v in vals)
+                    return (f"\n(The first comparison found the change concentrated on {f} = {', '.join(vals)}: this call "
+                            f"read every {f}, and the same lines of the other values can hide what is new there. Read "
+                            f"the logs again with \"{f}\" IN ({listed}) before saying what they show.)")
+        except Exception:  # pylint: disable=broad-except   (a note, never a lost result)
+            log.debug("supagent: the scope of the logs not checked", exc_info=True)
+        return ""
+
+    @staticmethod
+    def _upstream_logs(found: list[tuple[str, str, str]], req: dict, where: list[tuple[str, str]] | None = None) -> str:
+        """What the logs of those inputs say that they do not usually (compare_logs called by code on the first log
+        table with a field of their category, over the comparison's window: first where the change is concentrated,
+        `where` (the pool the rows waited on), then everywhere; agent.inputs_logs): a late input often says so
+        itself ("still waiting for its inputs: <feed>")."""
+        if not settings.get("agent.inputs_logs") or not req.get("start") or not req.get("end"):
+            return ""
+        from supagent.knowledge.linkfinder import log_tables
+        from supagent.tools import compare_logs
+
+        by_cat: dict[str, list[str]] = {}
+        for name, cat, _fed in found:
+            by_cat.setdefault(cat, []).append(name)
+        def listed(values: list[str]) -> str:
+            return ", ".join("'" + v.replace("'", "''") + "'" for v in values)
+
+        tables = sorted(log_tables(), key=lambda t: "log" not in str(t.get("table") or "").lower())  # logs first
+        quiet, calls = "", 0
+        for t in tables:
+            owners = t.get("owners") or {}
+            field, names = next(((f, by_cat[c]) for f, c in owners.items() if by_cat.get(c)), (None, None))
+            if not field:
+                continue
+            base, scoped, at = f'"{field}" IN ({listed(names[:8])})', "", []
+            on: dict[str, list[str]] = {}   # where the rows waited (their pool): the inputs' lines there first
+            for f, values in where or []:
+                if f in owners and f != field:
+                    on.setdefault(f, [])
+                    on[f] += [v.strip() for v in values.split(",") if v.strip() and v.strip() not in on[f]]
+            for f, vals in on.items():
+                scoped += f' AND "{f}" IN ({listed(vals[:3])})'
+                at += vals[:3]
+            for cond, there in ((base + scoped, at), (base, [])) if scoped else ((base, []),):
+                if calls >= UPSTREAM_LOG_CALLS:
+                    return quiet
+                calls += 1
+                res = compare_logs(table=t["table"], start=str(req["start"]), end=str(req["end"]), where=cond)
+                said = str(res.get("conclusion") or "") if isinstance(res, dict) and not res.get("error") else ""
+                # what is there every day is no lead (the "no free slot" lines of every pool would read as one)
+                said = said.split(" As every day:")[0].strip()
+                whose = f"{', '.join(names[:8])}{' on ' + ', '.join(there) if there else ''}"
+                if said and not said.startswith("Nothing new"):
+                    return (f"\n(What the logs of {whose} say that they do not usually ({t['table']}, read by the "
+                            f"system): {said[:700]})")
+                if said and not quiet:
+                    quiet = (f"\n(The logs of {whose} ({t['table']}, read by the system): nothing new over the "
+                             "window, every pattern as on the earlier days.)")
+        return quiet
+
+    @staticmethod
+    def _fanout(name: str, args: dict) -> str | None:
+        """A SUM, AVG or COUNT over a join whose other table has several rows for the key (agent.join_check)."""
+        if name != "execute_sql" or not settings.get("agent.join_check"):
+            return None
+        try:
+            from superset.extensions import db
+            from superset.models.core import Database
+
+            from supagent.knowledge.excluded import query_texts
+            from supagent.knowledge.scope import call_target
+            from supagent.knowledge.sqllint import fanout_refusal
+            from supagent.tools import repeated_keys
+
+            sqls = [q for q in query_texts(args) if q]
+            database_id, _tables = call_target(name, args)
+            database = db.session.get(Database, database_id) if database_id is not None else None
+            if not sqls or database is None or not re.search(r"\bJOIN\b", sqls[-1], re.I):
+                return None
+            return fanout_refusal(sqls[-1], lambda table, key: repeated_keys(database, table, key))
+        except Exception:  # pylint: disable=broad-except   (a check, never a lost call)
+            log.debug("supagent: the join of the query not checked", exc_info=True)
+            return None
+
     @staticmethod
     def _window_note(name: str, args: dict, content: str) -> str | None:
         """A metrics query with no period that found no sample: said with the data's range (no absence from the
@@ -2594,8 +3074,14 @@ class Agent:
             from supagent.knowledge.rulecheck import _queries
 
             # the term of this message itself ("And the gross revenue?" after the net revenue: not that term)
-            found = unlinked(getattr(self, "raw_question", None) or question, _queries(trace))
-            return (found[0]["term"], found[0]["definition"], found[1]) if found else None
+            asked = getattr(self, "raw_question", None) or question
+            found = unlinked(asked, _queries(trace))
+            if found:
+                return found[0]["term"], found[0]["definition"], found[1]
+            from supagent.knowledge.definitions import unlinked_share
+
+            share = unlinked_share(asked, _queries(trace))     # "what share of those sales was refunded?"
+            return ("the share asked", "a part of a set of rows, counted within those rows", share) if share else None
         except Exception:  # pylint: disable=broad-except   (never an answer lost for a check)
             log.warning("supagent: the relations of the definitions not checked", exc_info=True)
             return None
@@ -2660,6 +3146,8 @@ class Agent:
         if CONTINUE.match(question or "") and led.take_up((before or {}).get("ledger")):
             return led
         if self._investigating(question):
+            if not settings.get("agent.ledger_investigations"):
+                return None                            # (an investigation's own steps and checks guide it)
             led.seed_investigation()
             return led
         q = question or ""
@@ -2668,6 +3156,26 @@ class Agent:
         if parts >= MANY_PARTS or (building and charts >= 2) or len(q.split()) >= LEDGER_WORDS:
             return led
         return None
+
+    def _ledger_findings(self) -> str:
+        """The answer when the calls ran out before the model wrote one: the notes of the plan's done tasks (its own
+        lines, written while it worked, next to each task) and the tasks left, said as such."""
+        led = getattr(self, "ledger", None)
+        done = [t for t in (led.tasks if led is not None else []) if t.status == "done" and t.note]
+        if not done:
+            return ""
+        left = [t for t in led.tasks if t.status not in ("done", "dropped")]
+
+        def name(t: Any) -> str:
+            if t.by == "system" and not t.title.startswith("Explain or rule out"):
+                return t.title.split(":")[0]           # "The facts", "Where", "Why", "Deeper"
+            return t.title.split(": ", 1)[-1][:100]
+
+        lines = ["What the work found before its calls ran out (the notes of its work plan, not checked again):"]
+        lines += [f"- {name(t)}: {t.note}" for t in done]
+        if left:
+            lines.append("Not checked: " + "; ".join(name(t) for t in left[:6]) + ".")
+        return "\n".join(lines)
 
     def _plan_note(self) -> str:
         if getattr(self, "ledger", None) is None or not self.ledger.tasks:
@@ -2682,7 +3190,8 @@ class Agent:
         deeper = next((t for t in led.open() if t.by == "system" and t.title.startswith("Deeper")), None)
         if deeper is not None and not NOTHING_WRONG.search((answer or "")[:800]):
             gaps.append(f"task {deeper.id} (what changed behind the cause: a change, release, restart or maintenance "
-                        "recorded before the effect began on the part you blame, or what it waits for upstream) is open")
+                        "recorded before the effect began on the part you blame, or what it waits for upstream: "
+                        "records_about with the names of the parts you blame and when it began) is open")
         gaps += [f"finding {t.id} (on {', '.join(t.keys)}: {t.title.split(': ', 1)[-1][:90]}) is neither explained "
                  "nor ruled out" for t in led.uncovered(answer)]
         return "; ".join(gaps[:6])

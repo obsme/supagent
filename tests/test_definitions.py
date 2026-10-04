@@ -93,3 +93,23 @@ def test_a_relation_between_rows_computed_apart_is_sent_back_once(ctx, monkeypat
     assert answer.startswith("The net revenue was 3 EUR") and a.usage.get("nudges") == 1
     sent = [m["content"] for m in a.llm.seen[-1] if m["role"] == "user" and m["content"].startswith("(Check")]
     assert sent and sent[0].startswith(DEFINITION_NUDGE.split("{term}")[0]) and "of those orders" in sent[0]
+
+
+def test_a_share_of_rows_that_something_happened_to_is_counted_within_them():
+    """"Back to that week's sales: what share of the revenue was refunded?": the refunds dated in the week over the
+    week's sales (every run). A share of rows that something happened to is counted within those rows; "what share
+    of all the orders is that?" compares two counts and is left alone."""
+    from supagent.knowledge.definitions import unlinked_share
+
+    orders = ("SELECT SUM(\"AMOUNT_EUR\") FROM \"orders\" WHERE \"ORDER_TIME\" >= '2026-09-14' AND \"ORDER_TIME\" < "
+              "'2026-09-21'")
+    refunds = ("SELECT SUM(\"REFUND_EUR\") FROM \"returns\" WHERE \"RETURN_DATE\" >= '2026-09-14' AND \"RETURN_DATE\" < "
+               "'2026-09-21'")
+    keyed = ("SELECT SUM(\"REFUND_EUR\") FROM \"returns\" WHERE \"ORDER_ID\" IN (SELECT \"ORDER_ID\" FROM \"orders\" "
+             "WHERE \"ORDER_TIME\" >= '2026-09-14' AND \"ORDER_TIME\" < '2026-09-21')")
+    q = "Back to that week's sales: what share of the revenue was refunded?"
+    assert unlinked_share(q, [orders, refunds]) and "within the same rows" in unlinked_share(q, [orders, refunds])
+    assert unlinked_share(q, [orders, keyed]) is None                                  # counted within them
+    assert unlinked_share(q, [orders]) is None
+    assert unlinked_share("What share of all the orders of that day is that?", [orders, refunds]) is None
+    assert unlinked_share("Quelle part du chiffre d'affaires a été remboursée ?", [orders, refunds])

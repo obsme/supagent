@@ -34,6 +34,16 @@ BARE_DAY = re.compile(
     r"\b(?:the|on)\s+(?P<en>\d{1,2})(?:st|nd|rd|th)(?=\s*(?:[?.!,;:)]|$|(?:and|or|instead|too|also|then|please|at|"
     r"as well)\b))|\ble\s+(?P<fr>\d{1,2})(?:er)?(?=\s*(?:[?.!,;:)]|$|(?:et|ou|aussi|alors|plut[ôo]t|[àa])\b))", re.I)
 TWO_DAYS_AGO = re.compile(r"\b(?:the\s+)?day\s+before\s+yesterday\b|\bavant[- ]hier\b", re.I)
+WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6,
+            "lundi": 0, "mardi": 1, "mercredi": 2, "jeudi": 3, "vendredi": 4, "samedi": 5, "dimanche": 6}
+_WD_EN = "monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+_WD_FR = "lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche"
+# "last Monday", "this past Monday", "on Monday", "lundi dernier", "ce lundi": the most recent one before today
+# (a model counted 22 September, a Tuesday, as "last Monday" from Thursday 24). Not a bare weekday ("the expiry
+# Monday effect", "every Monday"): no day of its own.
+WEEKDAY_REF = (re.compile(rf"\b(?:last|this past|past|on)\s+({_WD_EN})\b(?!s)", re.I),
+               re.compile(rf"\b({_WD_FR})\s+(?:dernier|pass[ée])\b", re.I),
+               re.compile(rf"\bce\s+({_WD_FR})\b", re.I))
 DAY_BEFORE = re.compile(r"\b(?:the\s+)?day\s+before\b(?!\s+yesterday)|\bthe\s+previous\s+day\b|\bla\s+veille\b|"
                         r"\ble\s+jour\s+(?:d'avant|pr[ée]c[ée]dent)\b", re.I)
 DAY_AFTER = re.compile(r"\b(?:the\s+)?(?:next|following)\s+day\b|\b(?:the\s+)?day\s+after\b(?!\s+tomorrow)|"
@@ -96,6 +106,12 @@ def _explicit(text: str, today: dt.date) -> list[tuple[int, int, dt.date]]:
             pass
     for m in TWO_DAYS_AGO.finditer(text):
         found.append((m.start(), m.end(), today - dt.timedelta(days=2)))
+    for rx in WEEKDAY_REF:
+        for m in rx.finditer(text):
+            if re.search(r"\b(?:every|each|chaque|tous les)\s+$", text[max(0, m.start() - 12):m.start()], re.I):
+                continue
+            back = (today.weekday() - WEEKDAYS[m.group(1).lower()]) % 7 or 7
+            found.append((m.start(), m.end(), today - dt.timedelta(days=back)))
     low = TWO_DAYS_AGO.sub(lambda m: " " * len(m.group(0)), text.lower())
     for word, delta in RELATIVE_DAY.items():
         for m in re.finditer(rf"(?<![\w']){re.escape(word)}(?![\w'])", low):
@@ -201,7 +217,10 @@ def whole_day(question: str, today: dt.date) -> dt.date | None:
     """The one day the question is about, whole (no hours, no part of the day, no comparison; "on 17 and 18
     September" is a span of two days, not the 18th)."""
     days = days_named(question, today)
-    if len(days) != 1 or PART_OF_DAY.search(question or "") or COMPARED.search(question or "") \
+    plain = question or ""
+    for rx in WEEKDAY_REF:                              # "last Monday" is a day, not "the last hours"
+        plain = rx.sub(lambda m: " " * len(m.group(0)), plain)
+    if len(days) != 1 or PART_OF_DAY.search(plain) or COMPARED.search(question or "") \
             or ranges_named(question, today):
         return None
     return days[0]
@@ -342,6 +361,15 @@ def _same_event(a: str, b: str) -> bool:
     return bool(wa[0]) and wa[0] == wb[0]
 
 
+# an inclusive upper bound at a midnight (BETWEEN ... AND '2030-01-21', <= '2030-01-21 00:00'): that whole day is in
+# (a DATE column's day; OpenSearch rounds an upper bound up to the end of the day on a field that holds days:
+# measured through osagg: BETWEEN '2030-01-23 00:00' AND '2030-01-24 00:00' counts the rows of both days)
+INCLUSIVE_END = re.compile(r"(?<![\w@])\"?(\w+)\"?\s+BETWEEN\s+(?:(?:DATE|TIMESTAMP)\s+)?'[^']+'\s+AND\s+"
+                           r"(?:(?:DATE|TIMESTAMP)\s+)?'(\d{4}-\d{2}-\d{2})(?:[ T]00:00(?::00(?:\.0+)?)?)?'|"
+                           r"(?<![\w@])\"?(\w+)\"?\s*<=\s*(?:(?:DATE|TIMESTAMP)\s+)?'(\d{4}-\d{2}-\d{2})"
+                           r"(?:[ T]00:00(?::00(?:\.0+)?)?)?'", re.I)
+
+
 def _literals(sql: str) -> list[dt.datetime]:
     out = []
     for m in DATE_LIT.finditer(sql or ""):
@@ -363,11 +391,153 @@ def _timed_date_fields(tables: set[str]) -> dict[str, str]:
     for o in db.session.query(KObject).filter(KObject.kind == "field", KObject.parent.in_(list(tables)),
                                               KObject.data_type.in_(("date", "date_nanos")), KObject.gone_at.is_(None)):
         st = o.stats or {}
+        if day_stats(st) and osagg_reads_days():
+            continue                                    # days (2030-01-02 02:00 is midnight UTC): = a date matches
         seen = [str(v) for v in (st.get("min"), st.get("max")) if v]
         timed = [v for v in seen if re.search(r"[ T](\d{1,2}):(\d{2})", v) and not re.search(r"[ T]0?0:00(:00)?$", v)]
         if timed:
             out[o.name] = timed[-1]
     return out
+
+
+MIDNIGHTS = {"00:00", "0:00", "01:00", "1:00", "02:00", "2:00", "22:00", "23:00"}   # UTC midnight seen from Europe
+
+
+def osagg_reads_days() -> bool:
+    """osagg 0.2.10 and later compare a date field whose values are all at midnight UTC as dates ('2030-01-02' is
+    that day; '2030-01-02 02:00' is two hours into it). Before, such a field was read in the connection's timezone
+    (2030-01-02 02:00 in Paris): = '2030-01-02' found nothing and a bound at 02:00 was the day's own time."""
+    try:
+        from osagg.metadata import Field
+    except Exception:  # pylint: disable=broad-except   (no osagg: nothing compared as days)
+        return False
+    return "midnight" in getattr(Field, "__dataclass_fields__", {})
+
+
+def day_stats(st: dict) -> bool:
+    """Whether a date field holds days, not instants, by its smallest and largest values as learned: both at the
+    same time of day, a midnight shown in a timezone a few hours off (2030-01-02 01:00 and 2030-03-04 01:00 is
+    midnight UTC shown in Paris), or both a date alone."""
+    seen = [str(v) for v in (st.get("min"), st.get("max")) if v]
+    times = {m.group(1) for v in seen for m in [re.search(r"[ T](\d{1,2}:\d{2})", v)] if m}
+    whole = [v for v in seen if not re.search(r"[ T]\d{1,2}:\d{2}", v)]
+    return (len(times) == 1 and len(seen) == 2 and times <= MIDNIGHTS) or len(whole) == 2
+
+
+def as_day(value: Any) -> str:
+    """The day a value of such a field stands for, as SQL compares it: the nearest midnight ('2030-01-02 02:00',
+    midnight UTC shown in Paris, is 2030-01-02; '2030-01-01 22:00', midnight UTC shown west of it, is 2030-01-02)."""
+    text = str(value)
+    m = re.match(r"(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}):\d{2})?", text)
+    if m is None:
+        return text
+    try:
+        day = dt.date.fromisoformat(m.group(1))
+    except ValueError:
+        return text
+    if m.group(2) is not None and int(m.group(2)) >= 12:
+        day += dt.timedelta(days=1)
+    return day.isoformat()
+
+
+def _day_fields(tables: set[str]) -> set[str]:
+    """The date fields of these indices that hold days, not instants (day_stats). An upper bound on such a field
+    takes in its whole day (OpenSearch rounds it up)."""
+    from supagent.models import KObject
+
+    out: set[str] = set()
+    for o in db.session.query(KObject).filter(KObject.kind == "field", KObject.parent.in_(list(tables)),
+                                              KObject.data_type.in_(("date", "date_nanos")), KObject.gone_at.is_(None)):
+        if day_stats(o.stats or {}):
+            out.add(o.name)
+    return out
+
+
+DAY_BOUND = re.compile(r"(?<![\w@])\"?(\w+)\"?\s*(>=|<=|<>|!=|=|<|>|\bBETWEEN\b)\s*(?:(?:DATE|TIMESTAMP)\s+)?"
+                       r"'(\d{4}-\d{2}-\d{2})[ T](\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?'", re.I)
+BETWEEN_HIGH = re.compile(r"\bAND\s+(?:(?:DATE|TIMESTAMP)\s+)?'(\d{4}-\d{2}-\d{2})[ T](\d{1,2}):(\d{2})"
+                          r"(?::\d{2}(?:\.\d+)?)?'", re.I)
+
+
+def day_time_bound(sql: str, tables: set[str]) -> str | None:
+    """A field that holds days (each value a date at 00:00 as SQL compares it) bounded with a time of day:
+    '2030-01-02 02:00' (the time a list showed: midnight UTC in Paris time) leaves out the rows of 2030-01-02
+    with >= and =, and takes in the next day's with < (BETWEEN both): the period moves by a day, silently.
+    Sent back once with the bounds as dates; 23:59 (the end of a day, <= or <) is not a shift."""
+    fields = _day_fields(tables) if tables and DAY_BOUND.search(sql or "") and osagg_reads_days() else set()
+    if not fields:
+        return None
+    by_lower = {f.lower(): f for f in fields}
+    for m in DAY_BOUND.finditer(sql):
+        field = by_lower.get(m.group(1).lower())
+        if field is None:
+            continue
+        op = m.group(2).upper()
+        bounds = [(m.group(3), int(m.group(4)), int(m.group(5)), op)]
+        if op == "BETWEEN":
+            high = BETWEEN_HIGH.match(sql, m.end())
+            if high is None:
+                high = BETWEEN_HIGH.search(sql[m.end():m.end() + 60])
+            if high is not None:
+                bounds.append((high.group(1), int(high.group(2)), int(high.group(3)), "<"))
+        for day, hh, mm, kind in bounds:
+            if (hh, mm) == (0, 0) or kind in ("<=", ">", "<>", "!=") or (hh, mm) == (23, 59) and kind == "<":
+                continue
+            lit = f"{day} {hh:02d}:{mm:02d}"
+            d = as_day(lit)
+            what = {"<": f"the rows of {d} are taken in", "=": "it matches nothing"}.get(
+                kind, f"the rows of {d} are left out")
+            nxt = (dt.date.fromisoformat(d) + dt.timedelta(days=1)).isoformat()
+            return (f"tool error (not run: date): {field} holds days: each value is a date at 00:00 as SQL compares "
+                    f"it (a list may show it at another hour: midnight UTC in local time), so with the bound "
+                    f"'{lit}' {what} and the period moves by a day. Write its bounds as dates alone, e.g. "
+                    f"\"{field}\" >= '{d}' AND \"{field}\" < '{nxt}' for the day {d}. If that exact time is meant, "
+                    f"send this same call again unchanged.")
+    return None
+
+
+FUTURE_ASKED = re.compile(r"\b(?:tomorrow|next (?:week|month|year|quarter|monday|tuesday|wednesday|thursday|friday|weekend|"
+                          r"days?)|will (?:we|it|they|our|the|there|be|make|reach|get|have|sell|earn|cost)|going to (?:be|make|"
+                          r"sell|reach)|forecast\w*|predict\w*|projection|demain|semaine prochaine|mois prochain|"
+                          r"ann[ée]e prochaine|pr[ée]vision\w*|pr[ée]voi[rst]|ser(?:a|ont)\b|allons (?:faire|vendre))", re.I)
+FUTURE_SAID = re.compile(r"\b(?:cannot|can't|can not|unable|not possible|impossible|no (?:forecast|prediction|data for)|"
+                         r"not (?:predict|forecast|know)|(?:the )?future|has(?:n't| not) (?:yet )?happened|not yet|"
+                         r"(?:doesn't|does not|do not|don't) (?:hold|contain|include|have)|no future|"
+                         r"ne (?:peut|pouvons|puis) pas|pas de pr[ée]vision|futur|pas encore)", re.I)
+
+
+def future_start(question: str, today: dt.date) -> dt.date | None:
+    """The first day of the future period a question asks about (tomorrow, next week, next month, "will..."), or
+    None."""
+    if not FUTURE_ASKED.search(question or ""):
+        return None
+    q = (question or "").lower()
+    if re.search(r"next month|mois prochain", q):
+        return (today.replace(day=1) + dt.timedelta(days=32)).replace(day=1)
+    if re.search(r"next year|ann[ée]e prochaine", q):
+        return dt.date(today.year + 1, 1, 1)
+    if re.search(r"next week|semaine prochaine", q):
+        return today + dt.timedelta(days=7 - today.weekday())
+    return today + dt.timedelta(days=1)
+
+
+def future_unsaid(question: str, answer: str, queries: list[str], today: dt.date) -> dt.date | None:
+    """"How much revenue will we make next week?" answered with last week's revenue and no word that the data
+    cannot tell the future: the first day of that future period, else None. Not when the queries read that period
+    (promised dates, deadlines: data about the future, not a forecast) or the answer says it."""
+    start = future_start(question, today)
+    if start is None or FUTURE_SAID.search(answer or ""):
+        return None
+    days = []
+    for q in queries:
+        for m in re.finditer(r"'(\d{4}-\d{2}-\d{2})", q or ""):
+            try:
+                days.append(dt.date.fromisoformat(m.group(1)))
+            except ValueError:
+                continue
+    if days and max(days) >= start:
+        return None
+    return start
 
 
 def day_equality(sql: str, tables: set[str]) -> str | None:
@@ -391,7 +561,7 @@ def day_equality(sql: str, tables: set[str]) -> str | None:
 
 
 def refusal(question: str, tool: str, args: dict, today: dt.date | None = None,
-            prior: list[str] | None = None) -> str | None:
+            prior: list[str] | None = None, comparing: bool = False) -> str | None:
     """Why this query does not cover the question's period (sent back once), or None. `prior`: the queries of the
     answer this message follows (the date they put the period on is the follow-up's too)."""
     if tool not in SQL_TOOLS or not question:
@@ -401,7 +571,7 @@ def refusal(question: str, tool: str, args: dict, today: dt.date | None = None,
 
     sqls = [q for q in query_texts(args) if q]
     if sqls:
-        same_day = day_equality(sqls[-1], _tables(sqls[-1]))
+        same_day = day_equality(sqls[-1], _tables(sqls[-1])) or day_time_bound(sqls[-1], _tables(sqls[-1]))
         if same_day:
             return same_day
     today = today or _now().date()
@@ -469,8 +639,29 @@ def refusal(question: str, tool: str, args: dict, today: dt.date | None = None,
         return waiting[0][1]
     lits = _literals(sql)
     spans = ranges_named(question, today) if not HOURS.search(question) else []
+    whole = whole_day(question, today)
+    ends = [b for _a, b in spans] + ([dt.datetime(whole.year, whole.month, whole.day) + dt.timedelta(days=1)]
+                                     if whole else [])
+    day_fields = _day_fields(tables) if tables and INCLUSIVE_END.search(sql) else set()
+    for m in INCLUSIVE_END.finditer(sql):              # BETWEEN ... AND '<the day after>' on a field of days: that day too
+        field, value = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+        if field not in day_fields:                    # (an instant field: the next midnight is before its day)
+            continue
+        try:
+            last = dt.date.fromisoformat(value)
+        except ValueError:
+            continue
+        hit = next((b for b in ends if b == dt.datetime(last.year, last.month, last.day)), None)
+        if hit is not None:
+            first = next((a for a, b in spans if b == hit), hit - dt.timedelta(days=1))
+            return (f"tool error (not run: period): BETWEEN and <= include their last value: '{last}' takes in "
+                    f"{last:%d %B} too (a date field holds that whole day), which the question does not ask. Use "
+                    f">= '{first:%Y-%m-%d}' AND < '{last}'. If {last:%d %B} is meant too, send this same call again "
+                    "unchanged.")
     if spans and len(lits) >= 2:                        # "the week of 14 to 20 September": that span exactly
         low, high = min(lits), max(lits)
+        if (high.hour, high.minute) == (23, 59):        # "... AND '20 23:59(:59)'": the end of the 20th, which is
+            high = dt.datetime(high.year, high.month, high.day) + dt.timedelta(days=1)   # the span's own end
         day = dt.timedelta(days=1)                      # the span with a boundary a few hours off, not another span
         near = [sp for sp in spans if abs(low - sp[0]) <= day and abs(high - sp[1]) <= day]
         if near and not any(low == a and high == b for a, b in spans):
@@ -485,6 +676,13 @@ def refusal(question: str, tool: str, args: dict, today: dt.date | None = None,
         return None
     start = dt.datetime(day.year, day.month, day.day)
     end = start + dt.timedelta(days=1)
+    around = len(lits) >= 2 and min(lits) <= start and max(lits) >= end      # a window that holds the day
+    if around and comparing:
+        return None                                     # "why ... on the 22nd?": the days around it, to compare
+    if around and not any(start <= t < end for t in lits):
+        return (f"tool error (not run: period): the question is about {day:%d %B %Y} and this query covers "
+                f"{min(lits):%Y-%m-%d %H:%M} to {max(lits):%Y-%m-%d %H:%M}: several days. Use {day:%Y-%m-%d} 00:00 "
+                f"to {end:%Y-%m-%d} 00:00. If that window is meant, send this same call again unchanged.")
     if not any(start <= t < end for t in lits):          # the next midnight alone: another day
         seen = ", ".join(sorted({t.strftime("%Y-%m-%d") for t in lits}))
         return (f"tool error (not run: period): the question is about {day:%d %B %Y} and this query's dates are "

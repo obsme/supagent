@@ -1290,6 +1290,27 @@ follow-up keeps its conditions, a cause is tied to the question's parts):
   202 stored answers of the end-to-end suite: it flags 16 of the 33 wrong ones, and 55 of the 169 right ones (most of
   them queries that ignore a rule with no effect that day, such as a restatement on a day without any): it stays off.
 
+## Investigations: the inputs, their logs, the records (0.9.3)
+
+* When the rows of the first comparison were late before they were ready (the first stage off comes before the one
+  at which they start to run), they waited for their inputs: the inputs of the parts in the comparison's scope, two
+  steps up the System map, come with its result (`agent.inputs_walk`), with what those inputs' logs say that they do
+  not usually (`agent.inputs_logs`: `compare_logs` called by the system, first where the change is concentrated, then
+  everywhere, three calls at most; what is there every day is left out). An answer that then blames a pool's
+  capacity (slots, a full queue) is sent back once to follow the inputs.
+* `records_about(names, until, days)`: what was recorded on the parts named (changes, releases, restarts, alerts,
+  incidents: every record table of the data dictionary, by its keyword fields and its text) over the days before the
+  effect began; the agent is asked to give it the parts it blames, not only the applications of the question.
+* The calendar facts of the days an investigation looks at (`agent.calendar_facts`): the n-th weekday of the month,
+  the last business day of the month, quarter or year, the first business day... are searched in the team's
+  knowledge, and what literally speaks of such a day comes with the question.
+* More checks of an answer: a share of rows ("what share of the revenue was refunded") counted from two tables apart
+  is sent back to count the part within the rows; a SUM, AVG or COUNT over a join that repeats the rows it sums is
+  sent back before it runs (`agent.join_check`).
+* Long work: from `agent.compact_at` prompt tokens the older tool results are cut to their first lines and the work
+  plan given again; a turn that only keeps the plan does not use up a call; out of calls, the answer is what the
+  plan's notes say was found.
+
 ## The subjects of a chat (0.8)
 
 A chat often follows one subject over several questions, then changes subject, then comes back. Each question now

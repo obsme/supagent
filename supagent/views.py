@@ -157,9 +157,10 @@ def _is_admin() -> bool:
 def _nav(active: str) -> dict:
     from superset.extensions import security_manager
 
+    from supagent import __version__
     from supagent.theme import superset_theme
 
-    return {"active": active, "user": g.user.username if getattr(g, "user", None) else "",
+    return {"active": active, "user": g.user.username if getattr(g, "user", None) else "", "version": __version__,
             "can_chat": security_manager.can_access("can_read", ChatView.class_permission_name),
             "can_dictionary": security_manager.can_access("can_read", KnowledgeView.class_permission_name),
             "is_admin": _is_admin(), "theme": superset_theme()}

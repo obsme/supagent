@@ -156,3 +156,66 @@ def test_each_condition_is_sent_back_once(ctx, monkeypatch):
                                       say("337 BILLING jobs were late on 23 September.")], results=rows)
     answer, _trace = a.ask("How many BILLING jobs ran longer than 45 minutes on 23 September?")
     assert ran == [("execute_sql", variant)] and "(Check: this answer counts only STATUS IN 'SUCCESS'" in answer
+
+
+def test_durations_in_words_ranks_and_french_flags_are_said(ctx):
+    """Seventeen of eighteen stored answers marked "a condition nobody asked for" were right: "more than one hour"
+    written <duration in seconds> > 3600 (an hour in words: no number), WHERE rn = 1 on the query's own ROW_NUMBER() (a
+    rank, not a data value), RELAUNCHED = true for "relancée". Said now; a condition nobody said is still found."""
+    def ok(question, sql):
+        return refusal(_support(question, question), "execute_sql", _sql(sql)) is None
+
+    assert ok("How many of them ran for more than one hour?", 'SELECT COUNT(*) FROM "jobs" WHERE "DURATION_S" > 3600')
+    assert ok("How many ran for more than an hour?", 'SELECT COUNT(*) FROM "jobs" WHERE "DURATION_S" > 3600')
+    assert ok("Combien ont duré plus d'une demi-heure ?", 'SELECT COUNT(*) FROM "jobs" WHERE "DURATION_S" > 1800')
+    assert not ok("How many ran for more than an hour?", 'SELECT COUNT(*) FROM "jobs" WHERE "DURATION_S" > 5400')
+    top = ('SELECT * FROM (SELECT "TRADER", SUM("PNL") AS pnl, ROW_NUMBER() OVER (ORDER BY SUM("PNL") DESC) AS rn '
+           'FROM "pnl" GROUP BY 1) t WHERE rn <= 3')
+    assert ok("Who were the top 3 traders?", top)
+    assert not ok("Who were the top 3 traders?", top + " AND \"TRADER\" <> 'TR001'")      # a data condition still
+    assert [c.said() for c in sql_conditions('SELECT COUNT(*) FILTER (WHERE "EXPRESS" = true) AS express FROM "o"')] \
+        == ["EXPRESS = True"]                         # a field named like the alias its own query computes
+    assert ok("Quelle part des jobs du 23 septembre a été relancée ?",
+              'SELECT COUNT(*) FILTER (WHERE "RELAUNCHED" = true) FROM "jobs"')
+    assert not ok("Quelle part des jobs du 23 septembre a échoué ?",
+                  'SELECT COUNT(*) FILTER (WHERE "RELAUNCHED" = true) FROM "jobs"')
+
+
+def test_a_count_said_in_words_supports_its_condition(ctx):
+    """dev4 G04.1 (D's final run): "How many customers placed more than one sold order in September?" counted with
+    HAVING COUNT(*) > 1 inside the outer COUNT was refused as "a condition nobody asked for" (a number in words was
+    read only before a time unit), the model removed it as told and answered 6,154 for 2,899. A number said in words
+    anywhere in the question supports that number (not its unit factors); a condition on another number still not."""
+    def ok(question, sql):
+        return refusal(_support(question, question), "execute_sql", _sql(sql)) is None
+
+    q = "How many customers placed more than one sold order in September?"
+    sql = 'SELECT COUNT(*) FROM (SELECT "CUSTOMER_ID" FROM "orders" GROUP BY "CUSTOMER_ID" HAVING COUNT(*) > 1)'
+    assert ok(q, sql)
+    assert ok("Which desks traded at least twice with CPTY_1?", 'SELECT "DESK" FROM "t" GROUP BY 1 HAVING COUNT(*) >= 2')
+    assert ok("Combien de clients ont passé plus de deux commandes ?",
+              'SELECT COUNT(*) FROM (SELECT "C" FROM "o" GROUP BY 1 HAVING COUNT(*) > 2)')
+    assert not ok(q, 'SELECT COUNT(*) FROM (SELECT "CUSTOMER_ID" FROM "orders" GROUP BY 1 HAVING COUNT(*) > 3)')
+    assert not ok("How many jobs ran for more than one hour?", 'SELECT COUNT(*) FROM "jobs" WHERE "RETRIES" > 7')
+
+
+def test_a_memory_that_applies_when_the_user_says_x_is_no_support_without_x(ctx):
+    """"When the user says 'NOVA', filter by APPLICATION='NOVA'" (a real user's memory): a question that does not
+    say NOVA gets no NOVA filter from it; one that says NOVA does."""
+    from supagent.knowledge.conditions import untriggered
+
+    block = ("What this user and the team asked to remember (...):\n- (this user, rule) When the user says 'NOVA', "
+             "filter by APPLICATION='NOVA'.\n- (team, fact) Jobs run in PROD and UAT.")
+    assert "NOVA" not in untriggered(block, "Which error category caused the most job failures?")
+    assert "Jobs run in PROD and UAT" in untriggered(block, "Which error category caused the most job failures?")
+    assert "NOVA" in untriggered(block, "How many NOVA jobs failed?")
+    assert "NOVA" not in untriggered("- (this user, rule) Quand l'utilisateur dit « NOVA », filtrer APPLICATION='NOVA'.",
+                                      "Combien de jobs ont échoué ?")
+    q = "Which error category caused the most job failures in PROD on 23 September?"
+    s = build([{"role": "user", "content": block + "\n" + q}], [q, block])
+    sql = ('SELECT "ERROR_CATEGORY", COUNT(*) FROM "jobs" WHERE "STATUS" = \'FAILED\' AND "ENV" = \'PROD\' '
+           'AND "APPLICATION" = \'NOVA\' GROUP BY 1')
+    assert [c.said() for c in unsaid(sql_conditions(sql), s)] == ["APPLICATION = 'NOVA'"]
+    q2 = "How many NOVA jobs failed in PROD?"
+    s2 = build([{"role": "user", "content": block + "\n" + q2}], [q2, block])
+    assert unsaid(sql_conditions(sql), s2) == []

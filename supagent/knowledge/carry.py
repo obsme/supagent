@@ -77,6 +77,37 @@ def field_values(tables: set[str]) -> dict[str, str]:
     return out
 
 
+def new_fields(question: str, queries: list[str]) -> list[str]:
+    """The fields of the tables the previous answer read that the follow-up names and its queries never used
+    ("Which error code came up most often?" after a count and a failure rate: ERROR_CODE): the chat cannot hold
+    that answer, a query must. Named = every word of the field's name in the question (ERROR_CODE: error and
+    code), or a one-word name of six letters or more (carrier, country)."""
+    from superset import db
+
+    from supagent.knowledge.describe import stem
+    from supagent.knowledge.rulecheck import _tables
+    from supagent.models import KObject
+
+    tables: set[str] = set()
+    for q in queries:
+        tables |= _tables(q or "")
+    if not tables or not question:
+        return []
+    asked = {stem(w) for w in re.findall(r"[a-z0-9]+", question.lower()) if len(w) >= 3}
+    said = " ".join(queries).lower()
+    out = []
+    for (name,) in (db.session.query(KObject.name).filter(KObject.kind == "field", KObject.parent.in_(sorted(tables)),
+                                                          KObject.gone_at.is_(None)).limit(2000)):
+        if re.search(r"(?:^|_)ids?$|^id_", name, re.I):
+            continue                                   # an identifier (TICKET_ID): a key, not a field asked about
+        words = [w for w in re.split(r"[^a-z0-9]+", name.lower()) if len(w) >= 3]
+        if not words or (len(words) == 1 and len(words[0]) < 6):
+            continue
+        if all(stem(w) in asked for w in words) and name.lower() not in said:
+            out.append(name)
+    return sorted(set(out))
+
+
 def new_values(question: str, seen: list[str], queries: list[str],
                values_of: Any = None) -> list[str]:
     """The words of a follow-up that are values of a field of the tables the previous answer read, which neither
@@ -103,6 +134,24 @@ def new_values(question: str, seen: list[str], queries: list[str],
 def continues(question: str, follow: bool) -> bool:
     """The message goes on from the previous question (it refers to it, completes it, or refines it)."""
     return follow or bool(REFINES.search(question or ""))
+
+
+DATE_LITERAL = re.compile(r"'(\d{4}-\d{2}-\d{2})(?:[ T][\d:.]+)?'")
+
+
+def carries_period(previous: list[str], current: list[str]) -> bool:
+    """This answer's queries bound a time with a day of the previous answer's queries on a table both read: the
+    previous question's period, carried (the caller checks that the message says no period of its own)."""
+    from supagent.knowledge.rulecheck import _tables
+
+    for q in current:
+        days = set(DATE_LITERAL.findall(q or ""))
+        if not days:
+            continue
+        for p in previous:
+            if _tables(p) & _tables(q) and days & set(DATE_LITERAL.findall(p or "")):
+                return True
+    return False
 
 
 def dropped(question: str, previous: list[str], current: list[str]) -> list[Any]:

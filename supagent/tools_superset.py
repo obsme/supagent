@@ -49,7 +49,15 @@ WHERE_HINT = (" Do not send this query again, nor a variant of it: its WHERE has
 STEPS_HINT = (" Do not send this query again, nor a variant of it: rewrite it in steps. 1) One query for the few keys "
               "you need (ids, dates), filtered, with GROUP BY the key and MAX of the timestamp for the latest one. "
               "2) One query per index with WHERE key IN (the values found), with a LIMIT. Then put the results "
-              "together in your answer.")
+              "together in your answer. (Only for a few keys: a list that misses keys gives a wrong total; to add up "
+              "rows of one index that match many rows of another, an aggregating JOIN on the key runs.)")
+# osagg refuses a condition that keeps the empty rows of a LEFT JOIN's right index ("OR r.x IS NULL")
+LEFT_WHERE = re.compile(r"on the right index of a LEFT JOIN", re.I)
+LEFT_WHERE_HINT = (" A LEFT JOIN keeps the left rows that have no match; a condition in WHERE on the right index's "
+                   "fields must leave its empty rows out (r.STATUS = 'X', not with OR r.STATUS IS NULL). To add up the "
+                   "rows of the right index that match the left ones (the refunds of those orders), write an inner JOIN "
+                   "(JOIN ... ON the key) with the left index's conditions and that condition in WHERE, in one "
+                   "aggregating query (SUM, COUNT). Do not list keys by hand: a list of the first rows misses keys.")
 
 
 class ExecuteSqlRequest(BaseModel):
@@ -87,6 +95,8 @@ def execute_sql(request: ExecuteSqlRequest) -> dict:
                     return {"success": False, "error": f"{hint} ({text[:300]})"}
                 if backend == "osagg" and "WHERE term evaluated" in text:
                     text += WHERE_HINT
+                elif backend == "osagg" and LEFT_WHERE.search(text):
+                    text += LEFT_WHERE_HINT
                 elif backend == "osagg" and re.search(r"pushed down|cannot run in OpenSearch|JoinRefused|safety cap",
                                                       text):
                     text += STEPS_HINT

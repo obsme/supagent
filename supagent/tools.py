@@ -986,8 +986,10 @@ def _profile(conn: Any, index: str, time_field: str | None) -> dict[str, Any]:
         full = conn.transport.search(index, {"size": 0, "track_total_hits": True, "aggs": {
             "lo": {"min": {"field": tf.agg_field}}, "hi": {"max": {"field": tf.agg_field}}}})
         out["docs"] = full["hits"]["total"]["value"]
+        days = bool(getattr(tf, "date_only", False))    # calendar days: osagg compares them as dates (in UTC)
         out["time_range"] = [
-            f"{dt.datetime.fromtimestamp(v / 1000, dt.timezone.utc).astimezone(conn.tz):%Y-%m-%d %H:%M}"
+            (f"{dt.datetime.fromtimestamp(v / 1000, dt.timezone.utc):%Y-%m-%d}" if days else
+             f"{dt.datetime.fromtimestamp(v / 1000, dt.timezone.utc).astimezone(conn.tz):%Y-%m-%d %H:%M}")
             if v is not None else None
             for v in (full["aggregations"]["lo"].get("value"), full["aggregations"]["hi"].get("value"))]
     all_profiles[index] = out
@@ -2259,7 +2261,8 @@ def _neighbours(table: str) -> dict[str, str]:
     return out
 
 
-def _records(run: Any, other: str, db_obj: Any, where: str, until: dt.datetime) -> dict[str, Any] | None:
+def _records(run: Any, other: str, db_obj: Any, where: str, until: dt.datetime,
+             days: int = RELATED_DAYS) -> dict[str, Any] | None:
     """The latest records of a related table that satisfy a condition, over the days before `until`."""
     from superset.extensions import security_manager
 
@@ -2269,7 +2272,7 @@ def _records(run: Any, other: str, db_obj: Any, where: str, until: dt.datetime) 
         return None
     tf = _time_field(other, None)
     security_manager.raise_for_access(database=db_obj, sql=f'SELECT COUNT(*) FROM "{G.name(other)}"', schema="default")
-    since = until - dt.timedelta(days=RELATED_DAYS)
+    since = until - dt.timedelta(days=days)
     where = f'{where} AND "{tf}" >= {G.lit(since)} AND "{tf}" < {G.lit(until)}'
     total = run(f'SELECT COUNT(*) AS n FROM "{other}" WHERE {where}')
     n = int(total[0][0] or 0) if total else 0
@@ -3630,6 +3633,129 @@ def system_links(names: list[str]) -> dict:
                 res["note"] = ("none of these names is a value of the team's categories (Data dictionary, "
                                "Categories): search_knowledge may know them")
             return res
+    except Exception as ex:  # pylint: disable=broad-except
+        return {"error": f"{type(ex).__name__}: {str(ex)[:500]}"}
+
+
+_REPEATS: dict[tuple[int, str, str], tuple[float, int | None]] = {}
+REPEATS_TTL = 600.0             # seconds a key's repeats are kept (one per database, table and key)
+
+
+def repeated_keys(database: Any, table: str, key: str) -> int | None:
+    """How many values of `key` have several rows in `table` (at most 3 are looked for; 0: the key is unique
+    there; None: not known), with the user's access. For the join check of a query (sqllint.fanout_refusal)."""
+    import time as _time
+
+    from superset.extensions import security_manager
+
+    from supagent.knowledge import groups as G
+
+    at = (int(getattr(database, "id", 0) or 0), table, key)
+    hit = _REPEATS.get(at)
+    if hit and _time.time() - hit[0] < REPEATS_TTL:
+        return hit[1]
+    name, col = G.name(table), G.name(key)
+    security_manager.raise_for_access(database=database, sql=f'SELECT COUNT(*) FROM "{name}"', schema="default")
+    found: int | None = None
+    with _db_connection(database, extract=False) as conn:
+        for sql in (f'SELECT "{col}" FROM "{name}" GROUP BY "{col}" HAVING COUNT(*) > 1 LIMIT 3',
+                    f'SELECT COUNT(*) AS n, COUNT(DISTINCT "{col}") AS d FROM "{name}"'):
+            try:
+                cur = conn.cursor()
+                cur.execute(sql)
+                rows = cur.fetchall()
+            except Exception:  # pylint: disable=broad-except   (the next way, or not known)
+                continue
+            if "HAVING" in sql:
+                found = len(rows)
+            elif rows and rows[0][0] is not None and rows[0][1] is not None:
+                n, d = int(rows[0][0]), int(rows[0][1])
+                found = 1 if n > d * 1.02 else 0           # (an approximate distinct count: a margin)
+            break
+    _REPEATS[at] = (_time.time(), found)
+    return found
+
+
+RECORD_TABLE = re.compile(r"change|release|deploy|alert|incident|maintenance|outage|ticket|patch|event", re.I)
+RECORD_KEYS = 6                  # keyword fields of a record table matched against the names
+RECORD_TABLES = 6
+
+
+def _record_tables() -> list[tuple[str, list[str], list[str]]]:
+    """The tables of records the dictionary and the catalog know (their name says changes, releases, alerts,
+    incidents...), with their keyword fields (a target, a server, an application) and their text fields."""
+    from superset.extensions import db
+
+    from supagent.models import KObject
+
+    names = {str(t) for t in (_catalog().get("indices") or {}) if RECORD_TABLE.search(str(t))}
+    names |= {o.name for o in db.session.query(KObject).filter(KObject.kind == "index", KObject.gone_at.is_(None))
+              .limit(2000) if o.name and RECORD_TABLE.search(o.name)}
+    out = []
+    for t in sorted(names)[:RECORD_TABLES * 2]:
+        fields = db.session.query(KObject).filter(KObject.kind == "field", KObject.parent == t,
+                                                  KObject.gone_at.is_(None)).all()
+        kinds = {f.name: str(f.data_type or "").lower() for f in fields if f.name and not f.name.startswith(("@", "_"))}
+        keys = [n for n, k in kinds.items() if k in ("keyword", "string", "varchar")][:RECORD_KEYS]
+        texts = [n for n, k in kinds.items() if k == "text"][:2]
+        if keys or texts:
+            out.append((t, keys, texts))
+    return out[:RECORD_TABLES]
+
+
+@mcp.tool
+def records_about(names: list[str], until: str, days: int = 7) -> dict:
+    """What was recorded about parts of the system before a time: the changes, releases, restarts, maintenance,
+    alerts and incidents of the record tables the data dictionary knows, whose target (or another keyword field)
+    is one of `names` or whose text mentions one, over the `days` before `until` (local time, "2030-01-15 02:10":
+    when the effect began). In an investigation, the change or record behind the cause: give the parts you name as
+    the cause (the server, the pool, the feed, the service, the license...), not only the applications of the
+    question. Each table: how many records, the latest ones and the SQL."""
+    try:
+        with _as_user():
+            from superset.extensions import db as meta, security_manager
+
+            from supagent.knowledge import groups as G
+
+            parts = [str(n).strip() for n in names or [] if str(n).strip()][:8]
+            if not parts:
+                raise ToolError("names: the parts of the system to look for (a server, a pool, a feed, a service)")
+            t1 = G.clock(until)
+            span = max(1, min(int(days or 7), 31))
+            listed = ", ".join("'" + p.replace("'", "''") + "'" for p in parts)
+            out: list[dict] = []
+            for table, keys, texts in _record_tables():
+                conds = [f'"{G.name(k)}" IN ({listed})' for k in keys]
+                conds += [f'"{G.name(t)}" LIKE \'%{p.replace(chr(39), "")}%\'' for t in texts for p in parts
+                          if len(p) >= 3 and "%" not in p]
+                if not conds:
+                    continue
+                try:
+                    db_obj = _table_database(table, None)
+                    security_manager.raise_for_access(database=db_obj, sql=f'SELECT COUNT(*) FROM "{G.name(table)}"',
+                                                      schema="default")
+                except Exception:  # pylint: disable=broad-except   (a table this user may not read: left out)
+                    continue
+                with _db_connection(db_obj, extract=False) as conn:
+                    meta.session.commit()
+
+                    def run(sql: str, described: bool = False) -> Any:
+                        cur = conn.cursor()
+                        cur.execute(_check_select(sql, GROUP_ROWS)[0])
+                        rows = cur.fetchall()
+                        return (rows, [c[0] for c in (getattr(cur, "description", None) or [])]) if described else rows
+
+                    found = _records(run, table, db_obj, "(" + " OR ".join(conds) + ")", t1, span)
+                if found is not None:
+                    out.append(found)
+            if not out:
+                return {"names": parts, "until": until, "note": "no record table (changes, alerts, incidents...) in "
+                                                                "the data dictionary that this user may read"}
+            return {"names": parts, "until": until, "days": span, "tables": out,
+                    "note": "records whose target or text names one of the parts, the latest first; none in a table "
+                            "is a finding too (nothing recorded on those parts in those days)"}
+    except ToolError as ex:
+        return {"error": str(ex)}
     except Exception as ex:  # pylint: disable=broad-except
         return {"error": f"{type(ex).__name__}: {str(ex)[:500]}"}
 

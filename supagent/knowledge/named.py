@@ -4,7 +4,10 @@ its own check). "How many web orders did we sell on 23 September?" counted over 
 condition with it nor grouped by CHANNEL. Named = written as the data writes it, a code-like value (digits, _ or -)
 in any case, or a value in any case just before the table's subject or its field's name ("web orders", "web
 channel" in an orders index); "per
-channel" asks for every value, "UAT included" for it with the others."""
+channel" asks for every value, "UAT included" for it with the others. A value the question leaves out ("cancelled
+trades left out", "excluding UAT", "hors UAT") is met by any condition on its field (<> 'CANCELLED', or IN of the
+values kept): the check once sent a right answer back asking for = 'CANCELLED', and the model then answered about
+the cancelled trades."""
 
 from __future__ import annotations
 
@@ -16,6 +19,11 @@ PER = re.compile(r"\b(?:per|by|for each|each|every|which|par|pour chaque|chaque)
                  r"[a-zA-Z][\w-]*)", re.I)
 INCLUDED_AFTER = re.compile(r"^\W*(?:\w+\s+){0,2}?(?:included|including|inclus\w*|too|as well|also)\b", re.I)
 INCLUDED_BEFORE = re.compile(r"\b(?:including|incl\.?|y compris)\s+(?:\w+\s+)?$", re.I)   # not "with": a filter
+EXCLUDED_AFTER = re.compile(r"^\W*(?:[\w-]+\s+){0,2}?(?:left\s+out|excluded|set\s+aside|put\s+aside|aside|not\s+counted|"
+                            r"exclu\w*|mis\w*\s+de\s+c[oô]t[ée]|mis\w*\s+[àa]\s+part|[ée]cart[ée]\w*)\b", re.I)
+EXCLUDED_BEFORE = re.compile(r"\b(?:excluding|exclude|except|without|other\s+than|apart\s+from|leaving\s+out|leave\s+out|"
+                             r"minus|ignoring|ignore|not|non|no|hors|sans|sauf|except[ée]s?|autres?\s+que|pas)\s+"
+                             r"(?:the\s+|any\s+|les?\s+|la\s+|des\s+|d'|l')?(?:[\w-]+\s+)?$", re.I)
 
 
 def before_noun(question: str, value: str, nouns: set[str]) -> re.Match | None:
@@ -39,6 +47,26 @@ def nouns_of(table: str, field: str) -> set[str]:
 def included(question: str, m: re.Match) -> bool:
     """"UAT included", "including UAT": the value is counted with the others, not alone."""
     return bool(INCLUDED_AFTER.match(question[m.end():]) or INCLUDED_BEFORE.search(question[:m.start()]))
+
+
+def excluded(question: str, m: re.Match) -> bool:
+    """"cancelled trades left out", "excluding UAT", "hors UAT": the question wants the value left out."""
+    return bool(EXCLUDED_AFTER.match(question[m.end():]) or EXCLUDED_BEFORE.search(question[:m.start()]))
+
+
+def left_out(question: str, value: str) -> bool:
+    """Whether the question names this value to leave it out (the check's advice is then <>, not =)."""
+    for m in re.finditer(r"(?<![\w-])" + re.escape(value) + r"(?![\w-])", question or "", re.I):
+        if excluded(question, m):
+            return True
+    return False
+
+
+def conditioned(field: str, sqls: list[str]) -> bool:
+    """A query of the answer has a condition on this field (=, <>, IN, NOT IN, LIKE, IS)."""
+    pat = re.compile(r"(?<![\w@])\"?" + re.escape(field) + r"\"?\s*(?:=|<>|!=|\bNOT\s+IN\b|\bIN\b|\bNOT\s+LIKE\b|"
+                     r"\bLIKE\b|\bIS\b)", re.I)
+    return any(pat.search(q or "") for q in sqls)
 
 
 def unused(question: str, sqls: list[str]) -> list[tuple[str, str, str]]:
@@ -77,5 +105,7 @@ def unused(question: str, sqls: list[str]) -> list[tuple[str, str, str]]:
             low = v.lower()
             if f"'{low}'" in said or f'"{low}"' in said:
                 continue
+            if excluded(question, m) and conditioned(o.name, sqls):
+                continue                                 # left out: any condition on its field keeps it out
             out.append((v, o.name, o.parent))
     return list(dict.fromkeys(out))

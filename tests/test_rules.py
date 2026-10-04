@@ -540,3 +540,90 @@ def test_any_events_counted_as_samples_and_no_sample_in_the_default_window(world
                        json.dumps({"success": True, "rows": [], "row_count": 0})) is not None      # no rows at all
     assert window_note(metrics, "SELECT COUNT(*) AS n FROM \"node_memory_MemTotal_bytes\" WHERE node = 'srv-x'",
                        json.dumps({"success": True, "rows": [{"n": 0}], "row_count": 1})) is not None  # a count of 0
+
+
+def test_a_value_the_question_leaves_out_is_met_by_a_condition_on_its_field(ruled):
+    """"Which counterparty had the biggest notional with the desk that day, cancelled trades left out?" answered
+    right with STATUS IN ('NEW', 'AMENDED'): the check of named values wanted = 'CANCELLED', sent it back, and the
+    model answered about the cancelled trades. A value the question leaves out is met by any condition on its field;
+    with none, the advice is <>."""
+    from supagent.agent import NAMED_OUT_NUDGE
+    from supagent.knowledge.named import left_out, unused
+
+    failed = 'SELECT COUNT(*) FROM "jobs" WHERE "STATUS" = \'FAILED\''
+    assert unused("How many jobs failed, billing jobs left out?", [failed]) == [("BILLING", "APPLICATION", "jobs")]
+    assert left_out("How many jobs failed, billing jobs left out?", "BILLING")
+    assert unused("How many jobs failed, billing jobs left out?", [failed + " AND \"APPLICATION\" IN ('PAYROLL')"]) == []
+    assert unused("How many jobs failed excluding billing jobs?", [failed + " AND \"APPLICATION\" <> 'X'"]) == []
+    assert unused("How many jobs failed, hors PAYROLL?", [failed + " AND \"APPLICATION\" = 'BILLING'"]) == []
+    assert unused("How many billing jobs failed?", [failed + " AND \"APPLICATION\" = 'PAYROLL'"]) == \
+        [("BILLING", "APPLICATION", "jobs")]                                    # named to keep: = still wanted
+    assert not left_out("How many billing jobs failed?", "BILLING")
+    assert "APPLICATION <> 'BILLING'" in NAMED_OUT_NUDGE.format(value="BILLING", field="APPLICATION", table="jobs")
+
+
+def test_a_question_that_keeps_the_previous_period_keeps_its_other_conditions(ruled, monkeypatch):
+    """"Top two products by number of trades?" after two questions on one desk and day (dev3): the subjects found it
+    on the same data with no word that refers back, so the check of a follow-up's conditions did not run; its query
+    kept the previous day (the message says none) and dropped the desk. Carrying the previous period makes it a
+    follow-up for that check: the dropped conditions are sent back once. A message with its own period is left alone."""
+    from test_agent_loop import agent_with, call, say
+
+    from supagent.agent import CARRY_HALF_NUDGE
+    from supagent.knowledge.carry import carries_period
+
+    day = " AND \"ts\" >= '2026-09-23' AND \"ts\" < '2026-09-24'"
+    prev = ('SELECT COUNT(*) FROM "jobs" WHERE "STATUS" = \'FAILED\' AND "ENVIRONMENT_TYPE" <> \'UAT\' AND "LABEL" = \'D\''
+            + day)
+    top = ('SELECT "APPLICATION", COUNT(*) FROM "jobs" WHERE "STATUS" = \'FAILED\' AND "ENVIRONMENT_TYPE" <> \'UAT\''
+           + day + ' GROUP BY 1 ORDER BY 2 DESC LIMIT 2')
+    assert carries_period([prev], [top])
+    assert not carries_period([prev], [top.replace("2026-09-23", "2026-09-21").replace("2026-09-24", "2026-09-22")])
+    assert not carries_period([prev], [top.replace('"jobs"', '"other"')])                  # another table
+    history = [{"role": "user", "content": "How many jobs failed on 23 September, label D?"},
+               {"role": "assistant", "content": "12 jobs failed.", "queries": [{"query": prev}]}]
+    plain = {"request": {"database_id": 1, "sql": top}}
+    kept = {"request": {"database_id": 1, "sql": top.replace(" GROUP BY", " AND \"LABEL\" = 'D' GROUP BY")}}
+    a, ran = agent_with(monkeypatch, [call("execute_sql", plain), say("BILLING and PAYROLL."),
+                                      call("execute_sql", kept), say("BILLING and PAYROLL, label D.")], results=ROWS)
+    answer, _trace = a.ask("Top two applications by failures?", history)
+    assert [r[1] for r in ran] == [plain, kept] and answer == "BILLING and PAYROLL, label D."
+    assert "keep the previous question's period" in CARRY_HALF_NUDGE
+    b, ran = agent_with(monkeypatch, [call("execute_sql", plain), say("BILLING and PAYROLL.")], results=ROWS)
+    answer, _trace = b.ask("Top two applications by failures on 23 September?", history)
+    assert [r[1] for r in ran] == [plain] and answer == "BILLING and PAYROLL."            # its own period
+
+
+def test_a_follow_up_about_a_field_the_previous_queries_never_read_runs_a_query(ruled, monkeypatch):
+    """"Which error code came up most often?" after a count and a failure rate was answered with no query (the
+    previous figures again, or an invented count): the chat cannot hold a field its queries never read. Such a
+    follow-up gets a compulsory query; an identifier (TICKET_ID) or a field already read does not count."""
+    from superset.extensions import db
+    from test_agent_loop import agent_with, call, say
+
+    from supagent.knowledge.carry import new_fields
+    from supagent.models import KObject
+
+    src = db.session.query(KObject).filter(KObject.kind == "index", KObject.name == "jobs").one().source_id
+    added = [KObject(source_id=src, kind="field", parent="jobs", name=n, data_type="keyword")
+             for n in ("ERROR_CODE", "RUN_ID")]
+    db.session.add_all(added)
+    db.session.commit()
+    try:
+        failed = 'SELECT COUNT(*) FROM "jobs" WHERE "STATUS" = \'FAILED\' AND "ENVIRONMENT_TYPE" <> \'UAT\''
+        assert new_fields("Which error code came up most often?", [failed]) == ["ERROR_CODE"]
+        assert new_fields("Which error code came up most often?", [failed.replace("COUNT(*)", '"ERROR_CODE", COUNT(*)')
+                                                                    + ' GROUP BY 1']) == []          # already read
+        assert new_fields("Which run id failed?", [failed]) == []                                    # an identifier
+        history = [{"role": "user", "content": "How many jobs failed on 23 September?"},
+                   {"role": "assistant", "content": "12 jobs failed.", "queries": [{"query": failed}]}]
+        by_code = {"request": {"database_id": 1, "sql": failed.replace("COUNT(*)", '"ERROR_CODE", COUNT(*)')
+                               + " GROUP BY 1 ORDER BY 2 DESC"}}
+        a, ran = agent_with(monkeypatch, [say("12 jobs failed, mostly with TIMEOUT."),
+                                          call("execute_sql", by_code), say("TIMEOUT, 5 of the 12.")], results=ROWS)
+        answer, _trace = a.ask("Which error code came up most often?", history)
+        assert a.new_fields == ["ERROR_CODE"] and [r[1] for r in ran] == [by_code] and answer == "TIMEOUT, 5 of the 12."
+    finally:
+        for o in added:
+            db.session.delete(o)
+        db.session.commit()

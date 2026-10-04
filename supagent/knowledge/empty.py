@@ -176,6 +176,12 @@ def why_empty(database: Any, sql: str, counted: bool = False) -> str:
         st = top.stats or {}
         if backend == "osagg":
             rng = st.get("time_range") or [None, None]
+            tf = columns.get(st.get("time_field") or "")
+            if tf is not None and rng[0] and rng[1]:
+                from supagent.knowledge.period import as_day, day_stats, osagg_reads_days
+
+                if day_stats(tf.stats or {}) and osagg_reads_days():
+                    rng = [as_day(rng[0]), as_day(rng[1])]   # days: as SQL compares them (not 02:00)
             learned = _when(st.get("profiled_at"))
             stopped = bool(learned and _when(rng[1]) and learned - _when(rng[1]) > dt.timedelta(days=STOPPED_DAYS))
             h = _time_hint(table, times, st.get("time_field"), rng[0], rng[1], stopped)
@@ -184,10 +190,29 @@ def why_empty(database: Any, sql: str, counted: bool = False) -> str:
             h = _time_hint(table, times, "ts", st.get("data_from"), st.get("data_to"), stopped)
         if h:
             hints.append(h)
+        elif backend == "osagg":                        # another date field of the index (ORDER_DATE, not the
+            for col in sorted({c for c, _op, _t in times if c != st.get("time_field")}):   # main time field)
+                o = columns.get(col)
+                fst = (o.stats or {}) if o is not None else {}
+                lo, hi = fst.get("min"), fst.get("max")
+                if not lo or not hi:
+                    continue
+                from supagent.knowledge.period import as_day, day_stats, osagg_reads_days
+
+                if day_stats(fst) and osagg_reads_days():
+                    lo, hi = as_day(lo), as_day(hi)
+                h = _time_hint(table, [(c, op, t) for c, op, t in times if c == col], col, lo, hi, False)
+                if h:
+                    hints.append(h.replace(f"{table} has data", f"{table} has data ({col})", 1))
+                    break
     if not hints:
         return ""
     if counted:
+        before = [h for h in hints if "the time window is before it" in h or "the time window is after it" in h]
         hints = [h for h in hints if "is not a value" in h or "is written" in h]   # a 0 is an answer otherwise
+        if before and not hints:                        # a sum of 0 for a day before the data: no data, not 0
+            return ("Nothing matched (0). From the data dictionary: " + "; ".join(before[:2]) + ". Say that the data "
+                    "does not cover that period (it starts later, or stopped), rather than a figure of 0.")
         if not hints:
             return ""
         return ("Nothing matched (0). From the data dictionary: " + "; ".join(hints[:4]) + ". Say that the value "

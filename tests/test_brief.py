@@ -173,3 +173,68 @@ def test_a_question_routed_to_the_servers_or_the_usual_gets_only_what_it_names(s
             assert ("The system around this question" in blocks) is whole, route
             assert ("What the question names" in blocks) is not whole, route
         a.moa = None
+
+
+def test_the_inputs_of_parts_two_steps_up(system, app):
+    """What rows late before they were ready waited for: what the parts depend on or read from, and what sends data
+    to them, two steps up the map (candidate C, agent.inputs_walk)."""
+    from supagent.knowledge.brief import inputs_of
+
+    with app.app_context():
+        assert inputs_of(["Invoicing"]) == [("Payments", "application", "Invoicing")]   # Invoicing waits for Payments
+        assert inputs_of(["Payments"]) == []                  # it calls a service, depends on nothing
+        assert inputs_of(["no such thing"]) == []
+
+
+def test_the_logs_of_the_inputs_are_read_by_the_system(app, monkeypatch):
+    """Late before ready: the inputs' logs, one compare_logs call by code on the first log table with a field of
+    their category (the team's logs member found "still waiting for its inputs: <feed>" in an upstream application's
+    logs; the single agent had read only the question's own applications)."""
+    from supagent import agent as A
+    from supagent.knowledge import linkfinder
+    from supagent import tools as T
+
+    seen = {}
+    monkeypatch.setattr(linkfinder, "log_tables", lambda: [{"table": "applogs", "owners": {"APPLICATION": "application"}}])
+
+    def fake(table, start, end, where="", **kw):
+        seen.update(table=table, start=start, end=end, where=where)
+        return {"conclusion": "(1) \"<name> still waiting for its inputs after # min: FEED_A\" (WARN, 30 lines, none "
+                              "on the earlier days)"}
+
+    monkeypatch.setattr(T, "compare_logs", fake)
+    found = [("APP_UP", "application", "APP_Q"), ("FEED_A", "feed", "APP_UP")]
+    with app.app_context():
+        note = A.Agent._upstream_logs(found, {"start": "2026-09-07 00:00", "end": "2026-09-08 04:40"})
+        none = A.Agent._upstream_logs(found, {"start": "2026-09-07 00:00"})          # no window: nothing read
+    assert seen == {"table": "applogs", "start": "2026-09-07 00:00", "end": "2026-09-08 04:40",
+                    "where": "\"APPLICATION\" IN ('APP_UP')"}
+    assert "What the logs of APP_UP say" in note and "still waiting for its inputs" in note and none == ""
+
+    # where the change is concentrated (the pool the rows waited on): the inputs' lines there first, then everywhere
+    monkeypatch.setattr(linkfinder, "log_tables", lambda: [
+        {"table": "applogs", "owners": {"APPLICATION": "application", "POOL": "pool"}}])
+    calls = []
+
+    def quiet_there(table, start, end, where="", **kw):
+        calls.append(where)
+        if "POOL" in where:
+            return {"conclusion": "Nothing new in the logs: every pattern of the window is there on the earlier days."}
+        return {"conclusion": "What the logs say that they do not usually: (1) \"<name> still waiting for its inputs\""}
+
+    monkeypatch.setattr(T, "compare_logs", quiet_there)
+    content = ('(1) rows past SCHEDULED_TIME and not yet at READY_TIME then: on \\"POOL\\", concentrated on GRID_A '
+               '(82 against 0 usually) above usual; on "ASSET_CLASS", concentrated on BLUE (x3 its usual)')
+    with app.app_context():
+        note = A.Agent._upstream_logs(found, {"start": "2026-09-07 00:00", "end": "2026-09-08 04:40"},
+                                      A.CONCENTRATED.findall(content) + [("POOL", "GRID_A")])
+    assert calls == ["\"APPLICATION\" IN ('APP_UP') AND \"POOL\" IN ('GRID_A')", "\"APPLICATION\" IN ('APP_UP')"]
+    assert note.startswith("\n(What the logs of APP_UP say") and "still waiting" in note
+
+    # nothing new: a short line, not the patterns of every day (a "no free slot" line would read as a lead)
+    monkeypatch.setattr(T, "compare_logs", lambda table, start, end, where="", **kw: {
+        "conclusion": "Nothing new in the logs: every pattern of the window is there on the earlier days as much. As "
+                      "every day: \"no free slot on GRID_B for <name> after # min\" (4493 lines)."})
+    with app.app_context():
+        quiet = A.Agent._upstream_logs(found, {"start": "2026-09-07 00:00", "end": "2026-09-08 04:40"})
+    assert "nothing new over the window" in quiet and "no free slot" not in quiet

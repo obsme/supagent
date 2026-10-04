@@ -75,3 +75,31 @@ def unlinked(question: str, queries: list[str]) -> tuple[dict[str, Any], str] | 
     return term, (f"your queries read {' and '.join(sorted(tables))} apart, each with its own conditions, while the "
                   f"definition relates them: \"{phrase}\" are the rows of the first part, linked by their key "
                   "(the period goes on the first part only)")
+
+
+# "what share of that week's sales was refunded?": a part of those rows that something happened to, counted within
+# them ("what share of all the orders is that?" compares two counts: not this)
+SHARE_OF = re.compile(r"\b(?:what|which)\s+(?:share|part|percentage|proportion|fraction|portion)\s+of\b[^?]{0,80}?"
+                      r"\b(?:was|were|got|had been|have been|has been)\s+\w+(?:ed|en)\b|"
+                      r"\bquel(?:le)?\s+(?:part|pourcentage|proportion)\b[^?]{0,80}?\b(?:a|ont|a été|ont été)\s+"
+                      r"\w+(?:é|ée|és|ées)\b", re.I)
+
+
+def unlinked_share(question: str, queries: list[str]) -> str | None:
+    """What differs, when the question asks for a share of a set of rows and the queries read the part and the
+    whole from different tables apart (the refunds dated that week over the sales of that week): the part must be
+    counted within the same rows (its key in them)."""
+    from supagent.knowledge.rulecheck import _tables
+
+    if not SHARE_OF.search(question or ""):
+        return None
+    per = [(q, _tables(q)) for q in queries or [] if q and re.search(r"\bSELECT\b", q, re.I)]
+    tables: set[str] = set().union(*(ts for _q, ts in per)) if per else set()
+    if len(tables) < 2:
+        return None
+    for q, ts in per:
+        if len(ts) >= 2 and re.search(r"\bJOIN\b|\bIN\s*\(\s*SELECT\b|\bEXISTS\s*\(", q, re.I):
+            return None                                  # the part read within the whole's rows
+    return (f"the question asks for a share of a set of rows, and your queries read {' and '.join(sorted(tables))} "
+            "apart, each with its own conditions: the part must be counted within the same rows (linked to them by "
+            "their key), not over its own period")

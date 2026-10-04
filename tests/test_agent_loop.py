@@ -464,3 +464,94 @@ def test_what_the_model_says_about_a_check_before_the_corrected_answer_is_cut():
     assert without_correction_lead(en).startswith("## Cause")
     for kept in ("Here is the final answer to your question: 12.", "## Cause\nHere is the revised version of the table:\n| a |"):
         assert without_correction_lead(kept) == kept
+
+
+def test_the_previous_answer_given_again_for_a_new_question_is_sent_back(ctx, monkeypatch):
+    """A follow-up ("Which traders work on it?") answered with the previous answer word for word, no tool called:
+    sent back once with a query made compulsory (a live run gave the book ranking again, twice, then marked)."""
+    previous = ("The book that lost the most money on 22 September in official PnL is BOOK_A, with a loss of "
+                "-248,707 EUR. The five worst books were BOOK_A, BOOK_B, BOOK_C, BOOK_D and BOOK_E.")
+    history = [{"role": "user", "content": "Which book lost the most money on 22 September, in official PnL?"},
+               {"role": "assistant", "content": previous}]
+    sql = {"request": {"database_id": 1, "sql": "SELECT DISTINCT TRADER FROM pnl WHERE BOOK = 'BOOK_A'"}}
+    a, ran = agent_with(monkeypatch, [say(previous), call("execute_sql", sql), say("TR1 and TR2 work on BOOK_A.")],
+                        results=lambda n, args: json.dumps({"success": True, "rows": [{"TRADER": "TR1"}, {"TRADER": "TR2"}],
+                                                            "row_count": 2}))
+    a.follow_up = True
+    answer, _trace = a.ask("Which traders work on it?", history)
+    assert answer.startswith("TR1 and TR2") and ran and a.llm.choices[1] == "required"
+    # asked to repeat: no check
+    b, _ran = agent_with(monkeypatch, [say(previous)])
+    b.follow_up = True
+    answer, _trace = b.ask("Can you repeat that?", history)
+    assert answer.startswith("The book that lost the most money")
+
+
+def test_a_new_value_answered_with_figures_and_no_query_gets_a_compulsory_query(ctx, monkeypatch):
+    """"And QUICKSHIP over the same days?" (a value no query of the exchange used): the answer read the data's
+    description only and gave a figure; sent back with the next call made compulsory (it used to be sent back
+    without, and the figure came again, made up)."""
+    from supagent.agent import NO_QUERY_NUDGE
+
+    sql = {"request": {"database_id": 1, "sql": "SELECT COUNT(*) AS n FROM shipments WHERE CARRIER = 'QUICKSHIP'"}}
+    a, ran = agent_with(monkeypatch, [call("describe_data", {"index": "shipments"}),
+                                      say("QUICKSHIP shipped **15** express parcels; the query ran on the data."),
+                                      call("execute_sql", sql), say("QUICKSHIP shipped 16 express parcels.")],
+                        results=lambda n, args: json.dumps({"success": True, "rows": [{"n": 16}], "row_count": 1}))
+    a.names = a.names | {"describe_data"}
+    import supagent.agent as agent_mod
+
+    monkeypatch.setattr(agent_mod, "adds_to", lambda question, before, earlier: True)   # (another value: QUICKSHIP)
+    history = [{"role": "user", "content": "How many express parcels did FASTPOST ship from 18 to 20 September?"},
+               {"role": "assistant", "content": "FASTPOST shipped 121 express parcels from 18 to 20 September."}]
+    answer, _trace = a.ask("And QUICKSHIP over the same days?", history)
+    sent = [m["content"] for m in a.llm.seen[-1] if m["role"] == "user" and m["content"] == NO_QUERY_NUDGE]
+    assert answer.startswith("QUICKSHIP shipped 16") and sent and "required" in a.llm.choices
+
+
+def test_a_short_follow_up_keeps_the_unit_the_question_before_asked():
+    from supagent.agent import unit_carried
+
+    history = [{"role": "user", "content": "What was the average duration of the jobs on 22 September, in minutes?"},
+               {"role": "assistant", "content": "5.08 minutes."}]
+    assert unit_carried("And the longest one?", history) == "minutes"
+    assert unit_carried("And the longest one, in hours?", history) is None          # a unit said
+    assert unit_carried("Which applications had the most failures over the whole of September, and how many?",
+                        history) is None                                         # a long new question
+    french = [{"role": "user", "content": "Quelle est la latence moyenne, en millisecondes ?"}]
+    assert unit_carried("And its average?", french) == "millisecondes"
+    assert unit_carried("And the longest one?", [{"role": "user", "content": "How many jobs failed?"}]) is None
+
+
+def test_a_possessive_follow_up_gets_both_readings_when_both_are_possible(ctx, monkeypatch):
+    """"And its average latency, in seconds?" after "Which error code came up most often?": "its" may be the
+    pricer of the conversation or the error code just named; the prompt asks for both when both are possible."""
+    a, _ran = agent_with(monkeypatch, [say("0.36 s for the pricer; 5.0 s for the TIMEOUT requests.")] * 4)
+    history = [{"role": "user", "content": "Which error code came up most often?"},
+               {"role": "assistant", "content": "TIMEOUT, 5 times."}]
+    a.ask("And its average latency, in seconds?", history)
+    told = a.llm.seen[0][-1]["content"]
+    assert "give the figure for both" in told
+    b, _ran = agent_with(monkeypatch, [say("5.")] * 4)
+    b.ask("How many failed?", history)
+    assert "give the figure for both" not in b.llm.seen[0][-1]["content"]
+
+
+def test_an_action_said_done_with_no_tool_is_sent_back_to_be_done(ctx, monkeypatch):
+    """"Put it on the dashboard X" after a chart was made: the answer said "the chart was added to the dashboard"
+    with no call at all (a dev run; a follow-up restating the chat passes the no-tool check): it used to be marked
+    only; it is sent back once with a compulsory call, and the call does it."""
+    history = [{"role": "user", "content": "Create a line chart of the orders per day and save it as 'Orders per day'."},
+               {"role": "assistant", "content": "The chart 'Orders per day' was saved (chart 395)."}]
+    added = {"request": {"dashboard_id": 70, "chart_id": 395}}
+    a, ran = agent_with(monkeypatch, [say("The chart 'Orders per day' (chart 395) was added to the dashboard Deliveries."),
+                                      call("add_chart_to_existing_dashboard", added),
+                                      say("The chart 'Orders per day' is now on the dashboard Deliveries.")] + [say("Done.")] * 2,
+                        results=lambda n, args: json.dumps({"dashboard": {"id": 70, "charts": [395]}, "success": True}))
+    a.names = a.names | {"add_chart_to_existing_dashboard"}
+    a.follow_up = True
+    answer, _trace = a.ask("Put it on the dashboard 'Deliveries'.", history)
+    sent = [m["content"] for m in a.llm.seen[-1] if m["role"] == "user" and
+            m["content"].startswith("(Check before answering: your answer says that")]
+    assert sent and "a dashboard was made or changed" in sent[0]
+    assert ran and ran[0][0] == "add_chart_to_existing_dashboard" and "required" in a.llm.choices

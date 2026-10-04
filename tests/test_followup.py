@@ -329,6 +329,20 @@ def test_a_saved_chart_needs_a_name(ctx):
     _n, _a, fine = guard.before("generate_chart", {"request": {"dataset_id": None, "config": config,
                                                               "save_chart": True, "chart_name": "Failed jobs - 23 Sep"}})
     assert fine is None
+    # the name the request gave ("save it as 'X'"): filled in, not refused (a model sent the same nameless call 8 times)
+    a.question = "Make a table chart of the failed jobs per app and save it as 'Failed jobs per app - 23 Sep'."
+    req = {"dataset_id": None, "config": config, "save_chart": True}
+    _n, args, named = guard.before("generate_chart", {"request": req})
+    assert named is None and args["request"]["chart_name"] == "Failed jobs per app - 23 Sep"
+
+
+def test_a_chart_said_renamed_with_no_call_is_a_claimed_change():
+    from supagent.agent import CHART_CHANGE_CLAIM, action_claim
+
+    said = 'The chart has been renamed to "Sold orders per day". It is available at: /explore/?slice_id=395.'
+    assert CHART_CHANGE_CLAIM.search(said) and action_claim(said, []) == (
+        "the chart was changed", "update_chart with generate_preview false")
+    assert CHART_CHANGE_CLAIM.search("Le graphique a été renommé « Commandes ».")
 
 
 def test_update_chart_cannot_change_the_dataset(ctx):
@@ -415,3 +429,17 @@ def test_the_same_saving_call_is_not_made_again(ctx, monkeypatch):
     a.names |= {"update_chart"}
     a.ask("Change chart 124")
     assert len(ran) == 1                                                # the second one: "already made"
+
+
+def test_earlier_answers_named_by_their_place_are_a_follow_up():
+    """"What is the ratio of the first to the second?" after two revenue questions was routed to a new subject and
+    answered with a temperature over a latency. The first/the second, the former/the latter, both of them, du premier
+    au second, les deux chiffres refer to the answers before; "the first trade of the day" does not."""
+    from supagent.agent import refers_back
+
+    assert refers_back("What is the ratio of the first to the second?")
+    assert refers_back("And the latter?") and refers_back("Compare both of them.")
+    assert refers_back("Quel est le rapport du premier au second ?") and refers_back("Et les deux chiffres ensemble ?")
+    assert not refers_back("What was the first trade of the day?")
+    assert not refers_back("Which desk was second in September?")
+    assert not refers_back("How many orders were sold in the first week?")

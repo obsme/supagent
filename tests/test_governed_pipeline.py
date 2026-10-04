@@ -131,10 +131,10 @@ def test_a_question_back_and_a_chart_request(lab, monkeypatch, driver):
     assert answer == "- failed jobs\n- HTTP 5xx errors\n\nJob failures or HTTP errors?" and ran == []   # ends asking
     b, ran = governed(monkeypatch, [])
     sql = {"request": {"database_id": 1, "sql": "SELECT 1"}}
-    b.llm = _Replies([choose(kind="action"), call("execute_sql", sql), say("The chart is saved.")])
-    with acting_as("admin"):
+    b.llm = _Replies([choose(kind="action"), call("execute_sql", sql), say("Failed jobs per application: 1.")])
+    with acting_as("admin"):          # (an answer that said "the chart is saved" with no save is sent back: 0.9.3)
         answer, trace = b.ask("Save a bar chart of the failed jobs per application on 23 September.")
-    assert b.way == "classic: a action question" and answer.startswith("The chart is saved.")
+    assert b.way == "classic: a action question" and answer.startswith("Failed jobs per application: 1.")
     assert [t["tool"] for t in trace][:2] == ["decide", "classic"]
 
 

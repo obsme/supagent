@@ -61,7 +61,8 @@ INVESTIGATION_TASKS = (
     "Where: the field and the values that hold the change",
     "Why: what the late or slow rows wait for, run on, depend on (capacity, inputs, servers, versions, logs)",
     "Check the cause on the same rows and time; rule out what does not match",
-    "Deeper: the change or record behind the cause (changes, releases, alerts before the effect began)",
+    "Deeper: the change or record behind the cause (records_about with the parts you blame: changes, releases, "
+    "alerts before the effect began)",
 )
 # "continue", "go on", "ok, carry on please", "vas-y, termine": a short message that only says to go on (not "Next,
 # show me the ...": a question of its own)

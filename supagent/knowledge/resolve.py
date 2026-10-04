@@ -533,6 +533,36 @@ def value_places(question: str, databases: list[Any] | None = None) -> dict[str,
     return out
 
 
+SOURCE_ASK = re.compile(r"\bwhich (?:of these |one of these |)(?:sources?|index(?:es)?|indices|data(?:sets?)?|tables?)\b|"
+                        r"\bquelle?s? (?:source|index|donn[ée]es|table)", re.I)
+
+
+def needless_ask(question: str, answer: str, databases: list[Any] | None = None) -> tuple[str, str, str] | None:
+    """A question back about where the data is ("which of these sources: the jobs, the batch runs, the reports?")
+    when a value the question names is in one place only (an application: a field of the jobs, nowhere else):
+    (the value, its field, its table), else None. Only when the question back offers data sources (two index
+    names, or "which source / index / data"); an ambiguity of meaning (late: shipped or delivered) is not this."""
+    from supagent.models import KObject
+
+    tokens = value_tokens(question)
+    if not tokens:
+        return None
+    names = {n for (n,) in db.session.query(KObject.name).filter(KObject.kind == "index", KObject.gone_at.is_(None))}
+    offered = {n for n in names if n and n in (answer or "")}
+    if len(offered) < 2 and not SOURCE_ASK.search(answer or ""):
+        return None
+    databases = databases if databases is not None else _databases()
+    for token, places in value_rows(tokens, databases).items():
+        where = {(t, field) for (_i, kind, field), parents in places.items() if kind == "field" for t in parents}
+        if len(offered) >= 2:
+            where = {(t, f) for t, f in where if t in offered}   # of the sources offered, the ones that hold it
+        tables = {t for t, _f in where}
+        if len(tables) == 1:
+            table, field = sorted(where)[0]
+            return token, field, table
+    return None
+
+
 def value_tokens(question: str) -> list[str]:
     """The words of a question that look like values (BILLING_API, ORDERS, srv-a-1), at most MAX_VALUES."""
     return [t for t in dict.fromkeys(VALUE_TOKEN.findall(question or "")) if not t.isdigit()][:MAX_VALUES]

@@ -340,13 +340,17 @@ def test_a_follow_up_with_another_day_is_not_answered_from_the_chat(ctx, monkeyp
     assert last.endswith("The CPU of srv-amer-002 yesterday.")          # a new question, not a completion
 
 
-def test_a_date_alone_on_a_field_with_times_is_sent_back(world):
-    """A date field whose values carry a time (stored at 00:00 UTC, read at 02:00 here; or real times) finds
-    nothing with = '2026-09-23': sent back once with the day's range; a field of dates alone passes."""
+def test_a_date_alone_on_a_field_with_times_is_sent_back(world, monkeypatch):
+    """A date field whose values carry a time (stored at 00:00 UTC, read at 02:00 here by osagg before 0.2.10; or
+    real times) finds nothing with = '2026-09-23': sent back once with the day's range; a field of dates alone
+    passes. (osagg 0.2.10 and later compare such a field as dates: test_a_field_of_days_is_compared_with_dates.)"""
     from superset.extensions import db
 
+    from supagent.knowledge import period
     from supagent.knowledge.period import refusal
     from supagent.models import KObject
+
+    monkeypatch.setattr(period, "osagg_reads_days", lambda: False)
 
     src = db.session.query(KObject).filter(KObject.kind == "index", KObject.name == "jobs").one().source_id
     timed = KObject(source_id=src, kind="field", parent="jobs", name="RUN_DATE", data_type="date",
@@ -668,3 +672,161 @@ def test_a_question_that_goes_on_from_the_last_exchange_is_a_follow_up(ctx, monk
     b.subject = Decision(1, "the same data")                                            # a new question
     b.prompt("Which error code came up most often?", history)
     assert b.intent_text == "Which error code came up most often?"
+
+
+def test_an_upper_bound_at_the_next_midnight_on_a_field_of_days_is_sent_back(world):
+    """BETWEEN ... AND '2026-09-21' (or <= '2026-09-21 00:00') on a field that holds days takes in the whole 21st
+    (measured through osagg: an upper bound at a midnight counts the rows of that day too); for "14 to 20
+    September" it adds a day. Sent back once; the same bound on a field of instants passes (the next midnight is
+    before that day's rows)."""
+    from superset.extensions import db
+
+    from supagent.knowledge.period import refusal
+    from supagent.models import KObject
+
+    src = db.session.query(KObject).filter(KObject.kind == "index", KObject.name == "jobs").one().source_id
+    days = KObject(source_id=src, kind="field", parent="jobs", name="RUN_DATE", data_type="date",
+                   stats={"min": "2026-07-01 02:00", "max": "2026-09-25 02:00"})
+    db.session.add(days)
+    db.session.commit()
+    try:
+        q = "How many jobs ran from 14 to 20 September?"
+        sql = lambda w: _sql(f'SELECT COUNT(*) FROM "jobs" WHERE {w} AND "ts" >= \'2026-09-14\' AND "ts" < \'2026-09-21\'')  # noqa: E731
+        back = refusal(q, "execute_sql", sql("\"RUN_DATE\" BETWEEN '2026-09-14' AND '2026-09-21'"), TODAY)
+        assert back and "BETWEEN and <= include their last value" in back and "< '2026-09-21'" in back
+        back = refusal(q, "execute_sql", sql("\"RUN_DATE\" <= '2026-09-21 00:00'"), TODAY)
+        assert back and "BETWEEN and <= include" in back
+        assert refusal(q, "execute_sql", sql("\"RUN_DATE\" <= '2026-09-20'"), TODAY) is None     # the last day: right
+        assert refusal(q, "execute_sql", sql("\"ts\" <= '2026-09-21 00:00'"), TODAY) is None     # instants (ts)
+    finally:
+        db.session.delete(days)
+        db.session.commit()
+
+
+def test_a_field_of_days_is_compared_with_dates(world, monkeypatch):
+    """A field that holds days, learned as 2026-07-01 02:00 .. 2026-09-25 02:00 (midnight UTC shown in Paris), is
+    compared by osagg as dates at 00:00 (measured: COB_DATE = '2026-09-23' is the 23rd's 96 rows; >= '2026-09-22
+    02:00' AND < '2026-09-23 02:00' is the 23rd's rows, not the 22nd's). Answers copied the 02:00 onto their bounds
+    and moved the period by a day (the first day of a month left out, another day read). Such a bound is sent back
+    once with dates; an equality with a date is not refused; describe_data shows the field's range as dates."""
+    from superset.extensions import db
+
+    from supagent.knowledge import period
+    from supagent.knowledge.describe import _field_line
+    from supagent.knowledge.period import as_day, day_stats, day_time_bound, refusal
+    from supagent.models import KObject
+
+    monkeypatch.setattr(period, "osagg_reads_days", lambda: True)       # osagg 0.2.10 and later
+
+    assert day_stats({"min": "2026-07-01 02:00", "max": "2026-09-25 02:00"})
+    assert day_stats({"min": "2026-07-01", "max": "2026-09-25"})
+    assert not day_stats({"min": "2026-07-01 02:00", "max": "2026-09-25 14:37"})
+    assert as_day("2026-09-01 02:00") == "2026-09-01" and as_day("2026-08-31 22:00") == "2026-09-01"
+    src = db.session.query(KObject).filter(KObject.kind == "index", KObject.name == "jobs").one().source_id
+    days = KObject(source_id=src, kind="field", parent="jobs", name="RUN_DATE", data_type="date",
+                   stats={"min": "2026-07-01 02:00", "max": "2026-09-25 02:00"})
+    db.session.add(days)
+    db.session.commit()
+    try:
+        q = "How many jobs ran in September?"
+        back = refusal(q, "execute_sql", _sql("SELECT COUNT(*) FROM \"jobs\" WHERE \"RUN_DATE\" >= '2026-09-01 02:00' "
+                                              "AND \"RUN_DATE\" < '2026-10-01 02:00'"), TODAY)
+        assert back and "holds days" in back and "the rows of 2026-09-01 are left out" in back
+        assert "\"RUN_DATE\" >= '2026-09-01' AND \"RUN_DATE\" < '2026-09-02'" in back
+        back = day_time_bound("SELECT 1 FROM \"jobs\" WHERE \"RUN_DATE\" >= '2026-09-01' AND "
+                              "\"RUN_DATE\" < TIMESTAMP '2026-10-01 02:00:00'", {"jobs"})
+        assert back and "the rows of 2026-10-01 are taken in" in back
+        back = day_time_bound("SELECT 1 FROM \"jobs\" WHERE \"RUN_DATE\" BETWEEN '2026-09-22 02:00' AND "
+                              "'2026-09-23 02:00'", {"jobs"})
+        assert back and "left out" in back
+        assert day_time_bound("SELECT 1 FROM \"jobs\" WHERE \"RUN_DATE\" >= '2026-09-01 00:00' AND "
+                              "\"RUN_DATE\" <= '2026-09-30 23:59:59'", {"jobs"}) is None        # whole days
+        assert day_time_bound("SELECT 1 FROM \"jobs\" WHERE \"ts\" >= '2026-09-01 02:00'", {"jobs"}) is None  # instants
+        one = _sql("SELECT COUNT(*) FROM \"jobs\" WHERE \"RUN_DATE\" = '2026-09-23' AND \"ts\" >= '2026-09-23' "
+                   "AND \"ts\" < '2026-09-24'")
+        assert refusal("How many jobs ran on 23 September?", "execute_sql", one, TODAY) is None   # = a date: right
+        line = _field_line(days)
+        assert "range 2026-07-01 .. 2026-09-25 (days" in line and "02:00" not in line
+        monkeypatch.setattr(period, "osagg_reads_days", lambda: False)  # an older osagg: 02:00 is the day's time
+        assert day_time_bound("SELECT 1 FROM \"jobs\" WHERE \"RUN_DATE\" >= '2026-09-01 02:00'", {"jobs"}) is None
+        assert "02:00" in _field_line(days)
+    finally:
+        db.session.delete(days)
+        db.session.commit()
+
+
+def test_a_question_about_the_future_answered_with_past_figures_says_so(ctx, monkeypatch):
+    """"How much revenue will we make next week?" answered with last week's revenue and no word that the data cannot
+    tell the future (a main-suite answer of 0.9.3): sent back once. An answer that says it, or queries that read the
+    future period (parcels promised for tomorrow: data about the future), pass."""
+    from test_agent_loop import agent_with, call, say
+
+    from supagent.knowledge.period import future_start, future_unsaid
+
+    today = dt.date(2030, 1, 9)                                                     # a Wednesday
+    last_week = ["SELECT SUM(\"AMOUNT\") FROM \"orders\" WHERE \"DAY\" >= '2030-01-01' AND \"DAY\" < '2030-01-08'"]
+    q = "How much revenue will we make next week?"
+    assert future_start(q, today) == dt.date(2030, 1, 14)
+    assert future_unsaid(q, "Last week's revenue was 404,290.94 EUR.", last_week, today) == dt.date(2030, 1, 14)
+    assert future_unsaid(q, "The data cannot tell next week's revenue; last week's was 404,290.94 EUR.", last_week,
+                         today) is None
+    promised = ["SELECT COUNT(*) FROM \"parcels\" WHERE \"PROMISED\" >= '2030-01-10' AND \"PROMISED\" < '2030-01-11'"]
+    assert future_unsaid("How many parcels are promised for tomorrow?", "41 parcels.", promised, today) is None
+    assert future_unsaid("What was the revenue last week?", "404,290.94 EUR.", last_week, today) is None
+    assert future_start("Quel sera le chiffre d'affaires la semaine prochaine ?", today) == dt.date(2030, 1, 14)
+    sql = {"request": {"database_id": 1, "sql": last_week[0]}}
+    a, ran = agent_with(monkeypatch, [call("execute_sql", sql), say("Last week's revenue was 404,290.94 EUR."),
+                                      say("The data cannot tell next week's revenue; last week's was 404,290.94 EUR.")])
+    answer, _trace = a.ask(q)
+    assert answer.startswith("The data cannot tell next week's revenue") and a.usage.get("nudges")
+
+
+def test_a_weekday_named_with_last_or_on_is_that_day(world):
+    """"How many support tickets were opened last Monday?" on a Thursday was counted on the Tuesday (the model's
+    weekday arithmetic): "last/this past/on <weekday>", "lundi dernier", "ce lundi" name the most recent one before
+    today, and the period check holds the query to it. A bare weekday ("the expiry Monday effect", "every Monday")
+    names no day."""
+    from supagent.knowledge.period import days_named, refusal
+
+    thursday = dt.date(2030, 1, 10)
+    assert days_named("How many jobs ran last Monday?", thursday) == [dt.date(2030, 1, 7)]
+    assert days_named("Combien de jobs lundi dernier ?", thursday) == [dt.date(2030, 1, 7)]
+    assert days_named("And this past Friday?", thursday) == [dt.date(2030, 1, 4)]
+    assert days_named("last Thursday?", thursday) == [dt.date(2030, 1, 3)]                  # a week ago, not today
+    assert days_named("the expiry Monday effect", thursday) == [] and days_named("Jobs every Monday", thursday) == []
+    today = dt.date(2026, 9, 24)                                                             # the fixture's data
+    wrong = _sql("SELECT COUNT(*) FROM \"jobs\" WHERE \"ts\" >= '2026-09-22' AND \"ts\" < '2026-09-23'")
+    back = refusal("How many jobs ran last Monday?", "execute_sql", wrong, today)
+    assert back and "2026-09-21" in back
+    right = _sql("SELECT COUNT(*) FROM \"jobs\" WHERE \"ts\" >= '2026-09-21' AND \"ts\" < '2026-09-22'")
+    assert refusal("How many jobs ran last Monday?", "execute_sql", right, today) is None
+
+
+def test_a_window_around_the_day_is_a_comparison_for_an_open_question(world):
+    """"Why did the desk lose money on COB 22 September?": its queries compare the 22nd with the days around it
+    (dates 15 and 23); the period check refused them as "another day". For an open question (why, is it usual) a
+    window that holds the day passes; for a count of that day it is refused as several days, said so."""
+    from supagent.knowledge.period import refusal
+
+    today = dt.date(2026, 9, 24)
+    around = _sql("SELECT \"ts\", COUNT(*) FROM \"jobs\" WHERE \"ts\" >= '2026-09-15' AND \"ts\" < '2026-09-23' GROUP BY 1")
+    assert refusal("Why did so many jobs fail on 22 September?", "execute_sql", around, today, comparing=True) is None
+    back = refusal("How many jobs failed on 22 September?", "execute_sql", around, today)
+    assert back and "several days" in back and "2026-09-22 00:00" in back
+    other = _sql("SELECT COUNT(*) FROM \"jobs\" WHERE \"ts\" >= '2026-09-15' AND \"ts\" < '2026-09-16'")
+    assert "this query's dates are" in (refusal("Why did so many jobs fail on 22 September?", "execute_sql", other,
+                                               today, comparing=True) or "")             # not around it: another day
+
+
+def test_an_end_of_day_at_23_59_is_the_span_s_own_end(world):
+    """"from 1 to 20 September" written BETWEEN '...-01 00:00' AND '...-20 23:59': the end of the 20th, the span's own
+    end. It was refused as a boundary a few hours off, and the model then wrote '...-21 00:00' (the whole 21st on a
+    field of days: 888 for 831)."""
+    from supagent.knowledge.period import refusal
+
+    today = dt.date(2026, 9, 24)
+    q = "How many jobs ran from 14 to 20 September?"
+    end_of_day = _sql("SELECT COUNT(*) FROM \"jobs\" WHERE \"ts\" BETWEEN '2026-09-14 00:00' AND '2026-09-20 23:59'")
+    assert refusal(q, "execute_sql", end_of_day, today) is None
+    short = _sql("SELECT COUNT(*) FROM \"jobs\" WHERE \"ts\" >= '2026-09-14 00:00' AND \"ts\" < '2026-09-20 00:00'")
+    assert refusal(q, "execute_sql", short, today)                                          # a day short: refused

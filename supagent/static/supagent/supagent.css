@@ -73,6 +73,7 @@ h2 { font-size: 16px; margin: 0 0 6px; }
 .tabs a.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .grow { flex: 1; }
 .who { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 30vw; }
+.ver { color: var(--muted); font-size: 12px; white-space: nowrap; margin-right: 12px; font-variant-numeric: tabular-nums; }
 
 .page { padding: 16px; }
 .btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 6px; cursor: pointer; text-decoration: none;

@@ -130,6 +130,16 @@ def _relation_text(rel: Relation, a: KObject, b: KObject) -> str:
     return f"{end(a)} = {end(b)} ({why})"
 
 
+def _days(f: KObject | None) -> bool:
+    """A date field that holds days (period.day_stats): SQL compares its values as dates at 00:00, whatever hour a
+    list shows them at (midnight UTC in local time)."""
+    if f is None or (f.data_type or "") not in ("date", "date_nanos"):
+        return False
+    from supagent.knowledge.period import day_stats, osagg_reads_days
+
+    return day_stats(f.stats or {}) and osagg_reads_days()
+
+
 def _field_line(f: KObject) -> str:
     st = f.stats or {}
     line = f'  - "{f.name}" ({f.data_type or "?"}{", " + f.unit if f.unit else ""})'
@@ -142,7 +152,11 @@ def _field_line(f: KObject) -> str:
         line += f" values: {', '.join(map(str, vals[:30]))}" + (f" ... ({len(vals)})" if len(vals) > 30 else "")
     elif st.get("cardinality") is not None:
         line += f" {_num(st['cardinality'])} distinct values"
-    if st.get("min") is not None and "values" not in st:
+    if st.get("min") is not None and "values" not in st and _days(f):
+        from supagent.knowledge.period import as_day
+
+        line += f" range {as_day(st.get('min'))} .. {as_day(st.get('max'))} (days: compare it with dates alone)"
+    elif st.get("min") is not None and "values" not in st:
         line += f" range {_num(st.get('min'))} .. {_num(st.get('max'))}"
         if st.get("avg") is not None:
             line += f", avg {_num(st.get('avg'))}"
@@ -182,13 +196,19 @@ def _indices(src: Source, database: Any, ws: set[str], only: str | None,
         out = [f"\nIndex {ix.name}: {(ix.description or '').strip()}{marker(ix)}",
                f'  SQL: FROM "{ix.name}" on database id {database.id} "{database.database_name}"'
                + (f"; Superset dataset id {ds.id} (charts: dataset_id={ds.id})" if ds else "")]
+        fs = fields.get(ix.name, [])
         if st.get("docs") is not None:
             rng = st.get("time_range") or [None, None]
             span = f" from {rng[0]} to {rng[1]}" if rng[0] and rng[1] else ""
+            days = bool(span) and _days(next((f for f in fs if f.name == st.get("time_field")), None))
+            if days:
+                from supagent.knowledge.period import as_day
+
+                span = f" from {as_day(rng[0])} to {as_day(rng[1])} (days: compare it with dates alone)"
             out.append(f"  {_num(st['docs'])} documents" + (f"; time field {st.get('time_field')}{span}"
                                                             if st.get("time_field") else "")
-                       + (f" ({st['timezone']} time, as SQL shows it)" if st.get("timezone") and span else ""))
-        fs = fields.get(ix.name, [])
+                       + (f" ({st['timezone']} time, as SQL shows it)" if st.get("timezone") and span and not days
+                          else ""))
         try:
             from supagent.knowledge.experience import timing_hints
 
