@@ -32,9 +32,10 @@ class ScriptedLLM:
         self.seen: list[list[dict]] = []
         self.last_usage = None
 
-    def chat(self, messages, tools=None, max_tokens=None):
+    def chat(self, messages, tools=None, max_tokens=None, tool_choice=None):
         self.seen.append([dict(m) for m in messages])
         self.caps = [*getattr(self, "caps", []), max_tokens]
+        self.choices = [*getattr(self, "choices", []), tool_choice]
         reply = self.replies.pop(0)
         self.last_usage = {"calls": 1, "seconds": 2.0, "prompt_tokens": 1000, "completion_tokens": 20,
                            "cached_tokens": 800}
@@ -179,7 +180,7 @@ def _health(errors: dict) -> str:
     ("The CPU check could not run, so I cannot say whether the servers are healthy.", False),
     ("Memory was high on srv-2 from 03:00 to 04:10.", False),
 ])
-def test_all_clear_while_a_check_could_not_run_is_corrected(ctx, monkeypatch, answer, noted):
+def test_all_clear_while_a_check_could_not_run_is_corrected(ctx, no_ledger, monkeypatch, answer, noted):
     a, _ran = agent_with(monkeypatch, [call("check_health", {"start": "a", "end": "b"}), say(answer)],
                          results=lambda n, args: _health({"cpu_saturation": "timeout"}))
     out, _trace = a.ask("Were the servers saturated (srv-2 too)?")
@@ -368,14 +369,14 @@ def test_two_calls_before_the_end_the_model_is_told_to_answer(ctx, monkeypatch):
     assert len(told) == 1 and len(ran) == 9
 
 
-def test_an_investigation_gets_twice_the_calls(ctx, monkeypatch):
+def test_an_investigation_gets_twice_the_calls(ctx, no_ledger, monkeypatch):
     """The facts, where, why, the check of the cause: an investigation needs more calls than an answer (0.9)."""
     from supagent.agent import LAST_CALLS
 
     sql = [{"request": {"database_id": 1, "sql": f"SELECT {i} AS n"}} for i in range(19)]
     a, ran = agent_with(monkeypatch, [call("execute_sql", q) for q in sql] + [say("The cause is in the results above.")])
     answer, _trace = a.ask("Why did the jobs fail?")                  # 10 calls for an answer: 20 here
-    told = [m for m in a.llm.seen[-1] if m["role"] == "user" and m["content"] == LAST_CALLS]
+    told = [m for m in a.llm.seen[-1] if m["role"] == "user" and m["content"].startswith(LAST_CALLS)]
     assert len(told) == 1 and len(ran) == 19 and answer.startswith("The cause")
     assert "used up" not in answer
 
@@ -449,3 +450,17 @@ def test_a_conversation_longer_than_the_model_s_context_is_shortened_not_lost(ct
                          results=lambda name, args: big)
     with pytest.raises(LLMError):
         b.ask("How many runs has each application?")
+
+
+def test_what_the_model_says_about_a_check_before_the_corrected_answer_is_cut():
+    """"Le nombre 14 est bien celui de ... Je vais supprimer cette mention. Voici la réponse corrigée : ---" (the user
+    never saw the check): cut when the answer follows; kept when it is the answer itself."""
+    from supagent.agent import without_correction_lead
+
+    fr = ("Le nombre 14 est bien celui du résultat. Je vais supprimer cette mention.\n\nVoici la réponse corrigée :"
+          "\n\n---\n\n## Cause du retard\n\n" + "Le batch attend sa licence. " * 20)
+    assert without_correction_lead(fr).startswith("## Cause du retard")
+    en = "You are right.\n\nHere is the corrected answer:\n\n## Cause\n" + "The pool is full. " * 20
+    assert without_correction_lead(en).startswith("## Cause")
+    for kept in ("Here is the final answer to your question: 12.", "## Cause\nHere is the revised version of the table:\n| a |"):
+        assert without_correction_lead(kept) == kept

@@ -30,6 +30,10 @@ import requests
 RETRY_STATUS = {429, 500, 502, 503, 504}
 # a busy or restarting server (llama.cpp answers 503 "Loading model" for a minute or two): about 3 minutes
 _TEMPLATE_KWARGS: dict[str, bool] = {}     # base URL -> accepts chat_template_kwargs
+_CHOICE: dict[str, bool] = {}       # servers that accept tool_choice "required" (unknown: tried)
+# a request longer than the model's context (llama.cpp answers it with HTTP 400): never read as a refused field
+CONTEXT_ERROR = re.compile(r"exceeds? the available context|exceed_context_size|context (?:size|length|window)|"
+                           r"maximum context length|too many tokens|prompt is too long", re.I)
 RETRY_DELAYS = (2.0, 5.0, 10.0, 20.0, 30.0, 45.0, 60.0)
 
 
@@ -274,11 +278,13 @@ class LLM:
             self._model = data[0]["id"]
         return self._model
 
-    def chat(self, messages: list[dict], tools: list[dict] | None = None, max_tokens: int | None = None) -> dict:
+    def chat(self, messages: list[dict], tools: list[dict] | None = None, max_tokens: int | None = None,
+             tool_choice: str | None = None) -> dict:
         """One chat completion; returns the assistant message (content and/or tool_calls). An empty
         answer (seen with local models, often right after a big tool result) is asked again
         EMPTY_RETRIES times before EmptyAnswer. Inside background(), waits first while answers
-        are being computed."""
+        are being computed. tool_choice "required": the model must call a tool (a server that refuses it
+        is asked again with "auto")."""
         if getattr(_BACKGROUND, "on", False):
             try:
                 from supagent.priority import wait_for_answers
@@ -289,7 +295,8 @@ class LLM:
         body: dict[str, Any] = {"model": self.model, "messages": messages, "temperature": self.cfg.temperature}
         if tools:
             body["tools"] = tools
-            body["tool_choice"] = "auto"
+            body["tool_choice"] = tool_choice if tool_choice in ("auto", "required") and \
+                _CHOICE.get(self.base, True) else "auto"
         if max_tokens:
             body["max_tokens"] = max_tokens
         if not self.cfg.thinking and _TEMPLATE_KWARGS.get(self.base, True):
@@ -301,10 +308,17 @@ class LLM:
                 try:
                     r = self._request("POST", "/chat/completions", data=json.dumps(body))
                 except LLMError as ex:
-                    if "chat_template_kwargs" not in body or not re.search(r"HTTP (400|422)", str(ex)):
+                    said = str(ex)
+                    if not re.search(r"HTTP (400|422)", said) or CONTEXT_ERROR.search(said):
+                        raise                                    # (a context too long is no refused field)
+                    if body.get("tool_choice") == "required" and re.search(r"tool.?choice|required", said, re.I):
+                        _CHOICE[self.base] = False               # a server that only knows "auto"
+                        body["tool_choice"] = "auto"
+                    elif "chat_template_kwargs" in body:
+                        _TEMPLATE_KWARGS[self.base] = False      # a gateway that refuses unknown fields
+                        body.pop("chat_template_kwargs")
+                    else:
                         raise
-                    _TEMPLATE_KWARGS[self.base] = False          # a gateway that refuses unknown fields
-                    body.pop("chat_template_kwargs")
                     r = self._request("POST", "/chat/completions", data=json.dumps(body))
                 try:
                     data = r.json()

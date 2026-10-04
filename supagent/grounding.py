@@ -221,6 +221,9 @@ def seen_numbers(messages: list[dict]) -> list[float]:
         content = m.get("content")
         if not isinstance(content, str) or m.get("role") == "system":
             continue
+        if m.get("role") != "tool":                     # "(Now: Saturday 2026-10-03 10:43)", "on 23 September": a
+            for rx in SKIP[5:12]:                       # date or a time is no figure (43 failed jobs is not 10:43)
+                content = rx.sub(" ", content)
         found = _values(content)
         values.update(found)
         if m.get("role") == "user":                     # a period of the question in minutes or hours (not
@@ -283,6 +286,75 @@ def ungrounded(answer: str, messages: list[dict]) -> list[str]:
                           for m in messages if m.get("role") != "system").lower()
         out += [n for n in names if n.lower() not in given and not _given_range(n.lower(), given)]
     return list(dict.fromkeys(out))
+
+
+# what an answer presents as names: bold spans, the head of a list item, table cells, identifiers (BOOK_X_CDS, T042)
+BOLD = re.compile(r"\*\*([^*\n]{2,80})\*\*|__([^_\n]{2,80})__")
+LIST_HEAD = re.compile(r"^\s*(?:\d+[.)]|[-*\u2022])\s+(?:\*\*)?([^:\n*|()]{2,60}?)(?:\*\*)?\s*(?:[:\u2013\u2014(-]|$)", re.M)
+TABLE_ROW = re.compile(r"^\s*\|(.+)\|\s*$", re.M)
+IDENT = re.compile(r"(?<![\w-])([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|[A-Z]{1,5}\d{2,}[A-Z0-9]*|[a-z][a-z0-9]*(?:-[a-z0-9]+)+\d)(?![\w-])")
+NAME_WORD = re.compile(r"(?<![\w-])([A-Z][a-z]{2,}|[A-Z]{2,}[A-Z0-9_]*|[A-Za-z]+\d[\w-]*)(?![\w-])")
+LABELS = frozenset("""note notes total totals yes no none answer answers summary result results cause causes conclusion average
+mean median maximum minimum max min share rate count sum value values date time day days week month year today yesterday
+tomorrow query sql table chart dashboard dataset field fields column columns row rows status error errors warning check
+breakdown details detail key finding findings recommendation recommendations next step steps important
+monday tuesday wednesday thursday friday saturday sunday january february march april may june july august september
+october november december the this that these those which what who where when why how and for with from per all other
+others overall impact here there also only""".split())
+
+
+def presented_names(answer: str) -> list[str]:
+    """The names an answer presents, without its code and links: identifiers anywhere (BOOK_X_CDS, T042,
+    srv-x-9), and the capitalised words of a short list item, of a bold span that is no heading, of a table's first
+    column (its header left out). Labels, dates and headings ("**Root cause**:") are no names."""
+    text = SKIP[0].sub(" ", answer or "")
+    text = re.sub(r"https?://\S+|\]\([^)]*\)|`[^`\n]*`", " ", text)
+    prose = TABLE_ROW.sub(" ", text)                   # a table's cells: by the table's own rule below
+    spans = []
+    for m in BOLD.finditer(prose):
+        span = m.group(1) or m.group(2)
+        if len(span.split()) <= 3 and not re.match(r"\s*:", prose[m.end():m.end() + 2]):
+            spans.append(span)                         # "**Tracy**", not "**Root cause**:"
+    for m in LIST_HEAD.finditer(prose):
+        if len(m.group(1).split()) <= 3:
+            spans.append(m.group(1))
+    rows = [[c.strip() for c in m.group(1).split("|")] for m in TABLE_ROW.finditer(text)]
+    rule = [all(re.fullmatch(r":?-{2,}:?", c) for c in r if c) for r in rows]
+    for i, cells in enumerate(rows):
+        if rule[i] or (i + 1 < len(rows) and rule[i + 1]):
+            continue                                   # the header and the line under it
+        first = next((c for c in cells if c), "")
+        if first.startswith("**") or first.startswith("__"):
+            continue                                   # "| **Carrier** | CARRIER_A |": a label of a key-value table
+        if first and not re.fullmatch(r"[-+\d.,%\s\u202f\u00a0]+[A-Za-z%]{0,4}", first):
+            spans.append(first)
+    out = [m.group(1) for m in IDENT.finditer(text)]
+    for span in spans:
+        out += [w for w in NAME_WORD.findall(span) if w.lower() not in LABELS]
+    return list(dict.fromkeys(w for w in out if len(w) >= 2 and not re.fullmatch(r"[DWMY][-+]?\d+|\d+", w)))
+
+
+def new_names(answer: str, texts: list[str]) -> list[str]:
+    """The names the answer presents that none of `texts` (the instructions, the knowledge, the chat, what the tools
+    gave) holds: "Which traders work on it?" answered with no tool and "1. **Tracy** 2. **Alice**" is no restatement
+    of the previous answer."""
+    given = "\n".join(t for t in texts if t).lower()
+    return [n for n in presented_names(answer)
+            if not re.search(rf"(?<![\w-]){re.escape(n.lower())}(?![\w-])", given)]
+
+
+def new_times(answer: str, texts: list[str]) -> list[str]:
+    """The times of day (04:26) the answer gives that none of `texts` holds: "At what time was it?" answered from the
+    previous answer must find the time there."""
+    given = "\n".join(t for t in texts if t)
+    text = SKIP[0].sub(" ", answer or "")
+    said = {f"{int(h):02d}:{mi}" for h, mi in re.findall(r"(?<![\d:])(\d{1,2}):(\d{2})(?![\d])", given)}
+    out = []
+    for h, mi in re.findall(r"(?<![\d:])(\d{1,2}):(\d{2})(?![\d])", text):
+        t = f"{int(h):02d}:{mi}"
+        if t not in said and t not in out:
+            out.append(t)
+    return out
 
 
 RANGE_WORDS = re.compile(r"\b(up to|through|thru|until|to|continuing|and so on|etc|jusqu'?[àa]|jusqu)\b|\.\.\.|…|–|—",

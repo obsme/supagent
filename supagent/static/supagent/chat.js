@@ -171,6 +171,35 @@
     return d;
   }
 
+  // the work plan of a big request (0.9.2): the tasks the agent keeps, their state and what each found
+  var PLAN_MARK = { pending: "\u25cb", in_progress: "\u25b6", done: "\u2713", dropped: "\u2013" };
+  function planView(steps, live) {
+    var last = null;
+    (steps || []).forEach(function (s) { if (s.tool === "work_plan" && (s.ledger || s.result)) last = s; });
+    if (!last) return null;
+    var d = el("details", { class: "plan" });
+    if (live) d.open = true;
+    var tasks = last.ledger && last.ledger.tasks;
+    if (!tasks) {                                   // while it works: the plan as the system gave it back
+      d.appendChild(el("summary", { text: "Work plan" }));
+      d.appendChild(el("pre", { text: String(last.result || "").replace(/^Work plan kept[^\n]*\n/, "") }));
+      return d;
+    }
+    var done = tasks.filter(function (t) { return t.status === "done" || t.status === "dropped"; }).length;
+    d.appendChild(el("summary", { text: "Work plan: " + done + " of " + tasks.length + " tasks done" }));
+    var ol = el("ol");
+    tasks.forEach(function (t) {
+      var li = el("li", { class: "task " + (t.status || "pending") }, [
+        el("span", { class: "mark", text: PLAN_MARK[t.status] || "\u25cb" }),
+        el("span", { class: "title", text: " " + t.title })]);
+      if (t.note) li.appendChild(el("span", { class: "note", text: " \u2014 " + t.note }));
+      if (t.by === "system") li.title = "Added by the system (the investigation's steps, a finding to explain)";
+      ol.appendChild(li);
+    });
+    d.appendChild(ol);
+    return d;
+  }
+
   function filesView(files) {
     if (!files || !files.length) return null;
     var f = el("div", { class: "files" });
@@ -405,6 +434,8 @@
       var label = el("span", { class: "what", text: what + elapsed(m) });
       label.dataset.base = what;
       bubble.appendChild(el("div", { class: "working" }, [el("span", { class: "dots", "aria-hidden": "true" }, [el("i"), el("i"), el("i")]), label]));
+      var pv = planView(steps, true);
+      if (pv) bubble.appendChild(pv);
       var sv = stepsView(steps, m.id);
       if (sv) bubble.appendChild(sv);
       return;
@@ -430,6 +461,8 @@
       meta.appendChild(el("span", { class: "stamp", text: "Answered " + S.whenFull(m.finished_at) + (secs >= 0 ? " \u00b7 " + secs + " s" : "") }));
     }
     bubble.appendChild(meta);
+    var pv2 = planView(m.steps, false);
+    if (pv2) bubble.appendChild(pv2);
     var sv2 = stepsView(m.steps, m.id);
     if (sv2) bubble.appendChild(sv2);
   }

@@ -1220,6 +1220,76 @@ Also in 0.9: `compare_to_usual` refuses a counter read as it is (its value only 
 or its increase) and says when a value far from its median is still within what the earlier weeks differ by; the
 times of the metric tools ("now-6h") follow `agent.now` when an admin pinned it.
 
+## The work plan of a big request (0.9.2)
+
+A big request (an investigation, a question of many parts, several charts and a dashboard, a request of 60 words or
+more) gets a work plan the system keeps outside the conversation, so a long answer loses neither its context nor the
+work left to do (`agent.ledger`, on):
+
+* the agent writes the request's tasks first with the tool `work_plan`, sets the one it works on *in progress*, and
+  each one *done* with a line of what it found, or *dropped* with why;
+* the system attaches what each tool returned (a line: the rows, the conclusion of a comparison, the error) to the
+  task in progress: the results are the tools', never the model's words;
+* an investigation starts with its steps as tasks (the facts, where, why, the check of the cause, what changed
+  behind it), and each finding of `compare_groups` becomes a task: explain it or rule it out; a step the agent
+  writes again in its own words ("The facts: compare_groups on the night jobs") is that step, not a new task;
+* plan updates go with the next tool call, not as calls of their own;
+* every few calls the agent is reminded of the plan; it gets the plan again with its last calls and when the
+  conversation was shortened (the model's context full);
+* before the answer, once: its own tasks with no result, the findings the answer neither names nor rules out, and an
+  investigation's open step "what changed behind the cause" are sent back (do them, or say why not);
+* the chat shows the plan as a checklist under the answer (open while the agent works), and "continue" in the next
+  message takes up the tasks left, with the notes of the done ones.
+
+## Checks of an answer before it is shown (0.9.2)
+
+On top of the checks of the earlier versions (the numbers come from the results, the team's rules are applied, a
+follow-up keeps its conditions, a cause is tied to the question's parts):
+
+* **Names and times no tool gave**: a follow-up may restate the chat without a query, but not when it presents names
+  (bold, list items, a table's first column, identifiers) or times of day that neither the previous answer nor the
+  question holds ("Which traders work on it?" answered with names no result gave).
+* **A tool call made compulsory** (`agent.force_tool`, on): an answer that still gives figures, names or times no tool
+  returned, with no query run in it, or a query written out and not run, is sent back once with the next call made
+  compulsory (`tool_choice` "required"; a server that refuses it is asked with "auto").
+* **A query written and not run is no answer**, even without figures ("The SQL query used: ..."), unless the
+  question asks for the query itself.
+* **Asked back, not guessed** (`agent.ask_unclear`, on): a question that names one thing several values match ("the
+  options book" when five books are options books; "the pricer" for a day's data) or that starts a conversation with
+  something never said ("show me the late ones") is answered with one short question naming the candidates. A name
+  before a noun ("the <APP> jobs"), a noun before a noun ("the most job failures"), a value of any field the noun
+  names already said, words that together name one value ("the official PnL report") or a day said in another part
+  of the message never make it ask.
+* **The subject a follow-up names**: "how many trades of that desk were cancelled", "that desk's PnL" keep only the
+  conditions on that subject, not the narrower ones of the previous answer (voice trades, one trader), also when the
+  previous answer only selected it ("which desk does the first one work on?"); "of them" keeps them all.
+* **A follow-up that names a value no query used**: "And the flash PnL?" after the official PnL needs its own query
+  (FLASH is a value of a field of the table just read that no query, question or answer of the exchange used): no
+  answer from the chat, and a tool call is made compulsory if it comes back without one.
+* **The period of a query**: the question's period must be on the time its words name ("orders placed from ... to
+  ..." on the orders' time), else on the table's time field. A JOIN with the period on one of its tables passes (the
+  join keeps the other tables' rows of those); a date of the same event (ORDER_DATE for ORDER_TIME) and the date the
+  answer a follow-up continues put its period on count as the table's time, and so does any of a table's own dates
+  when its time field only says when the record was indexed (@timestamp).
+* **A term defined as a relation between rows** (`agent.definition_links`, on): when the question says a term the
+  glossary defines as a relation ("the refunds of those orders") and the answer read the tables apart (no JOIN, no
+  key IN (SELECT ...)), the answer is sent back once to link them on their key, the period on the first part. By
+  code, no LLM call.
+* **Metrics**: "were there any restarts that day?" counts events (increase), not samples; a query with no time
+  condition that finds nothing is told that it read only the backend's default window (the last 24 h) and where the
+  metric's data begins and ends, so that "no data" is never concluded from it.
+* **What a query shows by its own text** (before it runs, or after the answer): two result columns computing the same
+  aggregate under different names (a condition lost: "SUM(x) AS errors, SUM(x) AS total"); a time of day read from
+  hour buckets and given as the moment ("04:00" for a peak at 04:26).
+* **Saved charts**: "make it a pie chart" changes the saved chart (Superset's `update_chart` otherwise writes an
+  unsaved preview); an answer that says a chart was changed when only a preview was made is marked.
+* Dates and times given with the question are no figures (a made-up "43" is not grounded by "10:43"), and what the
+  model says about a check before its corrected answer ("here is the corrected answer:") is cut.
+* **A test, off: the definition of a term** (`agent.definition_check`): when a question uses a term the glossary
+  defines with how to compute it, one short LLM call compares the definition with the answer's queries. Measured on
+  202 stored answers of the end-to-end suite: it flags 16 of the 33 wrong ones, and 55 of the 169 right ones (most of
+  them queries that ignore a rule with no effect that day, such as a restatement on a day without any): it stays off.
+
 ## The subjects of a chat (0.8)
 
 A chat often follows one subject over several questions, then changes subject, then comes back. Each question now

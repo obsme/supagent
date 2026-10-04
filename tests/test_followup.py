@@ -344,6 +344,45 @@ def test_update_chart_cannot_change_the_dataset(ctx):
     assert refused and "cannot change the dataset" in refused and "add_chart_to_existing_dashboard" in refused
 
 
+def test_a_chart_change_is_saved_and_an_unsaved_preview_is_never_called_a_change(ctx):
+    """"Make it a pie chart instead.": Superset's update_chart only makes an unsaved preview by default (the saved
+    chart keeps its type), and the answer said "The chart has been updated to a pie chart" (0.9.1, two runs out of
+    two). The change is saved unless the user asks for a preview; a preview's result says it is not saved; an answer
+    that says the chart changed with no change saved is marked."""
+    import json
+    import types
+
+    from supagent.agent import Agent, ChartGuard, claims_check
+
+    a = object.__new__(Agent)
+    a.names, a.question = {"update_chart"}, "Make it a pie chart instead."
+    a.superset = types.SimpleNamespace(available=False, call=lambda n, args: "{}")
+    guard = ChartGuard(a)
+    guard.parse = None
+    guard._dataset = lambda ident: None
+    args = {"request": {"identifier": 7, "config": {"chart_type": "pie"}}}
+    _n, sent, refused = guard.before("update_chart", args)
+    assert refused is None and sent["request"]["generate_preview"] is False
+    a.question = "Show me a preview of it as a pie chart, without saving."
+    args = {"request": {"identifier": 7, "config": {"chart_type": "pie"}}}
+    _n, sent, _r = guard.before("update_chart", args)
+    assert "generate_preview" not in sent["request"]                      # Superset's default: a preview
+    a.question = "Make it a pie chart."
+    _n, sent, _r = guard.before("update_chart", {"request": {"identifier": 7, "config": {}, "generate_preview": True}})
+    assert sent["request"]["generate_preview"] is True                    # said by the model: kept
+    preview = json.dumps({"chart": {"id": 7, "viz_type": "echarts_timeseries_bar", "form_data_key": "k",
+                                    "is_unsaved_state": True}})
+    out = guard.after("update_chart", {"request": {"identifier": 7}}, preview)
+    assert "NOT SAVED" in out and "generate_preview false" in out
+    trace = [{"tool": "update_chart", "status": "done", "args": {"request": {"identifier": 7}}, "result": out}]
+    note = claims_check("The chart has been updated to a pie chart.", trace)
+    assert "the saved chart was not changed" in note
+    saved = json.dumps({"chart": {"id": 7, "viz_type": "pie", "is_unsaved_state": False}})
+    trace = [{"tool": "update_chart", "status": "done", "args": {"request": {"identifier": 7}}, "result": saved}]
+    assert claims_check("The chart has been updated to a pie chart.", trace) == ""
+    assert "the saved chart was not changed" in claims_check("I changed the chart to a pie chart.", [])
+
+
 def test_a_time_column_a_chart_filter_cannot_name_asks_for_a_dataset(app, local_db):
     import types
 

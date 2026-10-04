@@ -80,7 +80,7 @@ def test_a_part_the_system_map_links_is_tied_and_another_is_not(elsewhere, app):
     assert untied(q, "It is caused by memory pressure on srv-9.", other)[0] == ["srv-9"]   # not a query on those parts
 
 
-def test_the_agent_sends_an_untied_cause_back_once_then_marks_it(elsewhere, ctx, monkeypatch):
+def test_the_agent_sends_an_untied_cause_back_once_then_marks_it(elsewhere, ctx, no_ledger, monkeypatch):
     from supagent.agent import TIE_NUDGE
 
     sql = {"request": {"database_id": 1, "sql": "SELECT NODE, POOL FROM alerts"}}     # not a query on Billing's parts

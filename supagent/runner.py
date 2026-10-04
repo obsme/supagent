@@ -60,7 +60,8 @@ def _steps_for_page(trace: list[dict]) -> list[dict]:
     out = []
     for t in trace:
         out.append({"tool": t.get("called") or t["tool"], "status": t.get("status"), "seconds": t.get("seconds"),
-                    "args": t.get("args"), "result": (t.get("result") or "")[:1500]})
+                    "args": t.get("args"), "result": (t.get("result") or "")[:1500],
+                    **({"ledger": t["ledger"]} if isinstance(t.get("ledger"), dict) else {})})   # the work plan
     return out
 
 
@@ -350,6 +351,12 @@ def _subject_history(earlier: list, asked: Any, answer_msg: Any, agent: Any) -> 
     with_rows = [(o, h["message"]) for o, h in zip(out, hist) if h["role"] == "assistant" and h["message"].results]
     for o, m in with_rows[-QUERIES_ANSWERS:]:            # "that finding": the queries behind the last answers
         o["queries"] = queries_of(m.results)
+    answers = [(o, h["message"]) for o, h in zip(out, hist) if h["role"] == "assistant"]
+    if answers:                                          # "continue": the work plan of the last answer
+        plan = next((s.get("ledger") for s in reversed(answers[-1][1].steps or [])
+                     if isinstance(s, dict) and isinstance(s.get("ledger"), dict)), None)
+        if plan:
+            answers[-1][0]["ledger"] = plan
     return out
 
 

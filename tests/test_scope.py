@@ -228,7 +228,7 @@ def test_words_of_data_do_not_name_a_database(several):
         assert list(named_databases("the token gateway database", dbs)) == [several["token"]]
 
 
-def test_the_other_reading_is_named_under_the_answer(world, monkeypatch):
+def test_the_other_reading_is_named_under_the_answer(world, no_ledger, monkeypatch):
     from test_agent_loop import agent_with, call, say
 
     from supagent.knowledge.resolve import other_reading

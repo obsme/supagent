@@ -233,3 +233,15 @@ def test_the_total_of_the_rows_a_sentence_names_is_from_the_results():
     assert ungrounded("BILLING and PAYROLL, the critical ones, account for 871 of them.", msgs) == []   # rows 1 + 3
     assert ungrounded("BILLING and PAYROLL account for 950 of them.", msgs) == ["950"]
     assert ungrounded("The critical ones account for 871 of them.", msgs) == ["871"]     # which rows: not said
+
+
+def test_a_date_or_a_time_given_with_the_question_grounds_no_figure():
+    """"(Now: Saturday 2026-10-03 10:43)" is given with every question: 43 failed jobs made up at 10:43 passed the
+    check (the unit test of this file failed only at minute 43). Dates and times of what the model was given are
+    no figures; the figures of the tools' results still are."""
+    from supagent.grounding import seen_numbers, ungrounded
+
+    given = [{"role": "user", "content": "(Now: Saturday 2026-10-03 10:43)\nHow many jobs failed on 23 September?"}]
+    assert 43.0 not in seen_numbers(given) and 23.0 not in seen_numbers(given)
+    assert ungrounded("BILLING had 43 failed jobs.", given) == ["43"]
+    assert ungrounded("BILLING had 41 failed jobs.", given + [{"role": "tool", "content": '{"rows": [{"n": 41}]}'}]) == []

@@ -459,9 +459,84 @@ def test_a_follow_up_keeps_the_previous_questions_conditions(ruled, monkeypatch)
     assert answer.endswith("(Check: the previous question counted with LABEL = 'D'; this answer does not.)")
 
 
+def test_a_follow_up_that_names_its_own_subject_keeps_only_that_subject():
+    """"And how many trades of that desk were cancelled that day?" after "How many of them were booked by voice?": the
+    question is about the desk as a whole. The check used to send the right count back for lacking the voice filter,
+    and the model then counted the cancelled voice trades (0.9.1, two runs out of two). "Of them" keeps everything."""
+    from supagent.knowledge.carry import dropped, subject_fields
+
+    voice = ('SELECT COUNT(*) FROM "trades" WHERE "DESK" = \'EMEA_RATES\' AND "TRADE_DATE" >= \'2026-09-23\' '
+             'AND "TRADE_DATE" < \'2026-09-24\' AND "SOURCE" = \'VOICE\'')
+    cancelled = ('SELECT COUNT(*) FROM "trades" WHERE "DESK" = \'EMEA_RATES\' AND "TRADE_DATE" >= \'2026-09-23\' '
+                 'AND "TRADE_DATE" < \'2026-09-24\' AND "STATUS" = \'CANCELLED\'')
+    assert dropped("And how many trades of that desk were cancelled that day?", [voice], [cancelled]) == []
+    assert dropped("And how many of that desk's trades were cancelled?", [voice], [cancelled]) == []
+    # the rows of the previous answer themselves: the voice filter is kept
+    assert [c.said() for c in dropped("How many of them were cancelled that day?", [voice], [cancelled])] == \
+        ["SOURCE = 'VOICE'"]
+    assert [c.said() for c in dropped("And among those, how many were cancelled?", [voice], [cancelled])] == \
+        ["SOURCE = 'VOICE'"]
+    # the subject itself is still kept: the desk dropped is said
+    other = 'SELECT COUNT(*) FROM "trades" WHERE "STATUS" = \'CANCELLED\''
+    assert [c.said() for c in dropped("How many of that desk's trades were cancelled?", [voice], [other])] == \
+        ["DESK = 'EMEA_RATES'"]
+    # grouped by the field: "that desk's PnL" after "which desk does the first one work on?" (one trader)
+    trader = 'SELECT "DESK", SUM("PNL") FROM "pnl" WHERE "TRADER" = \'T07\' GROUP BY "DESK"'
+    desk = 'SELECT SUM("PNL") FROM "pnl" WHERE "DESK" = \'METALS\''
+    assert dropped("What was that desk's official PnL over the same days?", [trader], [desk]) == []
+    assert [c.said() for c in dropped("And its PnL over the same days?", [trader], [desk])] == ["TRADER = 'T07'"]
+    # the desk only selected before (the desk of that trader), filtered now (0.9.2 candidate A sent the right sum back)
+    distinct = 'SELECT DISTINCT "DESK" FROM "pnl" WHERE "TRADER" = \'T07\' LIMIT 1'
+    assert dropped("What was that desk's official PnL over the same days?", [distinct], [desk]) == []
+    assert [c.said() for c in dropped("And its PnL over the same days?", [distinct], [desk])] == ["TRADER = 'T07'"]
+    # a noun of time names no subject; a noun that is no field of the previous queries neither
+    assert subject_fields("How many failed that day?", {"desk", "status"}) == set()
+    assert subject_fields("What about this week?", {"desk"}) == set()
+    assert subject_fields("Which traders work on that book?", {"book", "cob_date"}) == {"book"}
+    assert subject_fields("Quel est le PnL de ce desk ?", {"desk"}) == {"desk"}
+    assert subject_fields("What share of that application's requests is that?", {"application", "code"}) == \
+        {"application"}
+    assert subject_fields("How many of them were on that server?", {"node"}) == set()
+
+
 def test_a_memory_said_in_other_words_is_learned():
     from supagent.knowledge.memory import SIGNALS
 
     for said in ("when I say BILLING you should know the filter is APPLICATION=BILLING, make it in your memory",
                  "Keep this in your memory: PROD only", "Mémorise que PROD veut dire production"):
         assert SIGNALS.search(said), said
+
+
+def test_any_events_counted_as_samples_and_no_sample_in_the_default_window(world):
+    """"Did it have any OOM kills that day?" answered 1,439 = COUNT(*) of the samples (the check knew only "how
+    many"); "What is the total memory of srv-x?" answered "no data" after queries with no time condition (the
+    backend read its default window, the last 24 h, and the data had ended days before)."""
+    import json
+
+    from superset.extensions import db
+
+    from supagent.knowledge.experience import count_of_counter, window_note
+    from supagent.knowledge.store import upsert
+
+    upsert(world["run"], world["s_prom"], "metric", "", "node_vmstat_oom_kill", {"metric_type": "gauge",
+                                                                                "stats": {"series": 4}})
+    upsert(world["run"], world["s_prom"], "metric", "", "node_memory_MemTotal_bytes", {"metric_type": "gauge", "stats": {
+        "series": 4, "window": "24h", "data_from": "2026-08-25 07:50", "data_to": "2026-09-25 06:20"}})
+    db.session.commit()
+    metrics = world["metrics"]
+    oom = ("SELECT node, COUNT(*) AS kills FROM \"node_vmstat_oom_kill\" WHERE ts >= TIMESTAMP '2026-09-23 00:00' "
+           "AND ts < TIMESTAMP '2026-09-24 00:00' AND node = 'srv-x' GROUP BY node")
+    text = count_of_counter(metrics, oom, "Did it have any OOM kills that day?")
+    assert text and text.startswith("tool error (not run: samples)")
+    mem = "SELECT MAX(value) / 1024 / 1024 / 1024 AS gib FROM \"node_memory_MemTotal_bytes\" WHERE node = 'srv-x'"
+    empty = json.dumps({"success": True, "columns": [{"name": "gib"}], "rows": [{"gib": None}], "row_count": 1})
+    note = window_note(metrics, mem, empty)
+    assert note and "the last 24h before now" in note and "2026-09-25 06:20" in note
+    assert window_note(metrics, mem + " AND ts >= TIMESTAMP '2026-09-24 00:00'", empty) is None    # a period: as is
+    found = json.dumps({"success": True, "columns": [{"name": "gib"}], "rows": [{"gib": 128.0}], "row_count": 1})
+    assert window_note(metrics, mem, found) is None                                                # values found
+    assert window_note(world["jobs"], mem, empty) is None                                          # not metrics
+    assert window_note(metrics, "SELECT COUNT(*) FROM \"node_memory_MemTotal_bytes\" WHERE node = 'srv-x'",
+                       json.dumps({"success": True, "rows": [], "row_count": 0})) is not None      # no rows at all
+    assert window_note(metrics, "SELECT COUNT(*) AS n FROM \"node_memory_MemTotal_bytes\" WHERE node = 'srv-x'",
+                       json.dumps({"success": True, "rows": [{"n": 0}], "row_count": 1})) is not None  # a count of 0

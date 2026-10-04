@@ -108,6 +108,23 @@ SPECS: list[Spec] = [
     Spec("agent.check_numbers", True, "bool", "Every number of an answer must come from what the agent was given "
          "(query results, their totals and rates, the question, the knowledge): the agent is asked once to take "
          "the others from a query, then they are marked in the answer"),
+    Spec("agent.ledger", True, "bool", "Big requests (an investigation, a question of many parts, several charts, a "
+         "long request) get a work plan kept by the system: the tasks the agent writes (work_plan) or the steps of an "
+         "investigation and each finding of compare_groups, the results of its tools attached to them, the plan given "
+         "back when the conversation is shortened, the tasks left and the findings not explained sent back once "
+         "before the answer, the plan shown in the answer's steps; \"continue\" takes up its open tasks"),
+    Spec("agent.ask_unclear", True, "bool", "A question that names one thing several values match (\"the options "
+         "book\" when five books are options books; \"the pricer\" on a day's data) or that starts a conversation "
+         "with something never said (\"show me the late ones\") is asked back with the candidates, not guessed"),
+    Spec("agent.definition_links", True, "bool", "When a question uses a term the glossary defines as a relation "
+         "between rows (\"the refunds of those orders\") and the answer read the tables apart (no JOIN, no key IN "
+         "(SELECT ...)), the answer is sent back once to link them on their key (by code, no LLM call)"),
+    Spec("agent.definition_check", False, "bool", "Test: when a question uses a term the glossary defines with how to "
+         "compute it, one short LLM call compares the definition with the answer's queries; what differs (a "
+         "condition, \"of those orders\") sends the answer back once"),
+    Spec("agent.force_tool", True, "bool", "An answer that gives figures, names or times no tool returned, with no "
+         "query run, is sent back once with a tool call made compulsory (the LLM server must accept tool_choice "
+         "\"required\"; one that refuses it is asked with \"auto\")"),
     # ---- learning
     Spec("learn.enabled", True, "bool", "Learn once a day (at the hour below, on the days below)"),
     Spec("learn.hour", 2, "int", "Daily at this hour (0-23, server time): ONE run per day, not every N hours"),

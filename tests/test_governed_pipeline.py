@@ -73,7 +73,7 @@ GOOD = [{"field": "APPLICATION", "op": "=", "value": "BILLING", "source": "quest
 class _Replies(ScriptedLLM):
     """A ScriptedLLM whose replies may be functions of the messages."""
 
-    def chat(self, messages, tools=None, max_tokens=None):
+    def chat(self, messages, tools=None, max_tokens=None, tool_choice=None):
         self.seen.append([dict(m) for m in messages])
         reply = self.replies.pop(0)
         self.last_usage = {"calls": 1, "seconds": 1.0, "prompt_tokens": 100, "completion_tokens": 10}

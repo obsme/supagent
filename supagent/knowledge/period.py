@@ -212,7 +212,7 @@ def whole_day(question: str, today: dt.date) -> dt.date | None:
 EVENT_GENERIC = {"time", "date", "timestamp", "datetime", "at", "ts", "day", "dt", "utc", "on", "of", "local", "the"}
 DATE_PHRASES = (DAY_RANGE, DAY_MONTH, MONTH_DAY, ISO_DAY,
                 re.compile(rf"\b(?:in|during|for|of|since)\s+{MONTH}", re.I),
-                re.compile(r"\b(yesterday|today|hier|aujourd)", re.I))
+                re.compile(r"\b(yesterday|today|hier|aujourd|that day|the same day|ce jour|le m[êe]me jour)", re.I))
 EVENT_WINDOW = 3                       # words before a date phrase that may name its event
 
 
@@ -319,6 +319,29 @@ def _time_fields(tables: set[str]) -> dict[str, str]:
     return out
 
 
+def _said(field: str, sql: str) -> bool:
+    """The column is in the query."""
+    return re.search(rf"(?<![\w@]){re.escape(field)}(?![\w])", sql or "") is not None
+
+
+def _compared(field: str, sql: str) -> bool:
+    """The column is compared with something in the query (a filter on it), not only shown or grouped by."""
+    f = re.escape(field)
+    return re.search(rf"(?<![\w@]){f}\"?\s*(?:>=|<=|<>|!=|>|<|=|\bBETWEEN\b|\bIN\s*\()", sql or "", re.I) is not None \
+        or re.search(rf"(?:>=|<=|>|<)\s*(?:\w+\.)?\"?{f}(?![\w])", sql or "", re.I) is not None
+
+
+# a time field that names no event (when the record was indexed): any of the table's own dates is its period
+# (CHANGE_TIME of the changes whose time field is @timestamp_date)
+GENERIC_TIME = re.compile(r"^@?(?:timestamp|time|datetime|event_time|ingest(?:ed)?_(?:time|at))(?:_date|_ts|_ms)?$", re.I)
+
+
+def _same_event(a: str, b: str) -> bool:
+    """Two dates of one event: the same first word (ORDER_DATE, ORDER_TIME)."""
+    wa, wb = re.split(r"[^a-z0-9]+", a.lower()), re.split(r"[^a-z0-9]+", b.lower())
+    return bool(wa[0]) and wa[0] == wb[0]
+
+
 def _literals(sql: str) -> list[dt.datetime]:
     out = []
     for m in DATE_LIT.finditer(sql or ""):
@@ -367,8 +390,10 @@ def day_equality(sql: str, tables: set[str]) -> str | None:
     return None
 
 
-def refusal(question: str, tool: str, args: dict, today: dt.date | None = None) -> str | None:
-    """Why this query does not cover the question's period (sent back once), or None."""
+def refusal(question: str, tool: str, args: dict, today: dt.date | None = None,
+            prior: list[str] | None = None) -> str | None:
+    """Why this query does not cover the question's period (sent back once), or None. `prior`: the queries of the
+    answer this message follows (the date they put the period on is the follow-up's too)."""
     if tool not in SQL_TOOLS or not question:
         return None
     from supagent.knowledge.excluded import query_texts
@@ -396,31 +421,52 @@ def refusal(question: str, tool: str, args: dict, today: dt.date | None = None) 
         return None
     asks_business = bool(BUSINESS.search(question))
     named = named_time_fields(question, tables)
-    dates = _date_fields(set(named)) if named else {}
+    dates = _date_fields(set(fields))
+    named_met = time_met = False        # a table of the query whose named time / whose time is filtered
+    waiting: list[tuple[str, str]] = []  # the other tables' refusals: (named | time, the message)
     for table, field in sorted(fields.items()):
         names = named.get(table) or set()
         if names:                                       # the question names the event of its period
-            used = {f for f in dates.get(table, []) if re.search(rf"(?<![\w@]){re.escape(f)}(?![\w])", sql)}
+            used = {f for f in dates.get(table, []) if _said(f, sql)}
             if used & names:
+                named_met = True
                 continue
             want = " or ".join(f'"{f}"' for f in sorted(names))
             if used:
-                return (f"tool error (not run: period): the question's words name the time of its period: {want} of "
-                        f"{table}, and this query puts the period on {', '.join(sorted(used))}. Put the question's "
-                        f"period on {want}. If {sorted(used)[0]} is meant, send this same call again unchanged.")
-            return (f"tool error (not run: period): the question is about a period and this query has no filter on "
-                    f"{want} of {table}, the time its words name: it would count every date. Add the question's "
-                    "period on it. If that is meant, send this same call again unchanged.")
-        uses_time = re.search(rf"(?<![\w@]){re.escape(field)}(?![\w])", sql) is not None
+                waiting.append(("named", f"tool error (not run: period): the question's words name the time of its "
+                                f"period: {want} of {table}, and this query puts the period on "
+                                f"{', '.join(sorted(used))}. Put the question's period on {want}. If "
+                                f"{sorted(used)[0]} is meant, send this same call again unchanged."))
+            else:
+                waiting.append(("named", f"tool error (not run: period): the question is about a period and this "
+                                f"query has no filter on {want} of {table}, the time its words name: it would count "
+                                "every date. Add the question's period on it. If that is meant, send this same call "
+                                "again unchanged."))
+            continue
+        # its time field, or another date of the same event compared with a value (ORDER_DATE for ORDER_TIME), or
+        # the date the answer this message follows put the period on ("which carrier had the most of them?" after
+        # the parcels delivered on 22 September: DELIVERED_TIME, where the index's time is SHIPPED_TIME)
+        uses_time = _said(field, sql) or any(
+            _compared(f, sql) and (_same_event(f, field) or GENERIC_TIME.match(field) is not None
+                                   or any(_compared(f, p) for p in prior or []))
+            for f in dates.get(table, []) if f != field)
         if re.search(r"\bPOSITION_(DATE|LABEL|TIME)\b", sql) and not asks_business:
             return (f"tool error (not run: period): the question gives a date, not a position (business) date, and "
                     f"this query filters POSITION_... Filter the time field \"{field}\" of {table} on the question's "
                     "period instead. If the question does mean position dates, send this same call again unchanged.")
-        if not uses_time and not (asks_business and "POSITION_" in sql):
-            return (f"tool error (not run: period): the question is about a period and this query has no filter on "
-                    f"the time field \"{field}\" of {table}: it would count every date (or only the default window). "
-                    f"Add the question's period on \"{field}\" (dates from the question and from now). If that is "
-                    "meant, send this same call again unchanged.")
+        if uses_time or (asks_business and "POSITION_" in sql):
+            time_met = True
+        else:
+            waiting.append(("time", f"tool error (not run: period): the question is about a period and this query "
+                            f"has no filter on the time field \"{field}\" of {table}: it would count every date (or "
+                            f"only the default window). Add the question's period on \"{field}\" (dates from the "
+                            "question and from now). If that is meant, send this same call again unchanged."))
+    # a JOIN: the period on one of its tables keeps only the rows of the others that join those (the parcels of
+    # the orders placed that week: the period on the orders' time is the parcels' too); a time the question's
+    # words name is still wanted, unless the period is on another time they name
+    joined_ok = len(fields) > 1 and (named_met or (time_met and all(kind == "time" for kind, _ in waiting)))
+    if waiting and not joined_ok:
+        return waiting[0][1]
     lits = _literals(sql)
     spans = ranges_named(question, today) if not HOURS.search(question) else []
     if spans and len(lits) >= 2:                        # "the week of 14 to 20 September": that span exactly

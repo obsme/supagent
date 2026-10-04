@@ -228,6 +228,94 @@ def test_a_follow_up_is_grounded_in_the_previous_answer_only(ctx, monkeypatch):
     assert not b.usage.get("nudges")                                     # the previous answer, restated
 
 
+def test_a_follow_up_naming_what_no_tool_gave_is_sent_back_then_must_call_a_tool(ctx, monkeypatch):
+    """"Which traders work on it?" after the book that lost the most: answered with no tool, "1. **Tracy** 2. **Alice**
+    3. **Bob**" passed as a follow-up restating the chat (no number, no name with a digit; 0.9.1). Names the previous
+    answer does not hold take the exemption away; given again with no query, a tool call is made compulsory once."""
+    import json
+
+    from test_agent_loop import agent_with, call, say
+
+    history = [{"role": "user", "content": "Which book lost the most money on 22 September, in official PnL?"},
+               {"role": "assistant", "content": "**EQ_BOOK_A** lost the most on 22 September: -248,707 EUR."}]
+    made_up = say("The traders who work on the **EQ_BOOK_A** book are:\n\n1. **Tracy**\n2. **Alice**\n3. **Bob**")
+    sql = {"request": {"database_id": 1, "sql": "SELECT DISTINCT \"TRADER\" FROM \"pnl\" WHERE \"BOOK\" = 'EQ_BOOK_A'"}}
+    rows = json.dumps({"success": True, "columns": [{"name": "TRADER"}], "rows": [{"TRADER": "T37"}, {"TRADER": "T38"}],
+                       "row_count": 2})
+    a, ran = agent_with(monkeypatch, [made_up, made_up, call("execute_sql", sql), say("T37 and T38 work on EQ_BOOK_A.")],
+                        results=lambda n, args: rows)
+    answer, _trace = a.ask("Which traders work on it?", history)
+    assert answer == "T37 and T38 work on EQ_BOOK_A." and len(ran) == 1
+    assert a.llm.choices == [None, None, "required", None]               # compulsory once, after two answers
+    restated = say("**EQ_BOOK_A** lost 248,707 EUR on 22 September.")
+    b, _ran = agent_with(monkeypatch, [restated])
+    b.ask("How much did it lose?", history)
+    assert not b.usage.get("nudges") and b.llm.choices == [None]         # the previous answer, restated: as before
+
+
+def test_a_follow_up_naming_a_value_no_query_used_needs_its_own_query(ctx, monkeypatch):
+    """"And the flash PnL?" after the official PnL of a desk: answered with no tool, the official figure given again
+    as the flash one (no number or name new to the chat: it passed as a restating follow-up, 0.9.2 candidate A).
+    FLASH is a value of a field of the table the previous answer read, and no query of it used it: another figure,
+    its own query (compulsory after the answer sent back)."""
+    import json
+
+    from test_agent_loop import agent_with, call, say
+
+    from supagent.knowledge import carry
+
+    values = {"flash": "PNL_STATUS", "official": "PNL_STATUS", "restated": "PNL_STATUS", "eq_book_a": "BOOK"}
+    monkeypatch.setattr(carry, "field_values", lambda tables: values if "pnl" in tables else {})
+    prev = ("SELECT SUM(\"PNL_TOTAL\") FROM \"pnl\" WHERE \"DESK\" = 'EQ_DESK' AND \"PNL_STATUS\" IN ('OFFICIAL', "
+            "'RESTATED') AND \"COB_DATE\" >= '2026-09-22' AND \"COB_DATE\" < '2026-09-23'")
+    history = [{"role": "user", "content": "What was the official PnL of the EQ_DESK desk on 22 September?"},
+               {"role": "assistant", "content": "The official PnL of EQ_DESK on 22 September was 567,189 EUR.",
+                "queries": [{"query": prev}]}]
+    assert carry.new_values("And the flash PnL?", [history[0]["content"], history[1]["content"]], [prev]) == \
+        ["flash (PNL_STATUS)"]
+    assert carry.new_values("And the official one by book?", [history[0]["content"]], [prev]) == []   # used before
+    assert carry.new_values("And the flash PnL?", ["the flash was 576,885 EUR"], [prev]) == []        # in the answer
+    made_up = say("The flash PnL of EQ_DESK on 22 September was 567,189 EUR as well.")
+    sql = {"request": {"database_id": 1, "sql": prev.replace("IN ('OFFICIAL', 'RESTATED')", "= 'FLASH'")}}
+    rows = json.dumps({"success": True, "columns": [{"name": "total"}], "rows": [{"total": 576885.24}], "row_count": 1})
+    a, ran = agent_with(monkeypatch, [made_up, call("execute_sql", sql), say("The flash PnL was 576,885 EUR.")],
+                        results=lambda n, args: rows)
+    answer, _trace = a.ask("And the flash PnL?", history)
+    assert a.new_values == ["flash (PNL_STATUS)"] and a.asks_new and not a.follow_up
+    assert answer == "The flash PnL was 576,885 EUR." and len(ran) == 1
+    assert a.llm.choices == [None, "required", None]                     # its own query, compulsory after the nudge
+    restated = say("The official PnL of EQ_DESK on 22 September was 567,189 EUR.")
+    b, _ran = agent_with(monkeypatch, [restated])
+    b.ask("Was that the official figure?", history)
+    assert not b.new_values and not b.usage.get("nudges")                # the chat's own figure: as before
+
+
+def test_figures_no_query_gave_make_a_tool_call_compulsory(ctx, monkeypatch):
+    """"Back to srv-x-9: what was its highest 1-minute load that day?" answered "1.16" with no query, sent back, then
+    given again (0.9.1: only marked). With no query in the answer, the numbers check makes the next call compulsory."""
+    import json
+
+    from test_agent_loop import agent_with, call, say
+
+    history = [{"role": "user", "content": "Which server had the least available memory on 23 September?"},
+               {"role": "assistant", "content": "srv-x-9, at 10.2 GiB."}]
+    q = {"request": {"database_id": 2, "sql": "SELECT MAX(value) FROM node_load1 WHERE node = 'srv-x-9'"}}
+    rows = json.dumps({"success": True, "columns": [{"name": "max"}], "rows": [{"max": 4.53}], "row_count": 1})
+    a, ran = agent_with(monkeypatch, [say("srv-x-9 had a highest 1-minute load of 1.16 that day.")] * 2 +
+                        [call("execute_sql", q), say("srv-x-9's highest 1-minute load that day was 4.53.")],
+                        results=lambda n, args: rows)
+    answer, _trace = a.ask("Back to srv-x-9: what was its highest 1-minute load that day?", history)
+    assert answer.startswith("srv-x-9's highest 1-minute load that day was 4.53.") and len(ran) == 1
+    assert "required" in a.llm.choices
+    from supagent import settings
+
+    real = settings.get
+    off, _ran = agent_with(monkeypatch, [say("srv-x-9 had a highest 1-minute load of 1.16 that day.")] * 3)
+    monkeypatch.setattr(settings, "get", lambda key: False if key == "agent.force_tool" else real(key))
+    off.ask("Back to srv-x-9: what was its highest 1-minute load that day?", history)
+    assert "required" not in off.llm.choices                             # agent.force_tool off: never compulsory
+
+
 def test_a_no_such_field_follow_up_is_sent_back_even_with_the_previous_figures(ctx, monkeypatch):
     from test_agent_loop import agent_with, say
 
@@ -340,6 +428,80 @@ def test_the_time_the_question_names_is_the_time_of_its_period(world):
                                               "\"DELIVERED_TIME\" < '2026-10-01 00:00'"), TODAY) is None
     assert named_time_fields("How many parcels were delivered on 23 September?", {"shipments"}) == \
         {"shipments": {"DELIVERED_TIME"}}
+
+
+def test_the_period_on_a_joined_index_or_another_date_is_a_period(world):
+    """Two refusals that sent right queries back (and the model then narrowed them wrongly): the period on the
+    joined orders' time (the parcels of the orders placed that week), and on another date of the index than its
+    time field when the question names neither."""
+    from superset.extensions import db
+    from superset.models.core import Database
+
+    from supagent.knowledge.period import refusal
+    from supagent.knowledge.store import source_for, upsert
+    from supagent.models import Run
+
+    _shipments(world)
+    run = db.session.query(Run).first()
+    s = source_for(db.session.query(Database).filter(Database.database_name == "jobs").one())
+    upsert(run, s, "index", "", "orders", {"stats": {"docs": 1000, "time_field": "ORDER_TIME"}})
+    for name in ("ORDER_TIME", "ORDER_DATE"):
+        upsert(run, s, "field", "orders", name, {"data_type": "date", "stats": {"filled_pct": 100.0}})
+    db.session.commit()
+    q = "How many parcels of the orders placed from 14 to 20 September were delivered late?"
+    join = ('SELECT COUNT(*) FROM "shipments" s JOIN "orders" o ON s."ORDER_ID" = o."ORDER_ID" WHERE {period} '
+            's."LATE" = true')
+    week = "{f} >= '2026-09-14 00:00' AND {f} < '2026-09-21 00:00' AND"
+    assert refusal(q, "execute_sql", _sql(join.format(period=week.format(f='o."ORDER_TIME"'))), TODAY) is None
+    assert refusal(q, "execute_sql", _sql(join.format(period=week.format(f='s."ORDER_DATE"'))), TODAY) is None
+    none = refusal(q, "execute_sql", _sql(join.format(period="")), TODAY)
+    assert none and none.startswith("tool error (not run: period)")
+    other = refusal(q, "execute_sql", _sql(join.format(period=week.format(f='s."SHIPPED_TIME"'))), TODAY)
+    assert other and "not run: period" in other                         # a time the words do not name
+    plain = "Which carrier had the most late parcels on 22 September?"   # no time named: the index's time field
+    by = 'SELECT "CARRIER", COUNT(*) FROM "shipments" WHERE "LATE" = true {period} GROUP BY "CARRIER"'
+    day = "AND \"{f}\" >= '2026-09-22 00:00' AND \"{f}\" < '2026-09-23 00:00'"
+    shipped = _sql(by.format(period=day.format(f="SHIPPED_TIME")))
+    assert refusal(plain, "execute_sql", _sql(by.format(period=day.format(f="DELIVERED_TIME"))), TODAY) is None
+    assert "not run: period" in refusal(plain, "execute_sql", shipped, TODAY)       # another event's date
+    prior = [by.format(period=day.format(f="SHIPPED_TIME"))]                        # the previous answer's date:
+    assert refusal(plain, "execute_sql", shipped, TODAY, prior=prior) is None       # the follow-up's period too
+    assert "not run: period" in refusal(plain, "execute_sql", _sql(by.format(period="")), TODAY, prior=prior)
+    sold = "How many were sold on 21 September?"                                    # a date of the same event
+    assert refusal(sold, "execute_sql", _sql("SELECT COUNT(*) FROM \"orders\" WHERE \"ORDER_DATE\" >= '2026-09-21' "
+                                             "AND \"ORDER_DATE\" < '2026-09-22'"), TODAY) is None
+    from supagent.knowledge.period import named_time_fields
+
+    assert named_time_fields("I meant the ones delivered that day.", {"shipments"}) == {"shipments": {"DELIVERED_TIME"}}
+    grouped = ('SELECT DATE_TRUNC(\'day\', "SHIPPED_TIME") AS d, COUNT(*) FROM "shipments" WHERE "LATE" = true '
+               'GROUP BY DATE_TRUNC(\'day\', "SHIPPED_TIME")')                # shown, not filtered
+    assert "not run: period" in refusal(plain, "execute_sql", _sql(grouped), TODAY)
+
+
+def test_a_time_field_that_names_no_event_takes_the_tables_own_dates(world):
+    """The changes of an investigation are indexed with @timestamp_date; "what changed before it began?" filtered on
+    CHANGE_TIME was refused 26 times in the stored investigations (38 refusals, all on such a field)."""
+    from superset.extensions import db
+    from superset.models.core import Database
+
+    from supagent.knowledge.period import refusal
+    from supagent.knowledge.store import source_for, upsert
+    from supagent.models import Run
+
+    run = Run(kind="learn", reason="test")
+    db.session.add(run)
+    db.session.commit()
+    s = source_for(db.session.query(Database).filter(Database.database_name == "jobs").one())
+    upsert(run, s, "index", "", "changes", {"stats": {"docs": 100, "time_field": "@timestamp_date"}})
+    for name in ("@timestamp_date", "CHANGE_TIME"):
+        upsert(run, s, "field", "changes", name, {"data_type": "date", "stats": {"filled_pct": 100.0}})
+    db.session.commit()
+    q = "Which changes were made on 22 September?"
+    on_change = ("SELECT \"CHANGE_ID\" FROM \"changes\" WHERE \"CHANGE_TIME\" >= '2026-09-22 00:00' AND "
+                 "\"CHANGE_TIME\" < '2026-09-23 00:00'")
+    assert refusal(q, "execute_sql", _sql(on_change), TODAY) is None
+    assert "not run: period" in refusal(q, "execute_sql", _sql("SELECT \"CHANGE_ID\" FROM \"changes\" WHERE "
+                                                                "\"TARGET\" = 'X'"), TODAY)   # no date at all
 
 
 def test_each_day_the_question_names_has_its_field():

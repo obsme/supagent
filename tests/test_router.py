@@ -191,7 +191,7 @@ def test_the_classic_agent_gets_the_routes_tools_and_instruction(on, monkeypatch
     db.session.commit()
 
 
-def test_the_governed_pipeline_sends_chart_and_incident_questions_to_the_classic_agent(on, monkeypatch):
+def test_the_governed_pipeline_sends_chart_and_incident_questions_to_the_classic_agent(on, no_ledger, monkeypatch):
     from test_governed_pipeline import governed
 
     from supagent.agent import Agent

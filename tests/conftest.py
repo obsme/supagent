@@ -73,3 +73,15 @@ def ctx(app):
 def login(client, user: str) -> None:
     r = client.post("/login/", data={"username": user, "password": PASSWORD}, follow_redirects=False)
     assert r.status_code in (200, 302), r.status_code
+
+
+
+@pytest.fixture()
+def no_ledger(ctx):
+    """A test of another check whose scripted model answers an investigation without a work plan (agent.ledger,
+    0.9.2, sends its open steps back once): the plan off for that test."""
+    from supagent import settings
+
+    settings.set_value("agent.ledger", False)
+    yield
+    settings.set_value("agent.ledger", None)

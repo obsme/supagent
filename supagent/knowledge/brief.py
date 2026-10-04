@@ -93,7 +93,7 @@ def _graph() -> dict[str, Any]:
 def named(text: str, g: dict[str, Any] | None = None) -> list[int]:
     """The values a text names, in its order: a value's name or one of its other names written as words of
     their own (the longest name wins: "risk engine" before "risk"); a name that is a common word counts only
-    written as the value is (HELIX, not "the")."""
+    written as the value is (NOVA, not "nova")."""
     from supagent.knowledge.describe import STOP
 
     g = g or _graph()

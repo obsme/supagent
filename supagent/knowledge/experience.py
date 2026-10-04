@@ -836,7 +836,9 @@ def _counter_misuse(tree: Any, names: set[str], src: Any) -> str | None:
             + (f". The catalog's formulas for it: {hint}" if hint else "") + ".")
 
 
-COUNT_ASKED = re.compile(r"\b(how many|number of|count of|combien|nombre d)", re.I)
+# "how many", and "any" ("were there any restarts that day?": whether a count is above 0)
+COUNT_ASKED = re.compile(r"\b(how many|number of|count of|combien|nombre d|any|were there|was there|"
+                         r"y a[- ]t[- ]il|aucun)\b", re.I)
 RATE_ASKED = re.compile(r"\b(per\s+(?:second|sec|minute|min|hour)|rps|qps|throughput|rates?|par\s+(?:seconde|minute|"
                         r"heure)|d[ée]bit|taux)\b|/\s*s\b", re.I)
 
@@ -885,6 +887,59 @@ def count_of_counter(database: Any, sql: str, question: str = "") -> str | None:
                 "SUM(INCREASE(value)) (per series: GROUP BY the label). If you do want the number of samples, send "
                 "this same call again.")
     return None
+
+
+SAMPLES_READ = re.compile(r"\b(?:value|rate|increase)\b|\bCOUNT\s*\(\s*\*\s*\)|\bSELECT\s+(?:DISTINCT\s+)?\"?ts\b", re.I)
+TS_FILTER = re.compile(r'(?<![\w"])"?ts"?\s*(?:>=|<=|>|<|=|\bBETWEEN\b)|(?:>=|<=|>|<)\s*"?ts"?(?![\w"])', re.I)
+
+
+def window_note(database: Any, sql: str, content: str) -> str | None:
+    """A metrics query with no condition on ts that found no sample: the backend read only its default window (the
+    last 24 h before now), where the data may have ended days before ("that server has no data": its samples ended
+    on the 25th). The note says so, with each metric's data range from the dictionary, so that no absence is
+    concluded from it. None when the query has a period, found values, or is not on a metrics database."""
+    if getattr(database, "backend", None) != "promagg" or not sql or TS_FILTER.search(sql):
+        return None
+    try:
+        res = json.loads(content)
+    except ValueError:
+        return None
+    rows = res.get("rows") if isinstance(res, dict) else None
+    if rows is None and isinstance(res, dict):
+        rows = res.get("first_rows")
+    values = [v for r in rows if isinstance(r, dict) for v in r.values()] if isinstance(rows, list) else [1]
+    counted = re.search(r"\bCOUNT\s*\(", sql, re.I) is not None
+    if any(v is not None and not (counted and v == 0) for v in values):
+        return None                                  # values found (a count of 0 is none)
+    try:
+        import sqlglot
+        from sqlglot import exp
+
+        tree = sqlglot.parse_one(sql, read="duckdb")
+        names = {t.name for t in tree.find_all(exp.Table) if t.name} - {c.alias_or_name for c in tree.find_all(exp.CTE)}
+    except Exception:  # pylint: disable=broad-except
+        return None
+    if not SAMPLES_READ.search(sql):
+        return None                                  # labels only (DISTINCT node): no sample read, nothing to say
+    from supagent.models import KObject, Source
+
+    src = db.session.query(Source).filter_by(database_id=database.id).one_or_none()
+    ranges, windows = [], []
+    known = [] if src is None or not names else db.session.query(KObject).filter(
+        KObject.source_id == src.id, KObject.kind == "metric", KObject.name.in_(sorted(names)),
+        KObject.gone_at.is_(None)).all()
+    if not known:
+        return None                                  # no metric of the dictionary (a catalog table, a typo)
+    for o in known:
+        st = o.stats or {}
+        if st.get("window"):
+            windows.append(str(st["window"]))
+        if st.get("data_from") or st.get("data_to"):
+            ranges.append(f"{o.name} from {st.get('data_from') or '?'} to {st.get('data_to') or '?'}")
+    window = f"the last {windows[0]} before now" if windows else "the backend's default window, up to now"
+    return (f"(No sample: this query has no condition on ts, so it read only {window}"
+            + ("; the data goes: " + "; ".join(ranges[:3]) if ranges else ", and the data may end before it")
+            + ". Put a period on ts inside the data's range, e.g. its last day, before saying there is no data.)")
 
 
 def rate_as_count(database: Any, sql: str, question: str) -> str | None:

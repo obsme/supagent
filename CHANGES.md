@@ -1,5 +1,67 @@
 # Changes
 
+## 0.9.2 — 4 Oct 2026
+
+Reliability: the answers were measured three times over (the 156 questions of the end-to-end suite, a held-out set
+of 75 new questions written before any change, the investigation suite with 5 held-out scenarios), every miss
+sorted by its cause, and each cause answered by a general mechanism, tested on the stored runs before an LLM run.
+
+Measured against 0.9.1, two runs each on the same LLM server, by a rule fixed before the runs:
+* the 75 held-out questions (written before any change, never studied one by one): right in both runs 65 (86.7%)
+  against 56 (74.7%); wrong without a mark in at least one run 9 against 18;
+* the 156 questions of the end-to-end suite: right in both runs 142 (91.0%) against 133 (85.3%); in-sample (the
+  fixes come from that suite's misses), so the held-out figures are the ones that say whether they generalise;
+* investigations (20 simulated incidents): the same points (1,755 each), one more solved (15 against 14); the 5
+  held-out incidents 78 points against 65; about twice as long (the work plan's calls: see 0.9.3).
+
+* **The work plan of a big request** (`agent.ledger`, on): an investigation, a question of many parts, several
+  charts or a long request gets a plan the system keeps: the agent writes its tasks (`work_plan`), the system
+  attaches what each tool returned to the task in progress, gives the plan back when the conversation is shortened
+  and with the last calls, seeds an investigation's steps and one task per finding of `compare_groups`, and sends
+  back once the tasks left, the findings the answer does not explain and the open step "what changed behind the
+  cause". The chat shows it as a checklist; "continue" takes up the tasks left.
+* **No invented names, times or figures**: a follow-up restating the chat without a query may not present names or
+  times the previous answer does not hold; an answer that still gives figures, names or times no tool returned, or a
+  query written and not run, is sent back once with a tool call made compulsory (`agent.force_tool`, on; the server
+  must accept `tool_choice` "required"); a query written and not run is never an answer, even without figures.
+* **Asked back, not guessed** (`agent.ask_unclear`, on): one thing named that several values match ("the options
+  book"), or something never said at the start of a conversation ("the late ones"): one short question naming the
+  candidates. Never for a name before a noun ("the <APP> jobs"), a noun before a noun ("the most job failures"), a
+  value already said of any field the noun names, words that together name one value, or a day said elsewhere in the
+  message (a first version asked back on three questions it should answer; on every stored message it now asks only
+  where it should).
+* **A follow-up's subject**: "how many trades of that desk were cancelled" keeps only the desk's conditions (the
+  check of 0.8 added back the narrower ones of the previous answer and turned right counts into wrong ones), also
+  when the previous answer only selected the desk ("which desk does the first one work on?").
+* **A follow-up that names a value no query used runs its own query**: "And the flash PnL?" after the official one
+  was answered from the chat, the official figure given as the flash one; a word of the follow-up that is a value of
+  a field of the tables just read, used by none of the previous queries, question or answer, takes the restating
+  exemption away (a tool call compulsory after the answer is sent back).
+* **The period check sends fewer right queries back** (it dates from 0.7): a JOIN with the period on one of its
+  tables passes without it on the others (the join keeps their rows of those orders); for a table whose time the
+  words do not name, another date of the same event (ORDER_DATE for ORDER_TIME), or the date the answer it follows
+  put the period on, counts; "that day" names its event's time; a time field that only says when the record was
+  indexed (@timestamp) takes any of the table's own dates. On 7,091 stored queries, 113 refusals fewer, each of them
+  on the main suite a false one; 16 of the 38 refusals of the stored investigations go.
+* **A term defined as a relation between rows** ("the refunds of those orders"), said in the question and computed
+  from the tables apart (no JOIN, no key IN (SELECT ...)): sent back once to link them on their key, by code
+  (`agent.definition_links`, on).
+* **Metrics**: "were there any restarts that day?" is a count of events, not of samples (the samples check knew
+  only "how many"); a metrics query with no time condition that finds nothing says that it read only the backend's
+  default window (the last 24 h) and gives the data's range, so that no "no data" comes from it.
+* **The work plan keeps one task per step**: a step of the investigation plan rewritten in the model's words (its
+  own details, no number) is that step (on a slow server the duplicates had a third of the calls go to the plan).
+* **What a query shows by its own text**: two columns computing the same aggregate under different names are sent
+  back before the query runs; a time of day read from hour buckets is sent back.
+* **Saved charts**: "make it a pie chart" saves the change (Superset's `update_chart` writes an unsaved preview by
+  default); a preview is never called a change.
+* Dates and times given with a question are no figures (a made-up 43 passed at 10:43); what the model says about a
+  check before its corrected answer is cut; a context too long no longer turns the request's template field off.
+* `agent.definition_check` (a test, off): a term the glossary defines, computed another way, sent back once. On 202
+  stored answers it flags 16 of 33 wrong ones but also 55 of 169 right ones: off.
+
+From 0.9.1: `pip install` on every host and restart (no schema change).
+
 ## 0.9.1 — 3 Oct 2026
 
 * **The interactions the logs show keep to their time, query by query** (`learn.interactions_logs_seconds`, 120): the

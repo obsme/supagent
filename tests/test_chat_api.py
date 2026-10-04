@@ -259,6 +259,12 @@ def test_an_answer_without_the_tools_is_sent_back_once():
     written = ("The SQL query to find the traders of that book:\n```sql\nSELECT DISTINCT \"TRADER\" FROM \"pnl\" WHERE "
                "\"BOOK\" = 'X'\n```\nThe query returned no rows: no trader worked on that book that day.")
     assert unsupported_answer(written, looked) == WRITTEN_SQL_NUDGE
+    # a query written and not run, with no figure at all ("The SQL query used: ```sql ...```" for "how many trades
+    # did that book do?", 0.9.1): sent back too, unless the question asks for the query itself
+    bare = "The SQL query used:\n\n```sql\nSELECT COUNT(*) FROM trades WHERE BOOK = 'B1'\n```"
+    assert unsupported_answer(bare, [], "How many trades did that book do that day?") == WRITTEN_SQL_NUDGE
+    assert unsupported_answer(bare, [], "Give me the SQL query to count that book's trades") is None or \
+        unsupported_answer(bare, [], "Give me the SQL query to count that book's trades") == NO_TOOL_NUDGE
     asked = "Here is the query you asked for:\n```sql\nSELECT DISTINCT \"TRADER\" FROM \"pnl\"\n```\nRun it in SQL Lab."
     assert unsupported_answer(asked, looked) is None                         # the query itself, asked for
     absent = ("The data does not contain a \"voice\" booking field in the trades index; its fields are TRADE_DATE, "
