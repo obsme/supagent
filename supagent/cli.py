@@ -771,6 +771,39 @@ def restore(name: str, parts: str, yes: bool) -> None:
         raise SystemExit(1)
 
 
+@supagent.command("reset-knowledge", help="Wipe what the learning made, to make it again: the Context pages "
+                  "(--context), the values of the categories with their descriptions (--categories), the links of the "
+                  "System map with theirs (--links). What people made stays (--all: that too). A backup is made first. "
+                  "Without --yes: what would go")
+@click.option("--context", "do_context", is_flag=True)
+@click.option("--categories", "do_categories", is_flag=True)
+@click.option("--links", "do_links", is_flag=True)
+@click.option("--all", "everything", is_flag=True, help="what people made too: every value, link and Context page, "
+              "the categories' descriptions")
+@click.option("--yes", is_flag=True, help="Do it (a backup first)")
+@with_appcontext
+def reset_knowledge(do_context: bool, do_categories: bool, do_links: bool, everything: bool, yes: bool) -> None:
+    from supagent.knowledge import reset as R
+
+    if not (do_context or do_categories or do_links):
+        raise click.ClickException("say what to wipe: --context, --categories, --links (several at once)")
+    p = R.plan(do_context, do_categories, do_links, everything)
+    for k, v in p.items():
+        if k != "kept":
+            click.echo(f"  goes: {k}: {v}")
+    for k, v in p["kept"].items():
+        click.echo(f"  stays: {k}: {v}")
+    if not yes:
+        click.echo("Nothing was changed: add --yes to wipe these (a backup of the knowledge is made first).")
+        return
+    try:
+        out = R.run(do_context, do_categories, do_links, everything, by="cli")
+    except R.ResetError as ex:
+        raise click.ClickException(str(ex)) from ex
+    click.echo(json.dumps(out, indent=2, default=str))
+    click.echo(R.NEXT.format(backup=out.get("backup")))
+
+
 @supagent.command("agent-catalog", help="Let the agent write the catalog entries it is certain of now (formulas "
                   "of confirmed answers, approved team rules and facts, definitions quoted from documents)")
 @click.option("--no-docs", is_flag=True, help="Not the documents (no LLM call)")

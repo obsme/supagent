@@ -1,5 +1,25 @@
 # Changes
 
+## 0.9.6.7 — 6 October 2026
+
+A way to wipe what the learning made and make it again: the Context, the categories' values with their descriptions,
+the System map's links with theirs (e.g. once a version reads the documents better).
+
+Not measured again: the agent's answering code is 0.9.6's (see 0.9.6). Checked before this release: the unit tests (1010 passed, among them a wipe that keeps what people made and a restore of its backup that puts every row back).
+
+* `superset supagent reset-knowledge --context --categories --links` says what would go and what stays; nothing is
+  changed. Goes: the Context pages the agent wrote, the values read in the data or proposed by the LLM with the items
+  they were given, the links neither drawn nor described by a person; every item is classified again. Stays: the
+  values a person added (with their descriptions), the links a person drew or described, the Context pages a person
+  wrote, the items a person gave a value (`--all`: those go too, and the categories' descriptions). The categories
+  themselves (their names, fields, what is inside what) always stay.
+* With `--yes`: a backup of the knowledge first (nothing is wiped when it cannot be made, e.g. while a learning
+  runs), then the wipe; the command says the next steps (learn, classify, interactions --again, context --build
+  --force, then To review) and the way back (`superset supagent restore <backup> --parts categories,context --yes`).
+
+Upgrade from 0.9.6.6: the wheel on every host, restart; nothing to run (tables v17). INSTALL.txt, *From 0.9.6.6 to
+0.9.6.7*.
+
 ## 0.9.6.6 — 6 October 2026
 
 Three roles only, Admin, Editor and Viewer, when you want it: supagent's AI roles merged into Superset's own.
