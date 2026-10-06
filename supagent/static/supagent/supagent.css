@@ -765,6 +765,15 @@ button.map-cat.off i { opacity: .35; }
 .map-tree:hover text, .map-tree:focus text { text-decoration: underline; }
 .map-tree:focus rect { stroke: var(--accent); stroke-width: 1.4; }
 .map-groupby { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; }
+/* (0.9.6.9) the funnels (filter on a category or a part), the map edited where it is drawn */
+.map-funnel { cursor: pointer; outline: none; }
+.map-funnel:hover path, .map-funnel:focus path { stroke: var(--accent); }
+.map-inside .pick { margin: 6px 0; }
+.map-add { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.map-add input { flex: 1 1 160px; min-width: 0; }
+.map-sure { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.map-sure[hidden] { display: none; }
+.map-side select, .map-side input[type=text], .map-side .pick { max-width: 100%; box-sizing: border-box; }
 .map-groupby select { max-width: 100%; }
 .map-node.dim, .map-edge.dim, .map-link.dim { opacity: .22; }
 .map-link { cursor: pointer; }

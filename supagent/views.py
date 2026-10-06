@@ -1543,7 +1543,9 @@ class KnowledgeView(_RecipesMixin, BaseView):
     def edit_system_map(self) -> Response:
         """Admins: {"layout": {...}} the places of the boxes; {"interaction": {"a", "b", "kind", "note", "detail"?,
         "id"?}} draws or changes one (note: its short explanation, detail: its long one); {"remove_interaction": id}; {"describe": {"id", "description"}} what a part is;
-        {"describe_category": {"name", "about"}} what a category is."""
+        {"describe_category": {"name", "about"}} what a category is. 0.9.6.9: {"add_value": {"facet", "value",
+        "inside"?}}; {"inside": {"id", "parent", "mode": move|copy|out}}; {"remove_value": id} (who may delete);
+        {"add_category": {"name", "inside"?}}; {"category_inside": {"name", "inside"}}."""
         from superset import db
 
         from supagent.knowledge import sysmap
@@ -1603,11 +1605,37 @@ class KnowledgeView(_RecipesMixin, BaseView):
                 name = str(body["describe_category"].get("name") or "")
                 return _json({"name": name, "about": set_about(name, str(body["describe_category"].get("about") or ""),
                                                                g.user.username)})
+            # (0.9.6.9) the map edited where it is drawn, each change saved at once
+            if isinstance(body.get("add_value"), dict):       # a value, inside another one when given
+                x = body["add_value"]
+                inside = str(x.get("inside") or "")
+                return _json(sysmap.add_value(str(x.get("facet") or ""), str(x.get("value") or ""),
+                                              int(inside) if inside.isdigit() else None, g.user.username,
+                                              str(x.get("description") or "")))
+            if isinstance(body.get("inside"), dict):          # a value moved or copied inside another, or taken out
+                x = body["inside"]
+                return _json(sysmap.put_inside(int(x.get("id") or 0), int(x.get("parent") or 0),
+                                               str(x.get("mode") or "move"), g.user.username))
+            if body.get("remove_value"):                      # a value taken off the map
+                if not _can_delete():
+                    return _json({"error": "your role may not remove a value (Admin)"}, 403)
+                return _json(sysmap.remove_value(int(body["remove_value"]), g.user.username))
+            if isinstance(body.get("add_category"), dict):    # a category, a subcategory when inside another
+                x = body["add_category"]
+                return _json(sysmap.add_category(str(x.get("name") or ""), str(x.get("inside") or ""),
+                                                 g.user.username))
+            if isinstance(body.get("category_inside"), dict):  # a category moved inside another, or out of it
+                from supagent.knowledge.facets import set_inside
+
+                x = body["category_inside"]
+                name = " ".join(str(x.get("name") or "").lower().split())
+                return _json({"name": name, "inside": set_inside(name, str(x.get("inside") or ""), g.user.username)})
         except (ValueError, TypeError) as ex:
             db.session.rollback()
             return _json({"error": str(ex)}, 400)
-        return _json({"error": "layout, interaction, remove_interaction, propose_removal, removal, describe or "
-                               "describe_category"}, 400)
+        return _json({"error": "layout, interaction, remove_interaction, propose_removal, removal, describe, "
+                               "describe_category, add_value, inside, remove_value, add_category or category_inside"},
+                     400)
 
     @expose("/api/map/links", methods=("GET",))
     @has_access_api

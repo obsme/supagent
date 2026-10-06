@@ -471,7 +471,7 @@
         seen = seen || {};
         seen[v.id] = true;
         var w = Math.max(120, BOX_W - depth * INDENT), bx = x + depth * INDENT;
-        var title = wrap(v.value, titleFont, w - 24, 2);
+        var title = wrap(v.value, titleFont, w - 46, 2);        // (the funnel at its right)
         var about = v.description ? wrap(v.description, textFont, w - 24, 3) :
           v.hint ? wrap("“" + v.hint.text + "”", "italic " + textFont, w - 24, 3) : [];
         var items = v.gone ? "its items are gone" : v.items ? S.num(v.items) + " item" + (v.items > 1 ? "s" : "") : "no item yet";
@@ -866,6 +866,9 @@
     about.addEventListener("click", openAbout);
     about.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") openAbout(ev); });
     g.appendChild(about);
+    var only = st.cats.length === 1 && st.cats[0] === h.cat;
+    g.appendChild(funnel(BOX_W - 66, 8, only, only ? "Show every category again" : "Filter the map on " + label.toLowerCase(),
+      function () { st.cats = only ? [] : [h.cat]; saveCats(); syncPick(); unselect(); draw(); fit(true); }, C));
     var hide = svg("g", { class: "map-hide", transform: "translate(" + (BOX_W - 18) + ",8)", tabindex: "0", role: "button",
                           "aria-label": "Hide " + label.toLowerCase() + " (the legend shows them again)" });
     hide.appendChild(svg("rect", { x: -3, y: -3, width: 22, height: 22, rx: 5, fill: C.panel, "fill-opacity": "0", "pointer-events": "all" }));
@@ -976,6 +979,11 @@
       it.textContent = n.items;
       g.appendChild(it);
       if (n.tree) g.appendChild(treeToggle(n, C));
+      var on = st.parts.indexOf(n.v.id) >= 0;
+      g.appendChild(funnel(n.w - 24, 6, on, on ? "Take it out of the filter" : "Filter the map on it", function () {
+        if (on) st.parts = st.parts.filter(function (i) { return i !== n.v.id; }); else st.parts = st.parts.concat([n.v.id]);
+        syncPick(); unselect(); draw(); fit(true);
+      }, C));
     }
     g.addEventListener("click", function (ev) {
       ev.stopPropagation();
@@ -989,6 +997,143 @@
     g.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); g.dispatchEvent(new MouseEvent("click")); } });
     if (st.edit && !box && !n.depth) dragBox(g, n);
     return g;
+  }
+  /* (0.9.6.9) a small funnel: the map filtered on a category or a part, or no longer (`on`) */
+  function funnel(x, y, on, title, act, C) {
+    var g = svg("g", { class: "map-funnel" + (on ? " on" : ""), transform: "translate(" + x + "," + y + ")", tabindex: "0",
+                       role: "button", "aria-pressed": String(on), "aria-label": title });
+    g.appendChild(svg("rect", { x: -3, y: -3, width: 22, height: 22, rx: 5, fill: on ? C.accent : C.panel,
+                                "fill-opacity": on ? "0.18" : "0", "pointer-events": "all" }));
+    g.appendChild(svg("path", { d: "M2,3 L14,3 L9.2,8.6 L9.2,13.6 L6.8,12.4 L6.8,8.6 Z", fill: on ? C.accent : "none",
+                                stroke: on ? C.accent : C.muted, "stroke-width": "1.4", "stroke-linejoin": "round" }));
+    g.appendChild(svg("title", {}, [document.createTextNode(title)]));
+    var go = function (ev) { ev.stopPropagation(); ev.preventDefault(); act(); };
+    g.addEventListener("pointerdown", function (ev) { ev.stopPropagation(); });
+    g.addEventListener("click", go);
+    g.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") go(ev); });
+    return g;
+  }
+  /* (0.9.6.9) the map edited where it is drawn (editors), each change saved at once: `body` sent, the map read again */
+  function change(body, res, done) {
+    res.className = "result";
+    res.textContent = "saving…";
+    return S.dict("POST", "map", body).then(function (r) {
+      if (r.error) { res.textContent = r.error; res.className = "result bad"; return r; }
+      res.textContent = "saved";
+      res.className = "result good";
+      if (D.saved) D.saved();
+      if (done) done(r);
+      load(true);
+      return r;
+    });
+  }
+  function valuePick(placeholder, not) {                      // a part of the map, found by typing
+    return S.picker({ single: true, placeholder: placeholder, label: placeholder, wait: 0, load: function (words) {
+      var q = String(words || "").toLowerCase(), items = [], more = 0;
+      st.data.values.forEach(function (v) {
+        if (not && not(v)) return;
+        if (q && v.value.toLowerCase().indexOf(q) < 0) return;
+        if (items.length >= 60) { more++; return; }
+        items.push({ id: String(v.id), label: v.value, group: catLabel(v.facet, 2) });
+      });
+      return { items: items, more: more };
+    } });
+  }
+  /* What a part is inside (its "part of" links), put inside another (moved: out of the one of that category it was
+     in; copied: inside both), a value added inside it, the part taken off the map (who may delete). */
+  function insideBlock(v) {
+    var box = el("div", { class: "map-rel map-inside" }, [el("strong", { text: "Inside" })]);
+    var res = el("span", { class: "result", role: "status" });
+    var ups = (v.parents || []).filter(function (p) { return st.byId[p]; });
+    var ul = el("ul", { class: "map-links" });
+    ups.forEach(function (p) {
+      var o = st.byId[p];
+      ul.appendChild(el("li", {}, [el("span", { text: o.value + " (" + catLabel(o.facet, 1).toLowerCase() + ") " }),
+        el("button", { type: "button", class: "linkish", text: "Take it out", onclick: function () {
+          change({ inside: { id: v.id, parent: p, mode: "out" } }, res); } })]));
+    });
+    box.appendChild(ups.length ? ul : el("div", { class: "muted", text: "Inside no other part." }));
+    var pick = valuePick("Put it inside: type a part", function (o) { return o.id === v.id; });
+    var go = function (mode) {
+      var to = pick.ids()[0];
+      if (!to) { res.textContent = "choose the part it goes inside"; res.className = "result bad"; return; }
+      change({ inside: { id: v.id, parent: +to, mode: mode } }, res, function () { pick.set([]); });
+    };
+    box.appendChild(pick.el);
+    box.appendChild(el("div", { class: "actions" }, [
+      el("button", { type: "button", class: "btn small", text: "Move inside", title: "Inside it, out of the part of that category it was in", onclick: function () { go("move"); } }),
+      el("button", { type: "button", class: "btn small", text: "Also inside (copy)", title: "Inside it too, still where it was", onclick: function () { go("copy"); } })]));
+    // a value inside this one: of a category drawn inside its category first, else of its own
+    var inner = Object.keys(st.inside).filter(function (k) { return st.inside[k] === v.facet; });
+    var cats = inner.concat([v.facet]).concat(st.data.categories.map(function (c) { return c.name; })
+      .filter(function (c) { return c !== v.facet && inner.indexOf(c) < 0; }));
+    var cat = el("select", { "aria-label": "Its category" }, cats.map(function (c) {
+      return el("option", { value: c, text: catLabel(c, 1) }); }));
+    var name = el("input", { type: "text", maxlength: "128", placeholder: "A value inside it (a disk, a sub-subject…)",
+                             "aria-label": "The new value's name" });
+    box.appendChild(el("div", { class: "actions map-add" }, [cat, name, el("button", { type: "button", class: "btn small",
+      text: "Add inside", onclick: function () {
+        if (!name.value.trim()) { res.textContent = "write its name"; res.className = "result bad"; return; }
+        change({ add_value: { facet: cat.value, value: name.value, inside: v.id } }, res, function () { name.value = ""; });
+      } })]));
+    if (st.data.can_delete) {
+      var sure = el("span", { class: "map-sure", hidden: true }, [
+        el("span", { text: "Take " + v.value + " off the map? " }),
+        el("button", { type: "button", class: "btn small danger", text: "Remove", onclick: function () {
+          change({ remove_value: v.id }, res, function () { unselect(); }); } }),
+        el("button", { type: "button", class: "btn small", text: "Keep it", onclick: function () { sure.hidden = true; } })]);
+      box.appendChild(el("div", { class: "actions" }, [el("button", { type: "button", class: "btn small",
+        text: "Remove this value…", onclick: function () { sure.hidden = false; } }), sure]));
+    }
+    box.appendChild(res);
+    return box;
+  }
+  /* A category's own edits on the map: a value added, the category it is drawn inside, a subcategory made. */
+  function categoryEdits(c) {
+    var box = el("div", { class: "map-edit" }, [el("strong", { text: "Change it" })]);
+    var res = el("span", { class: "result", role: "status" });
+    var name = el("input", { type: "text", maxlength: "128", placeholder: "A new value of " + catLabel(c.name, 2).toLowerCase(),
+                             "aria-label": "The new value's name" });
+    box.appendChild(el("div", { class: "actions map-add" }, [name, el("button", { type: "button", class: "btn small",
+      text: "Add the value", onclick: function () {
+        if (!name.value.trim()) { res.textContent = "write its name"; res.className = "result bad"; return; }
+        change({ add_value: { facet: c.name, value: name.value } }, res, function () { name.value = ""; });
+      } })]));
+    var within = el("select", { "aria-label": "The category it is drawn inside" }, [el("option", { value: "", text: "In a column of its own" })]
+      .concat(st.data.categories.filter(function (k) { return k.name !== c.name; }).map(function (k) {
+        return el("option", { value: k.name, text: "Inside: " + catLabel(k.name, 2) }); })));
+    within.value = st.inside[c.name] || "";
+    within.addEventListener("change", function () { change({ category_inside: { name: c.name, inside: within.value } }, res); });
+    box.appendChild(el("label", { class: "map-groupby" }, [el("span", { class: "muted", text: "Drawn " }), within]));
+    var sub = el("input", { type: "text", maxlength: "24", placeholder: "A subcategory (its values inside " +
+      catLabel(c.name, 2).toLowerCase() + ")", "aria-label": "The new subcategory's name" });
+    box.appendChild(el("div", { class: "actions map-add" }, [sub, el("button", { type: "button", class: "btn small",
+      text: "Add the subcategory", onclick: function () {
+        if (!sub.value.trim()) { res.textContent = "write its name"; res.className = "result bad"; return; }
+        change({ add_category: { name: sub.value, inside: c.name } }, res, function () { sub.value = ""; });
+      } })]));
+    box.appendChild(res);
+    return box;
+  }
+  function newCategory() {                                    // a category of one's own, inside another one or not
+    unselect();
+    var box = $("map-side");
+    box.innerHTML = "";
+    box.hidden = false;
+    box.appendChild(el("button", { type: "button", class: "close", "aria-label": "Close", text: "×", onclick: unselect }));
+    box.appendChild(el("div", { class: "muted", text: "Category" }));
+    box.appendChild(el("h3", { text: "A new category" }));
+    var res = el("span", { class: "result", role: "status" });
+    var name = el("input", { type: "text", maxlength: "24", placeholder: "Its name (server, pool, disk…)", "aria-label": "Name" });
+    var within = el("select", { "aria-label": "Inside" }, [el("option", { value: "", text: "In a column of its own" })]
+      .concat(st.data.categories.map(function (k) { return el("option", { value: k.name, text: "Inside: " + catLabel(k.name, 2) }); })));
+    box.appendChild(el("div", { class: "map-edit" }, [name, within, el("div", { class: "actions" }, [
+      el("button", { type: "button", class: "btn small primary", text: "Add the category", onclick: function () {
+        if (!name.value.trim()) { res.textContent = "write its name"; res.className = "result bad"; return; }
+        change({ add_category: { name: name.value, inside: within.value } }, res, function (r) {
+          res.textContent = "added: " + r.name + " (its values: added here, read from the data's fields, or proposed)"; });
+      } }), res])]));
+    name.focus();
   }
   /* (0.9.6.5) the line at the bottom of a box with parts inside it: a click opens them under it or closes them
      (kept in the browser) */
@@ -1033,6 +1178,9 @@
       "an arrow at both ends when it goes both ways" }, [el("i", { class: "arrow" }), document.createTextNode("link")]));
     if (st.data.values.some(function (v) { return v.gone; })) box.appendChild(el("span", { class: "map-key" }, [
       el("i", { class: "gone" }), document.createTextNode("its items are gone")]));
+    if (st.data.is_admin) box.appendChild(el("button", { type: "button", class: "chip", id: "map-new-cat",
+      title: "A category of your own, in a column of its own or inside another (a subcategory)",
+      text: "+ Category", onclick: newCategory }));
     if (st.edit && st.data.is_admin) box.appendChild(el("button", { type: "button", class: "chip", id: "map-groups",
       title: "Put categories in a group drawn around them (display only: nothing changes for the agent)",
       text: st.groups.length ? "Groups (" + st.groups.length + ")…" : "Group categories…", onclick: groupsPanel }));
@@ -1127,6 +1275,7 @@
     box.appendChild(el("div", { class: "actions" }, [
       el("button", { type: "button", class: "btn small", text: "Show this category only", onclick: function () {
         st.cats = [c.name]; saveCats(); syncPick(); unselect(); draw(); fit(true); } })]));
+    if (st.data.is_admin) box.appendChild(categoryEdits(c));
   }
   /* Groups of categories (admins, in Edit): a frame drawn around the columns of the categories of a group, which
      are put side by side. Display only: the agent, the categories and their values do not know them. */
@@ -1247,6 +1396,7 @@
     if ((v.origins || []).length) box.appendChild(el("div", { class: "muted small-note", text: "From: " + v.origins.join("; ") }));
     box.appendChild(el("div", { class: "map-rel" }, [el("strong", { text: "Links" }),
       S.linksBox({ id: v.id, value: v.value }, { onchange: function () { load(true); } })]));
+    if (admin) box.appendChild(insideBlock(v));
     box.appendChild(el("div", { class: "actions" }, [
       el("button", { type: "button", class: "btn small", text: "Filter the map on it",
                      title: "Only this part, what it is in, what is inside it and what it is linked to", onclick: function () { focusOn(v.id); } }),

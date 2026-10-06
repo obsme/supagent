@@ -1,5 +1,25 @@
 # Changes
 
+## 0.9.6.9 — 6 October 2026
+
+The System map edited where it is drawn: each change saved at once.
+
+Not measured again: the agent's answering code is 0.9.6's (see 0.9.6). Checked before this release: the unit tests (1012 passed, among them every change of the map through its API, who may and may not make it) and the page in a browser (below).
+
+* **A funnel** on each category's name and each part's box filters the map on it; a second click, no longer.
+* **A part's panel** (editors): what it is inside, each with "Take it out"; "Put it inside" another part (found by
+  typing), moved (out of the part of that category it was in) or copied (inside both); "Add inside" a new value;
+  "Remove this value…" (who may delete). Never inside itself nor inside what is inside it.
+* **A category's ⓘ**: add a value, add a subcategory (drawn inside it), choose the category it is drawn inside;
+  **+ Category** in the legend makes a category.
+* Links were already added, changed and removed in a part's panel ("+ Add a link").
+
+Checked in a browser on a synthetic map (200 servers with their disks, partitions and cpus, applications,
+components): the funnels, a server copied inside a second application, a disk added inside a server, a value and a
+subcategory added, a category made, a value removed; no page error.
+
+Upgrade from 0.9.6.8: the wheel on every host, restart; nothing to run (tables v17).
+
 ## 0.9.6.8 — 6 October 2026
 
 Two corrections of 0.9.6.6 and 0.9.6.7.

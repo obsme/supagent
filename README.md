@@ -145,6 +145,12 @@ then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with t
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
 
+## Upgrade from 0.9.6.8 to 0.9.6.9
+
+`pip install` the new wheel on every host, restart. Nothing to run (tables v17). The System map edited where it is
+drawn: a funnel on each category and part (filter on it, and back); a part put inside another (moved or copied) or
+taken out; values, subcategories and categories added; a value removed. INSTALL.txt, *From 0.9.6.8 to 0.9.6.9*.
+
 ## Upgrade from 0.9.6.7 to 0.9.6.8
 
 `pip install` the new wheel on every host, restart. Nothing to run (tables v17). reset-knowledge takes the wiped

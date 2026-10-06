@@ -662,6 +662,109 @@ def save_interaction(a: int, b: int, kind: str | None, note: str, by: str, link_
             "explained_by": x.explained_by or ""}
 
 
+def add_value(facet: str, value: str, inside: int | None, by: str, description: str = "") -> dict[str, Any]:
+    """(0.9.6.9) A value added on the map: a person's, used at once; inside the value given (part of it)."""
+    import datetime as dt
+
+    from supagent.knowledge.facets import editable
+    from supagent.knowledge.freshness import touch
+    from supagent.models import Facet
+
+    facet = " ".join(str(facet or "").lower().split())
+    value = " ".join(str(value or "").split())[:128]
+    if facet not in editable():
+        raise ValueError("choose the category: " + ", ".join(editable()))
+    if not value:
+        raise ValueError("write the value")
+    f = db.session.query(Facet).filter(Facet.facet == facet, Facet.value.ilike(value)).first()
+    if f is not None and f.status != "rejected":
+        raise ValueError(f'"{f.value}" is a value of this category already')
+    if f is None:
+        f = Facet(facet=facet, value=value)
+        db.session.add(f)
+    f.value, f.status, f.source = value, "approved", "admin"
+    f.description = " ".join(str(description or "").split())[:2000] or f.description
+    f.reviewed_by, f.reviewed_at = by, dt.datetime.utcnow()
+    db.session.flush()
+    if inside:
+        put_inside(f.id, int(inside), "copy", by)
+    touch()
+    db.session.commit()
+    return {"id": f.id, "facet": f.facet, "value": f.value}
+
+
+def put_inside(fid: int, parent: int, mode: str, by: str) -> dict[str, Any]:
+    """(0.9.6.9) A value put inside another (part of it): "move" (out of the values of that category it was in),
+    "copy" (inside both), "out" (no longer inside it). Never inside itself nor inside what is inside it."""
+    from supagent.knowledge.facets import part_of_map, set_parts
+    from supagent.knowledge.freshness import touch
+    from supagent.models import Facet
+
+    if mode not in ("move", "copy", "out"):
+        raise ValueError("mode: move, copy or out")
+    f, p = db.session.get(Facet, int(fid)), db.session.get(Facet, int(parent))
+    if f is None or p is None or f.status != "approved" or p.status != "approved":
+        raise ValueError("both parts must be approved values of the categories")
+    if f.id == p.id:
+        raise ValueError("a part is not inside itself")
+    up = part_of_map()
+    parents = list(up.get(f.id, []))
+    if mode == "out":
+        wanted = [i for i in parents if i != p.id]
+    else:
+        todo, seen = [p.id], set()
+        while todo:                                       # what the new place is inside, all the way up
+            x = todo.pop()
+            if x == f.id:
+                raise ValueError(f"{p.value} is inside {f.value} already: not both ways")
+            if x not in seen:
+                seen.add(x)
+                todo.extend(up.get(x, []))
+        if mode == "move":
+            cats = dict(db.session.query(Facet.id, Facet.facet).filter(Facet.id.in_(parents or [-1])))
+            wanted = [i for i in parents if cats.get(i) != p.facet and i != p.id] + [p.id]
+        else:
+            wanted = [i for i in parents if i != p.id] + [p.id]
+    kept = set_parts(f.id, wanted, by)
+    touch()
+    db.session.commit()
+    return {"id": f.id, "parents": kept}
+
+
+def remove_value(fid: int, by: str) -> dict[str, Any]:
+    """(0.9.6.9) A value taken off the map: rejected (its links and items stay with it, unused; approving it
+    again in Categories brings it back)."""
+    import datetime as dt
+
+    from supagent.knowledge.freshness import touch
+    from supagent.models import Facet
+
+    f = db.session.get(Facet, int(fid))
+    if f is None:
+        raise ValueError("no such part")
+    f.status, f.reviewed_by, f.reviewed_at = "rejected", by, dt.datetime.utcnow()
+    touch()
+    db.session.commit()
+    return {"id": f.id, "status": f.status}
+
+
+def add_category(name: str, inside: str, by: str) -> dict[str, Any]:
+    """(0.9.6.9) A category of one's own made on the map, inside another one when given (a subcategory)."""
+    from supagent import settings
+    from supagent.knowledge.facets import BUILTIN, NAME_OK, editable, set_inside
+
+    name = " ".join(str(name or "").lower().split())
+    if not NAME_OK.match(name) or name == "aspect":
+        raise ValueError("a name of 2 to 24 letters, digits, spaces or _ (not aspect)")
+    if name in editable():
+        raise ValueError(f"the category {name!r} exists already")
+    if name not in BUILTIN:
+        settings.set_value("categories.custom", list(settings.get("categories.custom") or []) + [name], by=by)
+    if str(inside or "").strip():
+        set_inside(name, inside, by)
+    return {"name": name, "inside": " ".join(str(inside or "").lower().split())}
+
+
 def links_of_value(fid: int) -> list[dict[str, Any]]:
     """The links of one value, both ways, with the other part's name and category (the Categories page)."""
     from sqlalchemy import or_
