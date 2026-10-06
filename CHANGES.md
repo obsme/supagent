@@ -1,5 +1,28 @@
 # Changes
 
+## 0.9.6.6 — 6 October 2026
+
+Three roles only, Admin, Editor and Viewer, when you want it: supagent's AI roles merged into Superset's own.
+
+Not measured again: the agent's answering code is 0.9.6's (see 0.9.6). Checked before this release: the unit tests (1008 passed, among them the roles applied and undone: only Admin, Editor and Viewer, Superset's role sync not making Alpha and Gamma again, a Viewer chatting, every user's roles back), the dry run on a PostgreSQL lab.
+
+* `superset supagent roles` says what would change and what stops it: the roles renamed and removed, the users and
+  groups moved; superset_config.py naming Alpha, Gamma or an AI role (`AUTH_USER_REGISTRATION_ROLE`,
+  `AUTH_ROLES_MAPPING`, `PUBLIC_ROLE_LIKE`…: it stops until they name Editor, Viewer or Admin); row level security
+  filters or dashboards given an AI role.
+* `--apply`: Alpha becomes **Editor** and Gamma **Viewer** (the same roles: their users, row level security filters
+  and dashboards keep them); AI Admin's users get **Admin**, AI Editor's Editor, AI Viewer's and AI Agent's Viewer;
+  the AI roles are removed; a copy of every user's and group's roles is kept.
+* From then on `superset init` makes Editor and Viewer where it made Alpha and Gamma: Editor = Alpha and SQL Lab
+  without deleting, with the knowledge written (no settings); Viewer = Gamma without anything that changes
+  something, with the chat; Admin = everything. `superset supagent grant <user> --role viewer|editor|admin` gives
+  them.
+* `--undo`: Alpha, Gamma and the AI roles again, every user's and group's roles as they were.
+* Nothing changes until `--apply`.
+
+Upgrade from 0.9.6.5: the wheel on every host, restart; nothing to run (tables v17). The steps for the three roles:
+INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
 ## 0.9.6.5 — 6 October 2026
 
 The System map in levels: categories drawn inside others, opened and closed with a click; the map filtered on a

@@ -271,6 +271,13 @@ SPECS: list[Spec] = [
          "levels down as the categories go. A category of categories.qualified is inside the category it is named "
          "after unless this says otherwise (\"\": not inside). Display only: the agent reads what each value is part "
          "of, not this"),
+    Spec("roles.simple", False, "bool", "The roles are Admin, Editor and Viewer (0.9.6.6): supagent's AI roles merged "
+         "into Superset's Admin, Alpha and Gamma, these two renamed Editor and Viewer; Superset's role sync makes "
+         "Editor and Viewer where it made Alpha and Gamma. Set by superset supagent roles --apply (and --undo), not "
+         "by hand"),
+    Spec("roles.viewer_data", "none", "choice", "The data the Viewer role (AI Viewer) reads: none (give its users "
+         "their databases' access as Superset does: a role or a group per team) or all (every database and dataset)",
+         choices=("none", "all")),
     Spec("categories.label_links", True, "bool", "Link at once the values a metric's series carry together (a "
          "server with its component, a tenant with its servers: 0.9.6); off: proposed in To review like an index's"),
     Spec("categories.data_link_days", 21, "int", "A link read from the data that the data has not shown for this many "

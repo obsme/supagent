@@ -159,8 +159,24 @@ def init(viewer_data: str = "none") -> None:
     moved = migrate_document()
     if moved:
         click.echo(f"catalog: the single document split into entries ({moved}); the document is kept as a backup")
+    from supagent import settings
+    from supagent.roles import simple
+
+    if viewer_data == "all":                             # kept for the role sync (roles.simple: Viewer)
+        settings.set_value("roles.viewer_data", "all")
     appbuilder.add_permissions(update_perms=True)        # the views' permissions (FAB)
     security_manager.sync_role_definitions()             # Admin gets them; Gamma does not (admin-only)
+    if simple():                                         # (0.9.6.6) Admin, Editor, Viewer only: made by the sync
+        db.session.commit()
+        click.echo("roles: Admin = everything; Editor = charts, dashboards, datasets explored, SQL Lab, the knowledge "
+                   "written, no settings and no deletion; Viewer = read and chat, nothing changed; the data: "
+                   + ("every database (roles.viewer_data all)" if settings.get("roles.viewer_data") == "all"
+                      else "none given here (a role or a group per team)") + " (superset supagent roles --undo: back "
+                   "to Alpha, Gamma and the AI roles)")
+        _init_store()
+        click.echo("Next: give users their role (superset supagent grant <user> --role viewer|editor|admin), set the "
+                   "LLM, then superset supagent learn.")
+        return
     role = security_manager.find_role(ROLE) or security_manager.add_role(ROLE)
     added = []
     for perm, view in _role_permissions():
@@ -839,7 +855,12 @@ def search(query: str, user: str | None, limit: int) -> None:
 def grant(usernames: tuple[str, ...], kind: str = "viewer") -> None:
     from superset.extensions import db, security_manager
 
-    name = {"viewer": VIEWER_ROLE, "editor": EDITOR_ROLE, "admin": ADMIN_ROLE, "agent": ROLE}[kind]
+    from supagent.roles import simple
+
+    if simple():                                          # (0.9.6.6) Admin, Editor, Viewer
+        name = {"viewer": "Viewer", "editor": "Editor", "admin": "Admin", "agent": "Viewer"}[kind]
+    else:
+        name = {"viewer": VIEWER_ROLE, "editor": EDITOR_ROLE, "admin": ADMIN_ROLE, "agent": ROLE}[kind]
     role = security_manager.find_role(name)
     if role is None:
         raise click.ClickException(f"no role {name!r}: run superset supagent init first")
@@ -852,6 +873,30 @@ def grant(usernames: tuple[str, ...], kind: str = "viewer") -> None:
             user.roles.append(role)
         click.echo(f"{name}: {', '.join(r.name for r in user.roles)}")
     db.session.commit()
+
+
+@supagent.command(help="Three roles only: Admin, Editor, Viewer (supagent's AI roles merged into Superset's Admin, "
+                       "Alpha and Gamma, these two renamed). Without an option: what would change, nothing changed")
+@click.option("--apply", "do_apply", is_flag=True, help="make it so (a copy of every user's roles is kept)")
+@click.option("--undo", is_flag=True, help="back to Alpha, Gamma and the AI roles, the users' roles as they were")
+@click.option("--force", is_flag=True, help="even when row level security filters or dashboards name a role that goes "
+                                            "(they lose it); never when superset_config.py names one")
+@with_appcontext
+def roles(do_apply: bool, undo: bool, force: bool) -> None:
+    from supagent import roles as R
+
+    if do_apply and undo:
+        raise click.ClickException("--apply or --undo, not both")
+    try:
+        if do_apply:
+            R.apply("cli", force=force)
+            click.echo("done: the roles are Admin, Editor and Viewer (superset init keeps them so; --undo: back)")
+        elif undo:
+            R.undo("cli")
+            click.echo("done: Alpha, Gamma and the AI roles are back, every user's roles as they were")
+    except R.RolesError as ex:
+        raise click.ClickException(str(ex)) from ex
+    click.echo(R.text(R.plan()))
 
 
 @supagent.command("push-descriptions", help="Catalog descriptions -> descriptions of the dataset columns")

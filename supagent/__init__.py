@@ -24,7 +24,7 @@ import logging
 import os
 from typing import Any, Callable
 
-__version__ = "0.9.6.5"
+__version__ = "0.9.6.6"
 
 log = logging.getLogger(__name__)
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -131,6 +131,9 @@ def init_app(app: Any) -> None:
     for name in (ChatView.class_permission_name, KnowledgeView.class_permission_name, AdminView.class_permission_name,
                  *MENU_ITEMS.values()):
         security_manager.ADMIN_ONLY_VIEW_MENUS.add(name)
+    from supagent.roles import install
+
+    install(security_manager)              # (0.9.6.6) roles.simple: Superset's sync makes Editor and Viewer
     # "Chat": a tab of Superset's top bar, like Dashboards or SQL; the dictionary and the settings
     # are in Superset's Settings menu (and in the tabs of the chat page)
     appbuilder.add_view(ChatView, MENU_ITEMS["chat"], label="Chat", icon="fa-comments")

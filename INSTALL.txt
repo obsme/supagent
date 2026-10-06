@@ -1,16 +1,16 @@
-supagent 0.9.6.5 - the AI agent inside Apache Superset
+supagent 0.9.6.6 - the AI agent inside Apache Superset
 ======================================================
 
 What is in this folder
-  supagent-0.9.6.5-py3-none-any.whl   the package for Superset 6.1 (pure Python; nothing else to install)
+  supagent-0.9.6.6-py3-none-any.whl   the package for Superset 6.1 (pure Python; nothing else to install)
   supagent-guide.html / .pdf        the guide (install, LLM middleware, learning, screens)
   catalog.example.yaml              an example catalog, to adapt
   SHA256SUMS                        checksums
 
-Upgrading? From 0.9.6.4, 0.9.6.3, 0.9.6.2, 0.9.6.1 or 0.9.6: pip install this wheel on every host and restart
-(tables v17 as before: nothing to run): "From 0.9.6.4 to 0.9.6.5" and the sections after it below. From 0.9.4,
-0.9.2, 0.9.1 or 0.9.0: pip install this wheel on every host, superset supagent init once (schema 15 to 17: new
-nullable columns; "part of" becomes links of the System map; the roles AI Admin, AI Editor, AI Viewer), restart:
+Upgrading? From 0.9.6.5, 0.9.6.4, 0.9.6.3, 0.9.6.2, 0.9.6.1 or 0.9.6: pip install this wheel on every host and
+restart (tables v17 as before: nothing to run): "From 0.9.6.5 to 0.9.6.6" and the sections after it below. From
+0.9.4, 0.9.2, 0.9.1 or 0.9.0: pip install this wheel on every host, superset supagent init once (schema 15 to 17:
+new nullable columns; "part of" becomes links of the System map; the roles AI Admin, AI Editor, AI Viewer), restart:
 "From 0.9 to 0.9.6" below says what changes and how to go back. From 0.8.x: pip install this wheel on every host,
 superset supagent init once (schema 14 to 17), restart ("From 0.8 to 0.9.0" and "From 0.9 to 0.9.6" below). From
 0.7.0 or 0.7.1: "Upgrade from 0.7 to 0.8.0" below (with this wheel: schema 13 to 17). From 0.6.0: the same steps
@@ -29,7 +29,7 @@ role): three packages must be pinned, or Superset itself does not start (none is
 1. Install in Superset's virtualenv (pip only)
 
    PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-   $PY -m pip install supagent-0.9.6.5-py3-none-any.whl
+   $PY -m pip install supagent-0.9.6.6-py3-none-any.whl
    Superset 6.1: nothing else is needed (offline too).
 
 2. Register it: one line in superset_config.py (no logic)
@@ -130,6 +130,33 @@ role): three packages must be pinned, or Superset itself does not start (none is
      superset supagent init          builds it (the first time it finds the extensions)
      superset supagent store status  extensions, versions, size, warnings
 
+From 0.9.6.5 to 0.9.6.6
+=======================
+
+The wheel on every host, restart; nothing to run (tables v17). Nothing changes by itself. New, when you want it:
+three roles only, Admin, Editor and Viewer (supagent's AI Admin, AI Editor, AI Viewer and the earlier AI Agent
+merged into Superset's Admin, Alpha and Gamma, these two renamed Editor and Viewer):
+  1. Back up Superset's database (pg_dump -Fc -f superset-before-roles.dump "<Superset's database>"), then on one host
+       superset supagent roles
+     says what would change (the roles renamed and removed, the users and groups moved) and what stops it:
+     superset_config.py naming Alpha, Gamma or an AI role (AUTH_USER_REGISTRATION_ROLE, AUTH_ROLES_MAPPING,
+     PUBLIC_ROLE_LIKE, GUEST_ROLE_NAME...: it stops until they name Editor, Viewer or Admin), row level security
+     filters or dashboards given an AI role (give them Admin, Editor or Viewer first; --force: they lose it).
+  2. Write in superset_config.py what it says (e.g. AUTH_USER_REGISTRATION_ROLE = "Viewer", AUTH_ROLES_MAPPING
+     values "Gamma" -> "Viewer", "Alpha" -> "Editor"), restart, then
+       superset supagent roles --apply
+     Alpha becomes Editor and Gamma Viewer (the same roles: their users, row level security filters and
+     dashboards keep them); AI Admin's users get Admin, AI Editor's Editor, AI Viewer's and AI Agent's Viewer; the
+     AI roles are removed; a copy of every user's and group's roles is kept (supagent_meta "roles_backup").
+  3. From then on superset init and superset supagent init keep the three: Editor = Alpha and SQL Lab without
+     deleting, with the knowledge written (no settings); Viewer = Gamma without anything that changes something,
+     with the chat and the dictionary read; Admin = everything. The data: as before (a role or a group per team;
+     every database: superset supagent init --viewer-data all). superset supagent grant <user> --role
+     viewer|editor|admin gives them; superset fab create-user and other tools: Editor and Viewer instead of Alpha
+     and Gamma.
+  Back: superset supagent roles --undo (Alpha, Gamma and the AI roles again, every user's and group's roles as they
+  were), with superset_config.py as before. Back to 0.9.6.5 while the three roles are in use: --undo first.
+
 From 0.9.6.4 to 0.9.6.5
 =======================
 
@@ -187,7 +214,7 @@ deleted, was removed (not "three changed files read"). Back to 0.9.6.1: its whee
 From 0.9.6 to 0.9.6.1
 =====================
 
-On every host  $PY -m pip install supagent-0.9.6.5-py3-none-any.whl, then restart the web servers, the Celery workers
+On every host  $PY -m pip install supagent-0.9.6.6-py3-none-any.whl, then restart the web servers, the Celery workers
 and beat. Nothing to run: the tables stay v17 (superset supagent init is not needed; run anyway, it says "schema
 version 17 -> 17"). superset_config.py does not change. The agent's answers are 0.9.6's (its code is unchanged).
 
@@ -217,9 +244,9 @@ pieces are made again once more with 0.9.6's names; a Context page rejected with
 From 0.9 to 0.9.6
 =================
 
-On every host  $PY -m pip install supagent-0.9.6.5-py3-none-any.whl, then once, on one host:
+On every host  $PY -m pip install supagent-0.9.6.6-py3-none-any.whl, then once, on one host:
       superset supagent init          tables: schema version 15 -> 17; the roles AI Admin, AI Editor, AI Viewer
-Then restart the web servers, the Celery workers and beat. Settings -> Chat settings shows "supagent 0.9.6.5 (tables
+Then restart the web servers, the Celery workers and beat. Settings -> Chat settings shows "supagent 0.9.6.6 (tables
 v17)". Give people their role (superset supagent grant <user> --role viewer|editor|admin): the role AI Agent of
 earlier versions is kept as it was, nobody loses an access.
 
@@ -257,12 +284,12 @@ as their note; it shows no note nor memory kept for a group. The roles AI Admin,
 From 0.8 to 0.9.0
 =================
 
-On every host  $PY -m pip install supagent-0.9.6.5-py3-none-any.whl, then once, on one host:
+On every host  $PY -m pip install supagent-0.9.6.6-py3-none-any.whl, then once, on one host:
       superset supagent init          tables: schema version 14 -> 15
 (three new nullable columns on supagent_link: detail, evidence, explained_by: the long explanation of an
 interaction, where it was found, who explained it; the sentence an older proposed interaction kept as its note
 moves to its evidence). Then restart the web servers, the Celery workers and beat. Settings -> Chat settings
-shows "supagent 0.9.6.5 (tables v17)".
+shows "supagent 0.9.6.6 (tables v17)".
 
 What starts by itself:
   - A question that asks what is wrong and why gets the system around it, two more tools (compare_groups,
@@ -343,11 +370,11 @@ What changes:
 Steps (Superset stopped for a few minutes):
  1. Stop the web servers, the Celery workers and beat, on every host.
  2. Back up: pg_dump -Fc -f superset-before-0.8.0.dump "<Superset's database>"; $PY -m pip freeze > pip-before-0.8.0.txt
- 3. On every host: $PY -m pip install supagent-0.9.6.5-py3-none-any.whl     ($PY -m pip show supagent: 0.9.6.5)
+ 3. On every host: $PY -m pip install supagent-0.9.6.6-py3-none-any.whl     ($PY -m pip show supagent: 0.9.6.6)
  4. Once, on one host: superset supagent init
       tables: schema version 13 -> 15
       knowledge store: N pieces of the catalog's notes are guides now      (when the store is used and had some)
- 5. Start everything. Checks: Settings -> Chat settings shows "supagent 0.9.6.5 (tables v17)"; Data dictionary ->
+ 5. Start everything. Checks: Settings -> Chat settings shows "supagent 0.9.6.6 (tables v17)"; Data dictionary ->
     Knowledge -> Catalog: the former notes are guides; a question in the chat answers.
 
 Back to 0.7.1: stop, pip install the 0.7.1 wheel, then in Superset's database:
