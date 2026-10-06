@@ -5,6 +5,7 @@ admin marked wrong is kept as such and never measured again (nor shown to the ag
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from typing import Any
 
@@ -15,6 +16,20 @@ from supagent.models import KObject, Relation
 MIN_COMMON = 2           # values in common at least (3 when the smaller side has more than 3 values)
 MIN_COVERAGE = 0.6       # share of the smaller side's values found in the other one
 IGNORED_VALUES = {"", "true", "false", "0", "1", "none", "null", "unknown", "n/a", "-"}
+
+
+HOST_PORT = re.compile(r"^[A-Za-z0-9_.\-]+:\d{2,5}$")
+
+
+def without_ports(values: set[str]) -> set[str] | None:
+    """The hosts of a label written host:port (Prometheus' instance: db-1:9187, app-1:9100), when at least
+    half of its values are (0.9.5: they never met the host fields of the logs, host.name = db-1); else None."""
+    if not values:
+        return None
+    hp = [v for v in values if HOST_PORT.match(v)]
+    if len(hp) < 0.5 * len(values):
+        return None
+    return {v.rsplit(":", 1)[0] if HOST_PORT.match(v) else v for v in values}       # (a host without port: as it is)
 
 
 def _values(obj: KObject) -> set[str]:
@@ -73,9 +88,16 @@ def learn_relations() -> dict[str, int]:
         key = (sid, name)
         rep.setdefault(key, oid)
         label_values[key] |= vals
-    # candidates: (id, kind, source, name, parent, values)
-    cands: list[tuple[int, str, int, str, str, set[str]]] = [
-        (rep[k], "label", k[0], k[1], "", v) for k, v in label_values.items() if v]
+    # candidates: (id, kind, source, name, parent, values); a label written host:port is matched by its hosts
+    stripped: set[int] = set()
+    cands: list[tuple[int, str, int, str, str, set[str]]] = []
+    for k, v in label_values.items():
+        if not v:
+            continue
+        hosts = without_ports(v)
+        if hosts:
+            stripped.add(rep[k])
+        cands.append((rep[k], "label", k[0], k[1], "", hosts or v))
     cands += [(oid, "field", sid, name, parent, vals) for oid, sid, name, parent, vals in _stream("field") if vals]
     index: dict[str, list[int]] = defaultdict(list)
     for i, c in enumerate(cands):
@@ -120,7 +142,8 @@ def learn_relations() -> dict[str, int]:
             kept.add(id(rel))
             continue
         rel.evidence = {"a_values": len(va), "b_values": len(vb), "common": n, "coverage": round(coverage, 3),
-                        "examples": sorted(va & vb)[:6]}
+                        "examples": sorted(va & vb)[:6],
+                        **({"port_stripped": True} if a[0] in stripped or b[0] in stripped else {})}
         rel.confidence = round(float(coverage), 3)
         rel.origin = "learned"
         kept.add(id(rel))

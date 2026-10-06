@@ -85,3 +85,23 @@ def no_ledger(ctx):
     settings.set_value("agent.ledger", False)
     yield
     settings.set_value("agent.ledger", None)
+
+
+def part_of(child, *parents, status="approved"):
+    """(0.9.6) The value `child` is part of each of `parents`: links of kind part_of between them (values or ids)."""
+    from superset.extensions import db
+
+    from supagent.models import Link
+
+    cid = getattr(child, "id", child)
+    for p in parents:
+        db.session.add(Link(a_ref=f"facet:{cid}", b_ref=f"facet:{getattr(p, 'id', p)}", kind="part_of",
+                            status=status, source="admin"))
+    db.session.flush()
+
+
+def parts_of(child, statuses=("approved",)):
+    """(0.9.6) The ids of the values `child` is part of, by its part_of links of these statuses."""
+    from supagent.knowledge.facets import part_of_map
+
+    return part_of_map(tuple(statuses)).get(getattr(child, "id", child), [])

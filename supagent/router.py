@@ -96,6 +96,26 @@ ROUTE_TOOL = {"type": "function", "function": {
         "route": {"type": "string", "enum": list(ROUTES) + [OTHER], "description": "the kind that fits best"},
         "why": {"type": "string", "description": "a few words"}},
         "required": ["scores", "route"]}}}
+# (0.9.6) the question's reading: asked in a call of its own, at the same time as the route (asked in the routing
+# call, it moved 11 routes of the lab's 188 questions away from the right kind against 6 towards it)
+READ_TOOL = {"type": "function", "function": {
+    "name": "read_question",
+    "description": "The question as one precise request, and whether it needs anything of this platform.",
+    "parameters": {"type": "object", "properties": {
+        "restated": {"type": "string", "description": "the question as one precise request, in the language of the "
+                     "question: what is asked (the figure, the fact, the list), about what (the names of the parts "
+                     "and the knowledge given above, spelled as they are there), over which period, with which "
+                     "filters; what it refers to in the chat said in full. Nothing the question and the chat do not "
+                     "say: no name, value, date or figure of your own"},
+        "general": {"type": "boolean", "description": "true only when the question needs nothing of this platform: "
+                    "no data, no part of the system, no knowledge of the team (its notes, decisions, glossary, "
+                    "rules), no chart (writing or fixing a script, what a technology or a word means in general, a "
+                    "calculation given in full)"}},
+        "required": ["restated", "general"]}}}
+READ_SYSTEM = ("You read a question asked to the data assistant of this platform before it is answered. Write it "
+               "again as one precise request (restated), in the team's own names as given above, and say whether it "
+               "is a general question that needs nothing of this platform (general): a word the team's knowledge "
+               "defines, a decision of the team, a part of its system is of this platform. Call read_question once.")
 
 
 @dataclass
@@ -108,6 +128,10 @@ class Decision:
     why: str = ""
     examples: list[dict[str, Any]] = field(default_factory=list)
     scores: dict[str, int] = field(default_factory=dict)
+    restated: str = ""                   # the question as one precise request (0.9.6), as the LLM wrote it
+    general: bool = False                # the LLM: it needs nothing of this platform
+    given: str = ""                      # what the LLM was shown (the restatement may use only its names)
+    usage: dict[str, Any] = field(default_factory=dict)   # the router's calls (the route's and the reading's)
 
     @property
     def active(self) -> bool:
@@ -116,7 +140,9 @@ class Decision:
     def as_dict(self) -> dict[str, Any]:
         return {"route": self.route, "llm": self.llm, "second": self.second, "confidence": self.confidence,
                 "by": self.by, "why": self.why[:200], "scores": self.scores, "examples": [
-                    {k: e.get(k) for k in ("route", "similarity", "admin")} for e in self.examples[:EXAMPLES]]}
+                    {k: e.get(k) for k in ("route", "similarity", "admin")} for e in self.examples[:EXAMPLES]],
+                **({"restated": self.restated[:400]} if self.restated else {}),
+                **({"general": True} if self.general else {})}
 
 
 def enabled() -> bool:
@@ -247,6 +273,30 @@ def parse(msg: dict[str, Any]) -> tuple[str, str, str, str, dict[str, int]]:
     return (best if route != OTHER else OTHER), nxt if scores[nxt] >= FITS else "", conf, why, scores
 
 
+def extras(msg: dict[str, Any]) -> tuple[str, bool]:
+    """(restated, general) of the router's call: the question as one precise request, and whether it needs nothing
+    of this platform."""
+    args: Any = None
+    for tc in msg.get("tool_calls") or []:
+        if (tc.get("function") or {}).get("name") in ("read_question", "route_question"):
+            args = (tc.get("function") or {}).get("arguments")
+            break
+    if args is None:
+        text = re.sub(r"<think>.*?</think>", "", msg.get("content") or "", flags=re.S)
+        m = re.search(r"\{.*\}", text, re.S)
+        args = m.group(0) if m else "{}"
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            args = {}
+    if not isinstance(args, dict):
+        return "", False
+    general = args.get("general")
+    general = general is True or str(general).strip().lower() == "true"
+    return " ".join(str(args.get("restated") or "").split())[:600], general
+
+
 def decide(question: str, previous: str = "", user_id: int | None = None, llm: Any = None,
            shown: list[dict[str, Any]] | None = None, found: list[dict[str, Any]] | None = None) -> Decision:
     """The route of a question. `shown` (confirmed examples) and `found` (knowledge) are looked up when not
@@ -262,12 +312,19 @@ def decide(question: str, previous: str = "", user_id: int | None = None, llm: A
     similar = [e for e in d.examples if e not in strong]      # the LLM sees these; the same questions only vote
     if llm is not None:
         try:
-            from supagent.llm import bounded
+            from supagent.llm import add_usage, bounded
 
+            shown_msgs = messages(question, previous, found, similar, _names(question))
+            d.given = shown_msgs[-1]["content"]
+            reading = _reading(llm, shown_msgs, settings.get("agent.read_question"))
             with bounded(llm, ROUTE_SECONDS):                  # before every answer: quick, or the normal way
-                msg = llm.chat(messages(question, previous, found, similar, _names(question)), tools=[ROUTE_TOOL],
-                               max_tokens=400)
+                msg = llm.chat(shown_msgs, tools=[ROUTE_TOOL], max_tokens=400)
+            d.usage = dict(getattr(llm, "last_usage", None) or {})
             d.llm, d.second, d.confidence, d.why, d.scores = parse(msg)
+            d.restated, d.general, read_usage = reading()
+            add_usage(d.usage, read_usage)
+            if d.general and _team_word(question, found):  # a word the team's knowledge defines: of this platform
+                d.general = False
         except Exception as ex:  # pylint: disable=broad-except   (the normal way)
             log.warning("supagent router: the LLM did not route: %s", str(ex)[:200])
     admin = next((e for e in strong if e.get("admin")), None)
@@ -283,6 +340,84 @@ def decide(question: str, previous: str = "", user_id: int | None = None, llm: A
     else:
         d.route, d.by = OTHER, "fallback"
     return d
+
+
+def _reading(llm: Any, routed: list[dict], wanted: Any) -> Any:
+    """The question's reading (restated, general), asked at the same time as its route (a thread; the same
+    messages, the reading's own instruction): a function giving it with the call's usage, ("", False, {}) when it
+    is off, slow or fails."""
+    import contextvars
+    import copy
+    import threading
+
+    if not wanted:
+        return lambda: ("", False, {})
+    got: dict[str, Any] = {}
+    msgs = [{"role": "system", "content": READ_SYSTEM}] + routed[1:]
+    cfg = getattr(llm, "cfg", None)
+    reader = llm
+    if cfg is not None:                       # its own client: the routing call's time bound is set on the other's
+        from supagent.llm import LLM
+
+        try:
+            reader = LLM(copy.copy(cfg))
+        except Exception:  # pylint: disable=broad-except
+            reader = None
+
+    def run() -> None:
+        if reader is None:
+            return
+        try:
+            from supagent.llm import bounded
+
+            with bounded(reader, ROUTE_SECONDS):
+                got["msg"] = reader.chat(msgs, tools=[READ_TOOL], max_tokens=500)
+            got["usage"] = dict(getattr(reader, "last_usage", None) or {})
+        except Exception as ex:  # pylint: disable=broad-except   (no reading: the question as it was asked)
+            log.info("supagent router: no reading of the question: %s", str(ex)[:200])
+
+    def result() -> tuple[str, bool, dict[str, Any]]:
+        restated, general = extras(got["msg"]) if "msg" in got else ("", False)
+        return restated, general, got.get("usage") or {}
+
+    if cfg is None:                           # a test double: after the route, in order
+        def later() -> tuple[str, bool, dict[str, Any]]:
+            run()
+            return result()
+        return later
+    try:                                      # the thread works as the caller does: its app (the call is recorded in
+        from flask import current_app         # supagent_llm_call) and its context (whose answer the call is for)
+
+        app = current_app._get_current_object()  # pylint: disable=protected-access
+    except Exception:  # pylint: disable=broad-except   (no app: the call is not recorded)
+        app = None
+    ctx = contextvars.copy_context()
+
+    def in_context() -> None:
+        if app is None:
+            run()
+            return
+        with app.app_context():
+            run()
+
+    t = threading.Thread(target=ctx.run, args=(in_context,), daemon=True)
+    t.start()
+
+    def done() -> tuple[str, bool, dict[str, Any]]:
+        t.join(ROUTE_SECONDS)
+        return result()
+    return done
+
+
+def _team_word(question: str, found: list[dict[str, Any]]) -> bool:
+    """A term of the team's glossary (or a note, a memory, a decision found) named in the question: the question is
+    about the team's knowledge, not a general one."""
+    q = " " + " ".join(re.findall(r"[a-z0-9]+", (question or "").lower())) + " "
+    for f in found or []:
+        title = " ".join(re.findall(r"[a-z0-9]+", str(f.get("title") or "").split("(")[0].lower()))
+        if f.get("kind") in ("glossary", "teamnote", "note", "memory") and len(title) >= 4 and f" {title} " in q:
+            return True
+    return False
 
 
 def _names(question: str) -> str:

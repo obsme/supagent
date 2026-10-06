@@ -52,7 +52,21 @@ SPECS: list[Spec] = [
          "stops there (0: the LLM server's own limit; with llm.thinking, four times this)"),
     Spec("llm.extra_headers", {}, "json", "More HTTP headers for the LLM calls (JSON object)"),
     # ---- the agent
-    Spec("agent.max_steps", 16, "int", "Tool calls per question at most"),
+    Spec("agent.max_steps", 16, "int", "Tool calls per question at most: a hard limit on the tools the agent runs for "
+         "one answer (the updates of its work plan are not counted); a question of many parts gets half as many more, "
+         "within the limit below. When they are used, the agent answers with what it found"),
+    Spec("agent.read_question", False, "bool", "Read each question before answering it (a call of its own, at the "
+         "same time as its route): the question as one precise request in the team's names (shown as \"Understood "
+         "as\" and given to the agent), and whether it needs anything of this platform (agent.general_answers). Off "
+         "by default: measured in 0.9.6, the reading misled follow-ups (\"that\" read as the last figure, \"the same "
+         "weekday a week earlier\" read with the names of unrelated charts)"),
+    Spec("agent.general_answers", True, "bool", "With agent.read_question: a general question (writing or fixing a "
+         "script, what a technology means in general) is answered without this platform's data and knowledge: "
+         "quicker. Only when the router "
+         "says so, the question names no part, table or chart of the platform, and the model, asked to say if it "
+         "needs the platform, does not"),
+    Spec("agent.max_steps_big", 32, "int", "Tool calls at most for an investigation (why did it fail, what changed, "
+         "the cause) or a request that builds charts or a dashboard: a hard limit as well"),
     Spec("agent.compare_seconds", 45, "int", "compare_groups (investigations): one call reads about ten small "
          "aggregations per field of the table (the window and the 8 earlier days); after this many seconds it reads "
          "no further field and answers with what it has"),
@@ -129,6 +143,10 @@ SPECS: list[Spec] = [
     Spec("agent.inputs_walk", True, "bool", "Investigations: when compare_groups finds the rows late before they "
          "were ready, the inputs of the parts in its scope (two steps up the system map: what they depend on, read "
          "from, receive data from) are given with its result"),
+    Spec("agent.with_parts", True, "bool", "Investigations: a part named to check_health or records_about that "
+         "the system map says is made of other parts (a pool and its servers, a cluster and its nodes; 16 at most) is "
+         "looked at with them: their health breaches (said as found through it) and their records (changes, "
+         "alerts) come with its own"),
     Spec("agent.inputs_logs", True, "bool", "With agent.inputs_walk: the logs of those inputs (compare_logs "
          "called by the system on the first log table that has a field of their category, over the comparison's "
          "window, first where the change is concentrated, then everywhere; at most three calls) are given too: a "
@@ -158,6 +176,11 @@ SPECS: list[Spec] = [
     Spec("learn.indices", [], "list", "Only these indices (patterns with *, e.g. batch-jobs*); empty: every index "
          "the OpenSearch database lists. An index learned before that the patterns leave out is marked gone"),
     Spec("learn.indices_exclude", [], "list", "Never these indices (patterns with *)"),
+    Spec("learn.one_table_each", True, "bool", "Names of the same documents are one table: a family of indices and an "
+         "alias on all of them, an alias and its index, learned once (under a dataset's name, else the name already "
+         "learned, else the data stream's, the alias's, the pattern's); an alias on only some indices of a family (a "
+         "write alias on the newest) is kept with the family's table as a part, never told as a table of its own; a "
+         "data stream is said to be one (its backing indices, its generations deleted by retention)"),
     Spec("learn.metrics", [], "list", "Only these metrics (patterns with *, e.g. node_*, batch_*); empty: every "
          "metric. A metric learned before that the patterns leave out is marked gone"),
     Spec("learn.metrics_exclude", [], "list", "Never these metrics (patterns with *, e.g. go_*)"),
@@ -183,6 +206,10 @@ SPECS: list[Spec] = [
          "the metrics or indices its successful queries read (used to find them for the next questions; Not helpful "
          "takes them back). Not listed with the learned answers"),
     Spec("learn.llm_descriptions", True, "bool", "Ask the LLM to describe what has no description (marked unverified)"),
+    Spec("context.review", True, "bool", "A change of a Context page the agent writes waits for a person's validation "
+         "(Knowledge, To review: the change, what it adds, what it leaves out, what it makes obsolete); the next change "
+         "of the same page replaces the one not validated yet. A new page is shown at once, marked not reviewed; a "
+         "page whose subject is gone is proposed for removal. Off: the agent's pages are written over, as before"),
     Spec("context.enabled", True, "bool", "Build the Context every night: the system's functional and technical "
          "documentation, from the documents, the catalog, the team memory, the data dictionary and the Helpful answers"),
     Spec("context.hour", 4, "int", "Hour of the nightly Context build (after the day's learning run)"),
@@ -232,9 +259,16 @@ SPECS: list[Spec] = [
          "category values (applications: 60 at most)"),
     Spec("categories.relation_min_docs", 5, "int", "Documents two values must share in an index to be proposed "
          "as one part of the other"),
+    Spec("categories.qualified", {}, "json", "Categories whose values are named after the part they belong to: "
+         "category -> the category of that part, e.g. {\"disk\": \"server\"}: a disk /dev/sda1 seen with server srv-1 "
+         "is the value \"srv-1 /dev/sda1\", part of srv-1 (every server has its own sda1)"),
+    Spec("categories.label_links", True, "bool", "Link at once the values a metric's series carry together (a "
+         "server with its component, a tenant with its servers: 0.9.6); off: proposed in To review like an index's"),
+    Spec("categories.data_link_days", 21, "int", "A link read from the data that the data has not shown for this many "
+         "days is proposed for removal (never removed alone)"),
     Spec("learn.classify_per_run", 400, "int", "Knowledge items the daily learning classifies at most (their "
          "categories: aspect, subjects, applications, components, and the relations their texts state); the next "
-         "run continues"),
+         "run continues; 0: none (no item is given to the LLM)"),
     Spec("learn.interactions_logs_seconds", 120, "int", "learn.interactions_logs: the time the step may take (checked "
          "before each query: on a big or shared cluster the queries left are not sent, the next night goes on); "
          "about 900 small queries a log table read whole, some of them a piece of text searched in the messages"),
@@ -242,6 +276,35 @@ SPECS: list[Spec] = [
          "field, a text field, a field of a category's values) are read for the interactions they show (\"still "
          "waiting for its inputs: A, B\", \"request to X\"): each pair seen on enough lines and days waits in To review "
          "with its evidence, never drawn nor used before an admin approves it (no LLM)"),
+    Spec("learn.aliases", True, "bool", "A table of the data that lists names with their other names (a CMDB, an asset "
+         "or service catalog: a name field and an aliases, alias, aka or other_names field) makes the names of one row "
+         "one value of the categories: merged at once (its other names its synonyms, what was filed under them and "
+         "the interactions drawn on them moved to it), or suggested in To review when an admin reviews what the "
+         "learning finds (no LLM)"),
+    Spec("learn.interactions_spans", True, "bool", "The span tables of the data (Jaeger, OpenTelemetry: a span id, a "
+         "parent span id and a service field) show which service calls which: a span under a span of another service, "
+         "a client span naming its peer (peer.service). Each call seen on the last day of the data is drawn on the System "
+         "map as an interaction 'calls' with how many and how long (approved like the values read in the data, else "
+         "in To review) (no LLM)"),
+    Spec("learn.behaviour", True, "bool", "The usual day of each service of the span tables (spans a day, average and 95th "
+         "percentile duration, share of errors, busiest hours: the median of the days before the data's last day) is kept "
+         "with the table and shown with it, labelled as a usual, so that a slowness or a burst of errors is told from "
+         "what the service always does (no LLM)"),
+    Spec("learn.usual_logs", True, "bool", "For the log tables whose kind says where the service is, the services with the "
+         "most lines are read over the data's last full day against the days before (compare_logs): their patterns of "
+         "every day (a warning written every night) are kept with the table and shown with it, labelled as usual, so "
+         "that an investigation does not blame what the logs always say (no LLM)"),
+    Spec("learn.pod_names", True, "bool", "Names of one service in two sources (orders for Kubernetes, shop-orders "
+         "for OpenTelemetry) found by the pods or hosts they run on over the last full day (most of their pods shared): "
+         "made one value of the map, as an inventory's names are (or suggested when categories.review_all); a sidecar "
+         "in every pod is never merged (no LLM)"),
+    Spec("learn.usual_latency", True, "bool", "For every latency histogram whose series name a service (service_name, "
+         "service, application, app, job), the usual day of each service (median and 95th percentile, requests a day: "
+         "the median of the days before the data's last day) is kept with it and shown, labelled as a usual (no LLM)"),
+    Spec("learn.same_events", True, "bool", "For each log table, a few lines of its busiest services on its last full "
+         "day are looked for in the other log tables (the same pod or host, within two seconds, the same text): most "
+         "of them found there are the same events shipped twice (the OpenTelemetry SDK and the container's stdout), "
+         "said with both tables so that they are never added (no LLM)"),
     Spec("learn.interactions", True, "bool", "The daily learning reads the documents, guides, Context pages and team "
          "notes for how the parts of the system interact (depends on, runs on, reads from, calls...) and proposes "
          "what they state for the System map, each with its sentence, word for word; nothing is drawn or used "
@@ -268,6 +331,9 @@ SPECS: list[Spec] = [
     Spec("search.enabled", True, "bool", "Give the agent the knowledge relevant to each question (dictionary, "
          "notes, rules, learned answers, memories, documents)"),
     Spec("search.top_k", 6, "int", "Pieces of knowledge given with each question"),
+    Spec("search.spelling", True, "bool", "Read a searched word that no piece of the knowledge holds (a letter missing, "
+         "one too many, two swapped, a space inside a word, two words run together) as the known word one edit away; "
+         "the search says what it read otherwise"),
     Spec("search.prompt_chars", 2500, "int", "Characters of knowledge given with each question at most"),
     Spec("embed.model", "", "str", "Embedding model (e.g. bge-m3); empty: search by words only"),
     Spec("embed.base_url", "", "str", "Embedding API base (what comes before /embeddings); empty: the LLM's "

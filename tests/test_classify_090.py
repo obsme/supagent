@@ -137,6 +137,13 @@ def test_a_classification_is_a_run_with_its_steps(platform, app, monkeypatch):
 
     platform["conf"]["learn.interactions"] = False
     platform["conf"]["learn.interactions_logs"] = False                 # (its own test: test_linkfinder_090)
+    platform["conf"]["learn.aliases"] = False                           # (theirs: test_spans_aliases)
+    platform["conf"]["learn.interactions_spans"] = False
+    platform["conf"]["learn.behaviour"] = False
+    platform["conf"]["learn.usual_logs"] = False
+    platform["conf"]["learn.same_events"] = False
+    platform["conf"]["learn.usual_latency"] = False
+    platform["conf"]["learn.pod_names"] = False
     monkeypatch.setattr(retire, "recent", lambda seconds=120.0: {})      # (no database is asked in this test)
     monkeypatch.setattr(L, "LLM", _LLM)
     _LLM.seen = []
@@ -153,7 +160,7 @@ def test_a_classification_is_a_run_with_its_steps(platform, app, monkeypatch):
         assert [s["step"] for s in steps] == [
             "categories: the values read in the data's fields", "categories: what waits, by the rules",
             "categories: the knowledge items that changed", "categories: given to the items by the LLM",
-            "categories: parts that look retired", "update the search"]
+            "categories: parts that look retired", "the kind of each index (logs, spans, events...)", "update the search"]
         assert steps[0]["values_read"] >= 31 and steps[0]["server"] >= 31 and "seconds" in steps[0]
         todo = steps[2]["to_classify"]
         assert 8 < todo <= 16 and steps[3]["calls"] == 2 and steps[3]["items"] == todo      # 8 items per call
@@ -173,7 +180,7 @@ def test_a_classification_is_a_run_with_its_steps(platform, app, monkeypatch):
         with _client(app, "admin") as c:
             listed = c.get("/supagent/admin/api/runs").get_json()["runs"]
             mine = next(x for x in listed if x["id"] == run_id)
-            assert mine["kind"] == "classify" and len(mine["stats"]["steps"]) == 6
+            assert mine["kind"] == "classify" and len(mine["stats"]["steps"]) == 7
         with _client(app, "alice") as c:
             assert c.post("/supagent/admin/api/classify", json={}).status_code in (302, 401, 403)
     finally:

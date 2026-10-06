@@ -6,11 +6,14 @@ user's right to create datasets, and gives back the same dataset when asked agai
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
 
-from test_agent_loop import agent_with, say
+from test_knowledge import world  # noqa: F401  (the fixture)
+
+from test_agent_loop import agent_with, call, say
 from test_stop import FakeAgent
 
 PROMQL = '100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{instance="srv-amer-002:9100",mode="idle"}[5m])))'
@@ -443,3 +446,206 @@ def test_earlier_answers_named_by_their_place_are_a_follow_up():
     assert not refers_back("What was the first trade of the day?")
     assert not refers_back("Which desk was second in September?")
     assert not refers_back("How many orders were sold in the first week?")
+
+
+def test_a_question_back_that_offers_to_keep_or_drop_the_question_before_is_answered(ctx, monkeypatch):
+    """"I meant the ones delivered that day." after "How many shipments were late on 22 September?" was answered with
+    "the late shipments delivered on 22 September, or all of them?": the follow-up keeps what the question before
+    said, so the question back is sent back once with a query made compulsory. A question back that offers nothing
+    of the question before, or one at the start of a conversation, is left alone."""
+    from supagent.agent import KEEP_ASK_NUDGE
+    from supagent.knowledge.resolve import keep_or_drop
+
+    before = "How many shipments were late on 22 September?"
+    ask = ("Do you want the count of **late shipments delivered on 22 September**, or **all shipments delivered on 22 "
+           "September** (late or on time)?")
+    assert keep_or_drop(before, ask) == ["shipments", "late", "september"]
+    assert keep_or_drop(before, "Which carrier do you mean?") is None                     # nothing to keep or drop
+    assert keep_or_drop("", ask) is None
+    assert keep_or_drop("Combien de colis étaient en retard le 22 septembre ?",
+                        "Voulez-vous les colis en retard livrés ce jour-là, ou tous les colis livrés ce jour-là ?") \
+        == ["colis", "retard"]
+    sql = {"request": {"database_id": 1, "sql": "SELECT COUNT(*) AS n FROM shipments"}}
+    rows = json.dumps({"success": True, "columns": [{"name": "n"}], "rows": [{"n": 81}], "row_count": 1})
+    a, ran = agent_with(monkeypatch, [say(ask), call("execute_sql", sql), say("81 late shipments were delivered on 22 "
+                                                                               "September.")], results=lambda n, args: rows)
+    out, _trace = a.ask("I meant the ones delivered that day.",
+                        [{"role": "user", "content": before}, {"role": "assistant", "content": "37 shipments were late."}])
+    assert out.startswith("81 late shipments") and ran and ran[0][0] == "execute_sql"
+    sent = [m["content"] for m in a.llm.seen[1] if m["role"] == "user"]
+    assert sent[-1] == KEEP_ASK_NUDGE.format(words="shipments, late, september")
+    b, _ = agent_with(monkeypatch, [say(ask)] * 3)
+    assert b.ask("How many shipments were late on 22 September?")[0] == ask                # a first question: asked
+
+
+def test_a_suspect_cause_confirmed_by_its_timing_alone_is_sent_back():
+    """"Was it the deployment of that morning?" answered yes because the deployment came just before the failures
+    (their errors said the payment provider timed out): a coincidence taken for a cause; a state question ("was that
+    unusual?", "is the database overloaded?") is not a cause proposed, and a yes on the failures' own evidence stands."""
+    from supagent.agent import SUSPECT_NUDGE, suspect_confirmed
+
+    yes = ("Yes, it was the deployment that morning: CHG-1180 for checkout from 08:55 to 09:02. This deployment occurred "
+           "just before the checkout failures.")
+    assert suspect_confirmed("Was it the deployment of that morning?", yes)
+    assert suspect_confirmed("And the disk alert on the payment server, was it related?",
+                             "Yes, the disk alert was related: it fired at the same time.")
+    assert suspect_confirmed("Est-ce que c'était le déploiement ?", "Oui, le déploiement a eu lieu juste avant les erreurs.")
+    assert not suspect_confirmed("Was that unusual compared with the other days of that week?",
+                                 "Yes, at the same time the other days had half as many.")
+    assert not suspect_confirmed("Is the orders database overloaded?", "Yes, just before the peak it was.")
+    assert not suspect_confirmed("Was it the deployment of that morning?",
+                                 "No: the failures were the payment provider's timeouts, from 09:10, after it ended.")
+    assert not suspect_confirmed("Was it related to the firmware change?",
+                                 "Yes: the errors on xe-0/0/2 began at 06:50 and the switch logs name the port.")
+    assert "a suspect, not a proof" in SUSPECT_NUDGE and "what they point at" in SUSPECT_NUDGE
+
+
+def test_a_summary_asked_after_a_chat_is_not_a_new_investigation(monkeypatch):
+    """"Give me a two-line summary for the incident ticket" after a chat that found the cause: "incident" made it an
+    investigation (twenty calls re-investigating); the same words as a first question still investigate."""
+    from supagent.agent import SUMMARY_ASKED, Agent
+
+    a = Agent.__new__(Agent)
+    monkeypatch.setattr(Agent, "_route_intents", lambda self: set())
+    q = "Give me a two-line summary for the incident ticket."
+    a.intent_text = "Did anything change on that switch recently?\n" + q
+    assert SUMMARY_ASKED.search(q) and not a._investigating(q)
+    a.intent_text = q                                            # a first question: as before
+    assert a._investigating(q)
+    a.intent_text = "What do the failing calls have in common?\nWhy did the switch port fail?"
+    assert a._investigating("Why did the switch port fail?")      # a follow-up asking why: an investigation
+
+
+def test_the_work_said_aloud_before_a_question_asked_back_is_not_for_the_user():
+    """The model's reasoning about a check ("The tool is telling me I added a condition...") came to the user before
+    the question it asked back: only the question is kept."""
+    from supagent.agent import without_preamble
+
+    text = ("The tool is telling me I added a condition (http_response_status_code >= 400) that wasn't asked for. The "
+            "question asks \"how many of them failed\" but doesn't define what \"failed\" means.\n\n"
+            "Looking at the available metrics again:\n- `checkout_orders_total` has a `status` label\n\n"
+            "The question is ambiguous. I should ask for clarification.\n\nLet me ask the user to clarify:\n\n"
+            "What do you mean by \"failed\" requests? HTTP requests with an error status, or failed orders?")
+    out = without_preamble(text)
+    assert out.startswith("What do you mean by") and "tool is telling me" not in out
+    plain = "Which day do you mean: the 25th or the 26th?"
+    assert without_preamble(plain) == plain
+    told = "Let me ask: which day do you mean?\nThe 25th or the 26th?"     # no work aloud before: kept as written
+    assert without_preamble(told) == told
+
+
+def test_what_changed_is_answered_with_the_changes_found():
+    """"What changed on sw-core-01 this week?" found the firmware change and answered with the port's errors."""
+    import json
+
+    from supagent.agent import CHANGES_NUDGE, changes_unsaid
+
+    rows = [{"change_id": "CHG-1185", "description": "firmware 4.2.1 -> 4.2.3 on sw-core-01", "target": "sw-core-01"}]
+    trace = [{"tool": "execute_sql", "status": "done", "args": {"request": {
+        "sql": 'SELECT * FROM "itsm-changes" WHERE "target" = \'sw-core-01\''}}, "result": json.dumps({"rows": rows})}]
+    errors = "Input errors on sw-core-01 spiked from 07:00, right after the upgrade window."
+    said = changes_unsaid("What changed on sw-core-01 this week?", errors, trace)
+    assert said == "CHG-1185 (firmware 4.2.1 -> 4.2.3 on sw-core-01)"
+    assert changes_unsaid("What changed on sw-core-01 this week?", "CHG-1185 (firmware 4.2.3) on 27 Sep.", trace) is None
+    assert changes_unsaid("How many errors on sw-core-01?", errors, trace) is None          # not a question of changes
+    alerts = [{"tool": "execute_sql", "status": "done", "args": {"request": {"sql": 'SELECT * FROM "alerts"'}},
+               "result": json.dumps({"rows": [{"id": "ALR-17", "summary": "x"}]})}]
+    assert changes_unsaid("What changed on sw-core-01 this week?", errors, alerts) is None   # not a change table
+    assert "{found}" in CHANGES_NUDGE
+
+
+def test_a_follow_up_keeps_the_chats_period(world, monkeypatch):  # noqa: F811
+    """"What do the failing calls have in common?" after "...this morning": its queries counted the failing spans of
+    every day (two incidents mixed); one query with a time condition: the period is in hand."""
+    from superset.extensions import db
+
+    from supagent import settings
+    from supagent.agent import PERIOD_KEPT_NUDGE, Agent, chat_period
+    from supagent.knowledge.store import upsert
+    from supagent.models import Run
+
+    settings.set_value("agent.now", "2026-09-27 11:00")
+    try:
+        earlier = ["Which application logged the most ERROR lines this morning?", "On which pods and nodes?"]
+        assert chat_period("What do the failing calls have in common?", earlier) == earlier[0]
+        assert chat_period("And yesterday?", earlier) is None               # a period of its own
+        assert chat_period("Which application logged the most errors?", []) is None
+        run, src = db.session.query(Run).first(), world["s_jobs"]
+        upsert(run, src, "index", "", "spans", {"stats": {"time_field": "startTimeMillis"}})
+        db.session.commit()
+        a = Agent.__new__(Agent)
+        a.chat_period = earlier[0]
+        every = [{"tool": "execute_sql", "status": "done", "args": {"request": {
+            "sql": 'SELECT COUNT(*) FROM "spans" WHERE "tag.error" = \'true\''}}}]
+        assert a._period_lost(every) == ["spans"]
+        kept = every + [{"tool": "execute_sql", "status": "done", "args": {"request": {
+            "sql": 'SELECT COUNT(*) FROM "spans" WHERE "startTimeMillis" >= TIMESTAMP \'2026-09-27 00:00\''}}}]
+        assert a._period_lost(kept) is None
+        a.chat_period = None
+        assert a._period_lost(every) is None
+        assert "{asked}" in PERIOD_KEPT_NUDGE and "{tables}" in PERIOD_KEPT_NUDGE
+    finally:
+        settings.set_value("agent.now", None)
+
+
+def test_the_chats_period_is_not_asked_when_the_chat_read_every_day_itself(world):  # noqa: F811
+    from superset.extensions import db
+
+    from supagent.agent import Agent
+    from supagent.knowledge.store import upsert
+    from supagent.models import Run
+
+    run, src = db.session.query(Run).first(), world["s_jobs"]
+    upsert(run, src, "index", "", "spans", {"stats": {"time_field": "startTimeMillis"}})
+    db.session.commit()
+    a = Agent.__new__(Agent)
+    a.chat_period = "How many failed calls this morning?"
+    a.prev_queries = ['SELECT COUNT(*) FROM "spans" WHERE "tag.error" = \'true\'']
+    every = [{"tool": "execute_sql", "status": "done", "args": {"request": {
+        "sql": 'SELECT "operationName", COUNT(*) FROM "spans" WHERE "tag.error" = \'true\' GROUP BY 1'}}}]
+    assert a._period_lost(every) is None
+
+
+def test_a_question_back_before_looking_at_a_part_the_map_knows(monkeypatch):
+    """"How many errors did the payment service log yesterday?" asked back between checkout and payment-legacy
+    with no look at the map, which knew payment as one service also called payment-legacy."""
+    from supagent.agent import MAP_ASK_NUDGE, Agent
+    from supagent.knowledge import brief
+
+    g = {"values": {1: {"id": 1, "cat": "application", "name": "payment"}, 2: {"id": 2, "cat": "subject", "name": "jobs"}},
+         "names": {"payment": [1], "payment-legacy": [1], "jobs": [2]}}
+    monkeypatch.setattr(brief, "_graph", lambda: g)
+    a = Agent.__new__(Agent)
+    assert a._map_named("How many errors did the payment service log yesterday?") == \
+        ("payment", "application; also called payment-legacy")
+    assert a._map_named("How many errors did payment-legacy log?") == ("payment-legacy", "application; also called payment")
+    assert a._map_named("What was the average duration of the jobs?") is None        # a topic, not a part
+    assert a._map_named("How many repayments?") is None                                 # inside a word: not named
+    assert "{name}" in MAP_ASK_NUDGE and "{what}" in MAP_ASK_NUDGE
+
+
+def test_the_one_said_and_all_of_them_counted(world):  # noqa: F811
+    """"How many tickets did the team open last Friday?": the tickets have three teams, the query counted them all
+    (4, the two teams that opened some on Friday together)."""
+    from superset.extensions import db
+
+    from supagent.agent import WHICH_NUDGE, Agent
+    from supagent.knowledge.store import upsert
+    from supagent.models import Run
+
+    run, src = db.session.query(Run).first(), world["s_jobs"]
+    upsert(run, src, "index", "", "tickets", {"stats": {"time_field": "OPENED_TIME"}})
+    upsert(run, src, "field", "tickets", "TEAM", {"data_type": "keyword", "stats": {
+        "values": ["GENERAL_CARE", "LOGISTICS_CARE", "PAYMENTS_CARE"]}})
+    db.session.commit()
+    a = Agent.__new__(Agent)
+    q = "How many tickets did the team open last Friday?"
+    total = [{"tool": "execute_sql", "status": "done", "args": {"request": {
+        "sql": 'SELECT COUNT(*) FROM "tickets" WHERE "OPENED_TIME" >= \'2026-09-18\''}}}]
+    assert a._which_one(q, total) == ("team", "TEAM", ["GENERAL_CARE", "LOGISTICS_CARE", "PAYMENTS_CARE"])
+    grouped = [{"tool": "execute_sql", "status": "done", "args": {"request": {
+        "sql": 'SELECT "TEAM", COUNT(*) FROM "tickets" GROUP BY 1'}}}]
+    assert a._which_one(q, grouped) is None                                 # per team already
+    assert a._which_one("How many tickets did the PAYMENTS_CARE team open?", total) is None    # named
+    assert a._which_one("How many tickets did the teams open?", total) is None                # all of them
+    assert "{noun}" in WHICH_NUDGE and "{values}" in WHICH_NUDGE

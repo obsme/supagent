@@ -146,10 +146,61 @@ def _like(word: str) -> str:
 
 
 def _is_admin() -> bool:
+    """The settings (the LLM, the learning, the backups, the usage): Superset's Admin, or can write on AIAgentAdmin
+    (role AI Admin)."""
     from superset.extensions import security_manager
 
     try:
         return bool(security_manager.is_admin()) or bool(security_manager.can_access("can_write", ADMIN_VIEW))
+    except Exception:  # pylint: disable=broad-except
+        return False
+
+
+def _can_edit() -> bool:
+    """The knowledge written (catalog, documents, categories and values, the map, memory, notes of others, learned
+    answers, the dictionary): an admin, or can edit on AIAgentAdmin (role AI Editor, 0.9.6)."""
+    from superset.extensions import security_manager
+
+    try:
+        return _is_admin() or bool(security_manager.can_access("can_edit", ADMIN_VIEW))
+    except Exception:  # pylint: disable=broad-except
+        return False
+
+
+def _can_share() -> bool:
+    """A note or a memory for everyone or for a group (0.9.6): can share on AIAgent (the earlier role AI Agent, AI Editor,
+    AI Admin); an AI Viewer writes for themselves only."""
+    from superset.extensions import security_manager
+
+    try:
+        return _can_edit() or bool(security_manager.can_access("can_share", ChatView.class_permission_name))
+    except Exception:  # pylint: disable=broad-except
+        return False
+
+
+def _groups_json(every: bool = False) -> list[dict]:
+    """The groups (teams) a note may be for: the user's own (an admin: every group)."""
+    from supagent.security import user_groups
+
+    groups = user_groups()
+    if every:
+        try:
+            from flask_appbuilder.security.sqla.models import Group
+            from superset import db
+
+            groups = db.session.query(Group).order_by(Group.name).all()
+        except Exception:  # pylint: disable=broad-except   (no groups in this Superset)
+            pass
+    return [{"id": x.id, "name": x.name} for x in groups]
+
+
+def _can_delete() -> bool:
+    """The knowledge deleted (an approved value rejected or merged away, a category removed, a catalog entry, a
+    document, someone else's note or memory, a learned answer): an admin, or can delete on AIAgentAdmin."""
+    from superset.extensions import security_manager
+
+    try:
+        return _is_admin() or bool(security_manager.can_access("can_delete", ADMIN_VIEW))
     except Exception:  # pylint: disable=broad-except
         return False
 
@@ -163,7 +214,8 @@ def _nav(active: str) -> dict:
     return {"active": active, "user": g.user.username if getattr(g, "user", None) else "", "version": __version__,
             "can_chat": security_manager.can_access("can_read", ChatView.class_permission_name),
             "can_dictionary": security_manager.can_access("can_read", KnowledgeView.class_permission_name),
-            "is_admin": _is_admin(), "theme": superset_theme()}
+            "is_admin": _is_admin(), "can_edit": _can_edit(), "can_delete": _can_delete(), "can_share": _can_share(),
+            "theme": superset_theme()}
 
 
 STALE_MINUTES = 35          # no progress for this long: the worker died (the Celery task's limit is 30)
@@ -205,7 +257,7 @@ class ChatView(BaseView):
                               "feedback": "write", "file": "read", "cancel": "write", "result_xlsx": "read",
                               "memory": "read", "add_memory": "write", "delete_memory": "write",
                               "search_chats": "read", "notes": "read", "add_note": "write", "change_note": "write",
-                              "delete_note": "write", "promote_note": "write"}
+                              "delete_note": "write", "promote_note": "write", "sharing": "share"}
     template_folder = os.path.join(HERE, "templates")
 
     @expose("/")
@@ -469,7 +521,8 @@ class ChatView(BaseView):
                                                     Memory.user_id == me).all())
         return _json({"mine": [self._memory_json(m, me) for m in mine],
                       "team": [self._memory_json(m, me) for m in team],
-                      "proposed": [self._memory_json(m, me) for m in proposed], "is_admin": _is_admin()})
+                      "proposed": [self._memory_json(m, me) for m in proposed], "is_admin": _can_edit(),
+                      "can_delete": _can_delete()})
 
     @expose("/api/memory", methods=("POST",))
     @has_access_api
@@ -477,9 +530,21 @@ class ChatView(BaseView):
         from supagent.knowledge.memory import add
 
         body = _body()
-        m = add(g.user.id, str(body.get("text") or ""), scope=str(body.get("scope") or "user"),
+        scope = str(body.get("scope") or "user")
+        if scope in ("team", "everyone", "group") and not _can_share():
+            return _json({"error": "your role (AI Viewer) keeps memories for yourself only"}, 403)
+        group = None
+        if scope == "group":
+            from supagent.knowledge import notes as N
+
+            try:
+                group = N.group_of(body.get("group_id") or body.get("group"), g.user, admin=_is_admin())
+            except N.NoteError as ex:
+                return _json({"error": str(ex)}, 400)
+        m = add(g.user.id, str(body.get("text") or ""), scope=scope,
                 kind=str(body.get("kind") or "preference"), category=body.get("category"), source="manual",
-                approved_by=g.user.username if _is_admin() and body.get("scope") == "team" else None)
+                approved_by=g.user.username if _can_edit() and scope in ("team", "group") else None,
+                group_id=group.id if group is not None else None)
         if m is None:
             return _json({"error": "empty, or already remembered"}, 400)
         _sync_chunks("memory:")
@@ -493,7 +558,7 @@ class ChatView(BaseView):
         from supagent.models import Memory
 
         m = db.session.get(Memory, mem_id)
-        if m is None or (not _is_admin() and not (m.user_id == g.user.id and (m.scope == "user" or
+        if m is None or (not _can_delete() and not (m.user_id == g.user.id and (m.scope == "user" or
                                                                               m.status == "proposed"))):
             abort(404)
         db.session.delete(m)                     # removed (Disable keeps a team one without using it)
@@ -516,14 +581,23 @@ class ChatView(BaseView):
         except ValueError:
             return _json({"error": "offset and limit are numbers"}, 400)
         q = (args.get("q") or "").strip()
-        rows, total = N.listing(g.user.id, q, offset, limit, mine=args.get("mine") == "1", tag=args.get("tag") or None)
-        admin = _is_admin()
+        rows, total = N.listing(g.user.id, q, offset, limit, mine=args.get("mine") == "1", tag=args.get("tag") or None,
+                                every_group=_is_admin())
+        admin = _can_edit()
         names = N.authors({n.user_id for n in rows if n.user_id})
         out: dict[str, Any] = {"notes": [N.to_json(n, g.user.id, admin, names) for n in rows], "total": total,
-                               "offset": offset, "limit": limit, "is_admin": admin}
+                               "offset": offset, "limit": limit, "is_admin": admin, "can_share": _can_share(),
+                               "can_delete": _can_delete(), "groups": _groups_json(every=_is_admin())}
         if not offset:
             out["catalog"] = N.catalog_notes(q, 5)
         return _json(out)
+
+    @expose("/api/sharing", methods=("GET",))
+    @has_access_api
+    def sharing(self) -> Response:
+        """What this user may share (0.9.6): its permission, "can share on AIAgent", is declared here so that Superset
+        keeps it; notes and memories for everyone or a group check it."""
+        return _json({"can_share": _can_share(), "groups": _groups_json(every=_is_admin())})
 
     @expose("/api/notes", methods=("POST",))
     @has_access_api
@@ -531,14 +605,20 @@ class ChatView(BaseView):
         from supagent.knowledge import notes as N
 
         body = _body()
+        scope = str(body.get("scope") or ("team" if _can_share() else "user"))
+        if scope in ("team", "group") and not _can_share():
+            return _json({"error": "your role (AI Viewer) writes notes for yourself only"}, 403)
         try:
+            group = N.group_of(body.get("group_id") or body.get("group"), g.user, admin=_is_admin()) \
+                if scope == "group" else None
             n = N.add(g.user.id, str(body.get("text") or ""), title=body.get("title"),
-                      scope=str(body.get("scope") or "team"), tags=body.get("tags"), meeting_on=body.get("meeting_on"),
-                      source="command" if body.get("source") == "command" else "page", by=g.user.username)
+                      scope=scope, tags=body.get("tags"), meeting_on=body.get("meeting_on"),
+                      source="command" if body.get("source") == "command" else "page", by=g.user.username,
+                      group_id=group.id if group is not None else None)
         except N.NoteError as ex:
             return _json({"error": str(ex)}, 400)
         _sync_chunks("note:")
-        return _json({"note": N.to_json(n, g.user.id, _is_admin(), N.authors({n.user_id}))})
+        return _json({"note": N.to_json(n, g.user.id, _can_edit(), N.authors({n.user_id}))})
 
     def _note(self, note_id: int) -> Any:
         """The note if this user may change it (its author; an admin for a team note), else 404."""
@@ -548,7 +628,7 @@ class ChatView(BaseView):
         from supagent.models import Note
 
         n = db.session.get(Note, note_id)
-        if n is None or not N.can_change(n, g.user.id, _is_admin()):
+        if n is None or not N.can_change(n, g.user.id, _can_edit()):
             abort(404)
         return n
 
@@ -566,18 +646,24 @@ class ChatView(BaseView):
                      by=g.user.username)
         except N.NoteError as ex:
             return _json({"error": str(ex)}, 400)
-        if "pinned" in body and _is_admin():               # pinned for everyone: an admin's
+        if "pinned" in body and _can_edit():               # pinned for everyone: an editor's
             n.pinned = bool(body.get("pinned"))
             db.session.commit()
         _sync_chunks("note:")
-        return _json({"note": N.to_json(n, g.user.id, _is_admin(), N.authors({n.user_id}))})
+        return _json({"note": N.to_json(n, g.user.id, _can_edit(), N.authors({n.user_id}))})
 
     @expose("/api/notes/<int:note_id>", methods=("DELETE",))
     @has_access_api
     def delete_note(self, note_id: int) -> Response:
-        from supagent.knowledge import notes as N
+        from superset import db
 
-        N.remove(self._note(note_id))
+        from supagent.knowledge import notes as N
+        from supagent.models import Note
+
+        n = db.session.get(Note, note_id)
+        if n is None or not N.can_change(n, g.user.id, _can_delete()):   # another's note: a deletion (AI Admin)
+            abort(404)
+        N.remove(n)
         _sync_chunks("note:")
         return _json({"deleted": note_id})
 
@@ -589,7 +675,7 @@ class ChatView(BaseView):
         from supagent.knowledge.catalog import CatalogError
         from supagent.knowledge.curated import catalog_texts
 
-        if not _is_admin():
+        if not _can_edit():
             abort(404)
         n = self._note(note_id)
         before = catalog_texts()
@@ -644,7 +730,7 @@ class ChatView(BaseView):
                 if req.get("sql") and not is_investigation(question.content or "", m.id):
                     db.session.add(Example(question=question.content, sql=req.get("sql"),
                                            database_id=req.get("database_id"), message_id=m.id,
-                                           tools=[s.get("tool") for s in m.steps or []]))
+                                           tools=[s.get("tool") for s in m.steps or [] if s.get("tool") != "understood"]))
                     kept = True
         db.session.commit()
         from supagent.governed.gate import confirm
@@ -717,7 +803,7 @@ class _RecipesMixin:
 
         from supagent.models import Recipe
 
-        visible, admin = _visible_databases(), _is_admin()
+        visible, admin = _visible_databases(), _can_edit()
         q = db.session.query(Recipe).order_by(Recipe.last_used_at.desc())
         status = request.args.get("status")
         if status:
@@ -735,6 +821,8 @@ class _RecipesMixin:
             u = use.get(f"recipe:{r.id}")
             out.append({"id": r.id, "question": r.question, "tool": r.tool, "database_id": r.database_id,
                         "target": r.target, "query": r.query, "path": path_text(of_recipe(r)),
+                        "title": r.title, "description": r.description, "how": r.how or [], "tasks": r.tasks or [],
+                        "summary_by": r.summary_by,
                         "seconds": r.seconds, "rows": r.rows,
                         "steps": r.steps, "status": r.status, "uses": r.uses, "created_at": r.created_at,
                         "helpful": len(r.confirmations or []), "last_used_at": r.last_used_at,
@@ -752,8 +840,9 @@ class _RecipesMixin:
 
         from supagent.models import Recipe
 
-        if not _is_admin():
-            return _json({"error": "only admins may change the learned answers"}, 403)
+        if not (_can_delete() if request.method == "DELETE" else _can_edit()):
+            return _json({"error": "your role may not " + ("delete" if request.method == "DELETE" else "change") +
+                                   " the learned answers"}, 403)
         r = db.session.get(Recipe, rid)
         if r is None:
             abort(404)
@@ -766,6 +855,15 @@ class _RecipesMixin:
         status = str(body.get("status") or "")
         if status and status not in ("helpful", "confirmed", "rejected"):
             return _json({"error": "status: helpful, confirmed or rejected"}, 400)
+        if any(k in body for k in ("title", "description", "how", "tasks")):   # what to keep, in a person's words
+            from supagent.knowledge import helpful
+
+            lines = lambda v: [x for x in (v if isinstance(v, list) else str(v or "").splitlines()) if str(x).strip()]  # noqa: E731
+            helpful.keep(r, {"title": str(body.get("title") if "title" in body else r.title or "")[:120],
+                             "description": str(body.get("description") if "description" in body else r.description or ""),
+                             "how": helpful._clean(lines(body["how"]) if "how" in body else r.how, helpful.STEPS * 2),
+                             "tasks": helpful._clean(lines(body["tasks"]) if "tasks" in body else r.tasks,
+                                                     helpful.TASKS * 2)}, by=g.user.username)
         if "question" in body or "query" in body or "path" in body:   # an admin's correction, before confirming it
             from supagent.knowledge.experience import RecipeError, check_recipe_query, edit_recipe
 
@@ -802,7 +900,7 @@ class _RecipesMixin:
         from supagent.knowledge.experience import RecipeError, check_recipe_query
         from supagent.models import Recipe
 
-        if not _is_admin():
+        if not _can_edit():
             return _json({"error": "only admins may change the learned answers"}, 403)
         r = db.session.get(Recipe, rid)
         if r is None:
@@ -821,7 +919,7 @@ class _RecipesMixin:
 
         from supagent.models import QueryStat
 
-        visible, admin = _visible_databases(), _is_admin()
+        visible, admin = _visible_databases(), _can_edit()
         page, size = _page_args()
         q = db.session.query(QueryStat).filter(or_(QueryStat.database_id.in_(list(visible) or [-1]),
                                                    QueryStat.database_id.is_(None) if admin else false()))
@@ -847,7 +945,7 @@ class KnowledgeView(_RecipesMixin, BaseView):
                               "context_export": "read",
                               "where_data": "read", "forget_where": "write", "add_where": "write",
                               "where_tables": "read", "system_map": "read", "edit_system_map": "write",
-                              "map_pdf": "read"}
+                              "map_pdf": "read", "value_links": "read"}
 
     @expose("/api/search", methods=("GET",))
     @has_access_api
@@ -855,6 +953,7 @@ class KnowledgeView(_RecipesMixin, BaseView):
         """The knowledge for a query, as the agent searches it. ?all=1 (the Data dictionary's search): every
         piece found (at most SEARCH_ALL), each with where it is read or edited ("link"); else the best k."""
         from supagent.knowledge.search import link_of, search, search_all
+        from supagent.knowledge.spelling import correct
 
         q = (request.args.get("q") or "").strip()
         kind = request.args.get("kind") or None
@@ -866,8 +965,10 @@ class KnowledgeView(_RecipesMixin, BaseView):
             out = [{"ref": r["ref"], "kind": r["kind"], "title": r["title"], "via": r.get("via"),
                     "text": (r.get("text") or "")[:700] + ("…" if len(r.get("text") or "") > 700 else ""),
                     "link": link_of(r["ref"])} for r in found]
-            return _json({"results": out, "total": len(out), "capped": len(out) >= SEARCH_ALL})
-        return _json({"results": search(q, k=min(int(request.args.get("k") or 12), 30), kinds=kinds)})
+            return _json({"results": out, "total": len(out), "capped": len(out) >= SEARCH_ALL,
+                          "read": correct(q)["changes"]})       # the words read otherwise (cached: no second look)
+        return _json({"results": search(q, k=min(int(request.args.get("k") or 12), 30), kinds=kinds),
+                      "read": correct(q)["changes"]})
 
     @expose("/api/item", methods=("GET",))
     @has_access_api
@@ -920,7 +1021,7 @@ class KnowledgeView(_RecipesMixin, BaseView):
                     .filter(Relation.a_id.in_(obj_ids), Relation.relation != "family_part",
                             Relation.rejected_at.is_(None)).scalar())
         runs = db.session.query(Run).order_by(Run.id.desc()).limit(5).all()
-        return _json({"sources": out, "relations": rels, "is_admin": _is_admin(),
+        return _json({"sources": out, "relations": rels, "is_admin": _can_edit(), "can_delete": _can_delete(),
                       "runs": [{"id": r.id, "reason": r.reason, "status": r.status, "started_at": r.started_at,
                                 "finished_at": r.finished_at} for r in runs]})
 
@@ -1013,8 +1114,8 @@ class KnowledgeView(_RecipesMixin, BaseView):
 
         from supagent.models import KObject
 
-        if not _is_admin():
-            return _json({"error": "only admins may change the dictionary"}, 403)
+        if not _can_edit():
+            return _json({"error": "only editors may change the dictionary"}, 403)
         o = db.session.get(KObject, oid)
         if o is None or o.source_id not in self._sources():
             abort(404)
@@ -1150,7 +1251,7 @@ class KnowledgeView(_RecipesMixin, BaseView):
                                                               if k[0] != dbid})} for a in words]})
         return _json({"tables": out, "total": len(items), "offset": offset, "limit": limit,
                       "databases": [{"id": i, "name": n} for i, n in sorted(names.items(), key=lambda x: x[1])],
-                      "is_admin": _is_admin()})
+                      "is_admin": _can_edit(), "can_delete": _can_delete()})
 
     @expose("/api/where_data/forget", methods=("POST",))
     @has_access_api
@@ -1161,7 +1262,7 @@ class KnowledgeView(_RecipesMixin, BaseView):
 
         from supagent.models import Association
 
-        if not _is_admin():
+        if not _can_delete():
             abort(404)
         b = _body()
         n = (db.session.query(Association).filter(Association.word == str(b.get("word") or ""),
@@ -1180,7 +1281,7 @@ class KnowledgeView(_RecipesMixin, BaseView):
         the team's own words for its data, stemmed like the learned ones, never fading."""
         from supagent.knowledge.experience import RecipeError, add_associations
 
-        if not _is_admin():
+        if not _can_edit():
             abort(404)
         b = _body()
         try:
@@ -1277,13 +1378,25 @@ class KnowledgeView(_RecipesMixin, BaseView):
         for p in visible_pages():
             row = {"id": p.id, "section": p.section, "slug": p.slug, "title": p.title, "kind": p.kind,
                    "author": p.author or "agent", "ai": p.kind == "summary" and (p.author or "agent") == "agent",
-                   "version": p.version, "updated_at": p.updated_at}
+                   "version": p.version, "updated_at": p.updated_at,
+                   "waiting": "remove" if p.proposed_drop else "change" if p.proposed_content else None,
+                   "reviewed_by": p.reviewed_by, "edited_by": p.edited_by}
             if full:                                      # the reader: every page at once (and its words, to find)
                 row.update(html=render_markdown(p.content or ""), text=p.content or "", sources=p.sources or [],
-                           content=p.content or "" if _is_admin() else None)
+                           content=p.content or "" if _can_edit() else None)
             pages.append(row)
-        order = {"functional": 0, "technical": 1}
-        pages.sort(key=lambda x: (order.get(x["section"], 2), _context_rank(x["slug"]), x["title"].lower()))
+        from supagent.knowledge.context import book
+
+        shape = book(visible_pages())                  # the book's numbers, chapters and related pages (0.9.6)
+        chapter_of = {e["page"].id: (ch["number"], ch["title"]) for part in shape["parts"] for ch in part["chapters"]
+                      for e in ch["pages"]}
+        for row in pages:
+            row["number"] = shape["numbers"].get(row["id"])
+            row["chapter"] = " ".join(chapter_of.get(row["id"], ("", "")))
+            row["related"] = shape["related"].get(row["id"], [])
+        rank = {pid: i for i, pid in enumerate(e["page"].id for part in shape["parts"] for ch in part["chapters"]
+                                               for e in ch["pages"])}
+        pages.sort(key=lambda x: rank.get(x["id"], len(rank)))
         last = db.session.query(Run).filter(Run.kind == "context").order_by(Run.id.desc()).first()
         return _json({"pages": pages, "enabled": bool(settings.get("context.enabled")),
                       "hour": settings.get("context.hour"),
@@ -1305,26 +1418,47 @@ class KnowledgeView(_RecipesMixin, BaseView):
             pages = [p for p in pages if p.id == one]
             if not pages:
                 abort(404)
-        order = {"functional": 0, "technical": 1}
-        pages.sort(key=lambda p: (order.get(p.section, 2), _context_rank(p.slug), (p.title or "").lower()))
+        from supagent.knowledge.context import book
+
+        everything = visible_pages()
+        shape = book(everything)                       # numbers and related pages: of the whole Context
+        numbers, related = shape["numbers"], shape["related"]
+        titles = {p.id: p.title for p in everything}
+
+        def page_of(p: Any) -> Any:
+            note = " · ".join(x for x in ("AI-written: check before relying on it"
+                                          if p.kind == "summary" and (p.author or "agent") == "agent" else
+                                          (f"edited by {p.author}" if (p.author or "agent") != "agent" else ""),
+                                          f"updated {p.updated_at:%d %b %Y}" if p.updated_at else "",
+                                          f"version {p.version}") if x)
+            body = p.content or ""
+            near = [f"{numbers.get(r, '')} {titles[r]}".strip() for r in related.get(p.id, []) if r in titles]
+            if near:                                   # the pages it relates to, by their numbers in the book
+                body = body.rstrip() + "\n\n---\n\n**Related pages:** " + "; ".join(near)
+            return X.Page(title=f"{numbers[p.id]} {p.title}" if p.id in numbers else p.title, markdown=body, note=note,
+                          sources=[f"{x.get('title')} ({x.get('ref')})" for x in (p.sources or [])][:30])
+
         sections = []
-        for key, title in (("functional", "Functional"), ("technical", "Technical")):
-            mine = [p for p in pages if p.section == key]
-            if mine:
-                sections.append(X.Section(title=title, pages=[X.Page(
-                    title=p.title, markdown=p.content or "",
-                    note=" · ".join(x for x in ("AI-written: check before relying on it"
-                                                if p.kind == "summary" and (p.author or "agent") == "agent" else
-                                                (f"edited by {p.author}" if (p.author or "agent") != "agent" else ""),
-                                                f"updated {p.updated_at:%d %b %Y}" if p.updated_at else "",
-                                                f"version {p.version}") if x),
-                    sources=[f"{x.get('title')} ({x.get('ref')})" for x in (p.sources or [])][:30]) for p in mine]))
+        if one:
+            sections.append(X.Section(title="Functional" if pages[0].section == "functional" else "Technical",
+                                      pages=[page_of(pages[0])]))
+        else:                                          # the book: a summary, then its parts and numbered chapters
+            sections.append(X.Section(title="Summary", pages=[X.Page(title="This book in short",
+                                                                     markdown=shape["summary"])]))
+            for k, part in enumerate(shape["parts"]):
+                sections.append(X.Section(title=f"Part {'I' * (k + 1) if k < 3 else k + 1} - {part['title']}",
+                                          pages=[]))
+                for ch in part["chapters"]:
+                    sections.append(X.Section(title=f"{ch['number']} {ch['title']}",
+                                              pages=[page_of(e["page"]) for e in ch["pages"]]))
         now = dt.datetime.now()
         title = pages[0].title if one else "Context"
+        chapters = sum(len(part["chapters"]) for part in shape["parts"])
         doc = X.Document(title=title, subtitle="" if one else "What the system is, functionally and technically",
                          sections=sections, toc=not one and len(pages) > 1,
                          meta=[f"Exported {now:%d %b %Y %H:%M} by {g.user.username}",
-                               f"{len(pages)} page{'s' if len(pages) != 1 else ''}"])
+                               f"{len(pages)} page{'s' if len(pages) != 1 else ''}" +
+                               ("" if one else f" in {chapters} chapter{'s' if chapters != 1 else ''}")])
         data = X.to_docx(doc) if fmt == "docx" else X.to_pdf(doc)
         from supagent.textsafe import content_disposition
 
@@ -1359,6 +1493,8 @@ class KnowledgeView(_RecipesMixin, BaseView):
         from supagent.knowledge.context import visible_pages
         from supagent.models import ContextPage
 
+        if not _can_edit():
+            return _json({"error": "only editors may change a Context page"}, 403)
         if next((x for x in visible_pages() if x.id == pid), None) is None:
             abort(404)
         p = db.session.get(ContextPage, pid)
@@ -1382,6 +1518,8 @@ class KnowledgeView(_RecipesMixin, BaseView):
         from supagent.knowledge.learner import running_run
         from supagent.tasks import dispatch_context
 
+        if not _is_admin():                            # a run with LLM calls: as the learning, an admin's
+            return _json({"error": "only admins build the Context (AI Admin)"}, 403)
         busy = running_run()
         if busy is not None:
             name = {"context": "a context build", "classify": "a classification"}.get(busy.kind, "a learning run")
@@ -1395,7 +1533,7 @@ class KnowledgeView(_RecipesMixin, BaseView):
         explanation, the interactions an admin drew, the places of the boxes."""
         from supagent.knowledge.sysmap import map_data
 
-        return _json(map_data(_is_admin()))
+        return _json({**map_data(_can_edit()), "can_delete": _can_delete()})
 
     @expose("/api/map", methods=("POST",))
     @has_access_api
@@ -1409,26 +1547,43 @@ class KnowledgeView(_RecipesMixin, BaseView):
         from supagent.knowledge.freshness import touch
         from supagent.models import Facet
 
-        if not _is_admin():
-            return _json({"error": "only admins may change the map"}, 403)
+        if not _can_edit():
+            return _json({"error": "only editors may change the map"}, 403)
         body = _body()
         try:
             if isinstance(body.get("layout"), dict):
                 return _json({"layout": sysmap.save_layout(body["layout"], g.user.username)})
-            if isinstance(body.get("interaction"), dict):
+            if isinstance(body.get("interaction"), dict):     # a link: what it is, what it does, its direction
                 x = body["interaction"]
-                out = sysmap.save_interaction(int(x.get("a") or 0), int(x.get("b") or 0), str(x.get("kind") or ""),
-                                              str(x.get("note") or ""), g.user.username,
+                out = sysmap.save_interaction(int(x.get("a") or 0), int(x.get("b") or 0), str(x.get("kind") or "") or None,
+                                              str(x["note"]) if x.get("note") is not None else None, g.user.username,
                                               link_id=int(x["id"]) if str(x.get("id") or "").isdigit() else None,
-                                              detail=str(x["detail"]) if x.get("detail") is not None else None)
+                                              detail=str(x["detail"]) if x.get("detail") is not None else None,
+                                              both_ways=bool(x["both"]) if x.get("both") is not None else None,
+                                              reverse=bool(x.get("reverse")))
                 touch()
                 db.session.commit()
                 return _json({"interaction": out})
             if body.get("remove_interaction"):
+                if not _can_delete():                     # an editor proposes it (the link stays until decided)
+                    return _json({"error": "your role may not remove a link: propose its removal (AI Admin "
+                                           "decides)"}, 403)
                 ok = sysmap.delete_interaction(int(body["remove_interaction"]))
                 touch()
                 db.session.commit()
                 return _json({"removed": ok})
+            if isinstance(body.get("propose_removal"), dict):
+                x = body["propose_removal"]
+                out = sysmap.propose_removal(int(x.get("id") or 0), str(x.get("why") or ""), g.user.username)
+                return _json({"proposed": out})
+            if isinstance(body.get("removal"), dict):    # the answer to a proposed removal
+                if not _can_delete():
+                    return _json({"error": "your role may not remove a link (AI Admin)"}, 403)
+                x = body["removal"]
+                ok = sysmap.decide_removal(int(x.get("id") or 0), bool(x.get("remove")), g.user.username)
+                touch()
+                db.session.commit()
+                return _json({"decided": ok})
             if isinstance(body.get("describe"), dict):
                 f = db.session.get(Facet, int(body["describe"].get("id") or 0))
                 if f is None:
@@ -1448,7 +1603,19 @@ class KnowledgeView(_RecipesMixin, BaseView):
         except (ValueError, TypeError) as ex:
             db.session.rollback()
             return _json({"error": str(ex)}, 400)
-        return _json({"error": "layout, interaction, remove_interaction, describe or describe_category"}, 400)
+        return _json({"error": "layout, interaction, remove_interaction, propose_removal, removal, describe or "
+                               "describe_category"}, 400)
+
+    @expose("/api/map/links", methods=("GET",))
+    @has_access_api
+    def value_links(self) -> Response:
+        """The links of one part (?id=), both ways, with the other part: the Categories page shows and edits them."""
+        from supagent.knowledge import sysmap
+
+        fid = request.args.get("id") or ""
+        if not fid.isdigit():
+            return _json({"error": "id: the part's id"}, 400)
+        return _json({"links": sysmap.links_of_value(int(fid)), "can_edit": _can_edit(), "can_delete": _can_delete()})
 
     @expose("/api/map/export.pdf", methods=("POST",))
     @has_access_api
@@ -1488,7 +1655,7 @@ class KnowledgeView(_RecipesMixin, BaseView):
         from supagent.knowledge.describe import _relation_text
         from supagent.models import KObject, Relation
 
-        sources, admin = self._sources(), _is_admin()
+        sources, admin = self._sources(), _can_edit()
         ids = db.session.query(KObject.id).filter(KObject.source_id.in_(list(sources) or [-1]),
                                                   KObject.gone_at.is_(None))
         q = db.session.query(Relation).filter(Relation.a_id.in_(ids), Relation.b_id.in_(ids),
@@ -1522,8 +1689,8 @@ class KnowledgeView(_RecipesMixin, BaseView):
 
         from supagent.models import Relation
 
-        if not _is_admin():
-            return _json({"error": "only admins may change the relations"}, 403)
+        if not _can_edit():
+            return _json({"error": "only editors may change the relations"}, 403)
         r = db.session.get(Relation, rid)
         if r is None:
             abort(404)
@@ -1564,19 +1731,19 @@ class AdminView(BaseView):
     route_base = "/supagent/admin"
     default_view = "index"
     class_permission_name = ADMIN_VIEW
-    method_permission_name = {"index": "read", "get_settings": "read", "put_settings": "write", "test_llm": "write",
-                              "learn": "write", "stop_learning": "write", "runs": "read", "put_catalog": "write", "status": "read",
-                              "entries": "read", "create_entry": "write", "update_entry": "write",
-                              "delete_entry": "write", "entry_history": "read", "restore_entry": "write",
-                              "export_catalog": "read", "team_memory": "read", "set_memory": "write",
-                              "docs": "read", "add_doc": "write", "refresh_doc": "write", "delete_doc": "write",
-                              "edit_doc": "write",
-                              "usage": "read", "usage_data": "read", "review": "read", "facets": "read",
-                              "add_facet": "write", "set_facet": "write", "facet_map": "read",
-                              "facet_categories": "read", "set_tag": "write",
-                              "set_link": "write",
-                              "set_route": "write",
-                              "apply_status": "read"}
+    # (0.9.6) write: the settings (an admin's); read: the knowledge the dictionary's pages read (an editor's too);
+    # edit: the knowledge written (an editor's); delete: the knowledge deleted (an admin's)
+    method_permission_name = {
+        "index": "write", "get_settings": "write", "put_settings": "write", "test_llm": "write", "learn": "write",
+        "classify_now": "write", "backups": "write", "backup_file": "write", "backup_restore": "write",
+        "stop_learning": "write", "runs": "write", "status": "write", "usage": "write", "usage_data": "write",
+        "entries": "read", "entry_history": "read", "export_catalog": "read", "team_memory": "read", "docs": "read",
+        "review": "read", "facets": "read", "facet_map": "read", "facet_categories": "read", "apply_status": "read",
+        "create_entry": "edit", "update_entry": "edit", "restore_entry": "edit", "put_catalog": "edit",
+        "set_memory": "edit", "add_doc": "edit", "edit_doc": "edit", "refresh_doc": "edit", "add_facet": "edit",
+        "approve_found": "edit", "set_facet": "edit", "set_tag": "edit", "set_link": "edit", "set_route": "edit",
+        "delete_entry": "delete", "delete_doc": "delete",
+        "context_proposals": "read", "context_review": "edit", "context_diff": "read"}
 
     # ---- team memory
     @expose("/api/memory", methods=("GET",))
@@ -2130,6 +2297,8 @@ class AdminView(BaseView):
 
         recipes = [{"id": r.id, "question": r.question, "tool": r.tool, "target": r.target,
                     "query": (r.query or "")[:1500], "path": path_text(of_recipe(r)), "uses": r.uses,
+                    "title": r.title, "description": r.description, "how": r.how or [], "tasks": r.tasks or [],
+                    "summary_by": r.summary_by,
                     "created_at": r.created_at}
                    for r in rec_q.order_by(Recipe.id.desc()).limit(limit)]
         # (the AI-written descriptions of the data are not listed here: tens of thousands on a platform, nobody
@@ -2138,12 +2307,14 @@ class AdminView(BaseView):
         vals = val_q.order_by(Facet.facet, Facet.value).limit(limit).all()
         n_items = dict(db.session.query(Tag.facet_id, func.count(Tag.id)).filter(
             Tag.facet_id.in_([f.id for f in vals] or [-1])).group_by(Tag.facet_id).all())
-        # what a value is (said to be) part of, and the known value the LLM thinks it names (a merge)
-        rel_q = (db.session.query(Facet).filter(Facet.status == "approved", Facet.suggested.isnot(None)))
-        rel_all = [f for f in rel_q.order_by(Facet.facet, Facet.value) if (f.suggested or {}).get("parents")]
-        rel_rows = rel_all[:limit]
-        named = {int(x) for f in list(vals) + rel_rows
-                 for x in list(f.parents or []) + list((f.suggested or {}).get("parents") or [])
+        # what a proposed value is said to be part of (links proposed with it, approved with it), and the known
+        # value the LLM thinks it names (a merge); the other proposed links are listed with the links below
+        from supagent.knowledge.facets import part_of_map
+
+        parts = part_of_map(("approved", "proposed"))
+        rel_all: list[Any] = []
+        named = {int(x) for f in vals
+                 for x in list(parts.get(f.id, []))
                  + ([(f.suggested or {}).get("same_as")] if (f.suggested or {}).get("same_as") else [])
                  if str(x).isdigit()}
         others = {x.id: x for x in db.session.query(Facet).filter(Facet.id.in_(named or [-1]), Facet.status != "rejected")}
@@ -2153,15 +2324,13 @@ class AdminView(BaseView):
                     for i in (ids or []) if i in others]
 
         values = [{"id": f.id, "facet": f.facet, "value": f.value, "description": f.description,
-                   "synonyms": list(f.synonyms or []), "items": n_items.get(f.id, 0), "parents": brief(f.parents),
+                   "synonyms": list(f.synonyms or []), "items": n_items.get(f.id, 0), "parents": brief(parts.get(f.id)),
                    "source": f.source, "origins": list(f.origins or [])[:3],
                    "same_as": (brief([(f.suggested or {}).get("same_as")]) or [None])[0]} for f in vals]
         # the values the learning read in the data's category fields, per category: approved together in one click
         found = {c: int(n) for c, n in db.session.query(Facet.facet, func.count(Facet.id)).filter(
             Facet.status == "proposed", Facet.source == "data").group_by(Facet.facet)}
-        relations = [{"id": f.id, "facet": f.facet, "value": f.value, "parents": brief(f.parents),
-                      "suggested": brief((f.suggested or {}).get("parents")),
-                      "from": [t for t in ((f.suggested or {}).get("from") or {}).values()][:5]} for f in rel_rows]
+        relations: list[dict[str, Any]] = []          # (0.9.6: what a value is part of is a link, reviewed as one)
         tag_q = (db.session.query(Tag, Facet).join(Facet, Facet.id == Tag.facet_id)
                  .filter(Tag.status == "proposed", Facet.status == "approved"))
         tag_rows = tag_q.order_by(Tag.confidence.desc(), Tag.id.desc()).limit(limit).all()
@@ -2174,23 +2343,40 @@ class AdminView(BaseView):
         titles = _ref_titles([t.ref for t, _f in tag_rows] + [x.a_ref for x in link_rows] + [x.b_ref for x in link_rows])
         tags = [{"id": t.id, "ref": t.ref, "title": titles.get(t.ref, t.ref), "facet": f.facet, "value": f.value,
                  "confidence": t.confidence} for t, f in tag_rows]
+        from supagent.knowledge.sysmap import described
+
         links = [{"id": x.id, "a": x.a_ref, "a_title": titles.get(x.a_ref, x.a_ref), "b": x.b_ref,
                   "b_title": titles.get(x.b_ref, x.b_ref), "kind": x.kind, "confidence": x.confidence,
+                  "label": described(x.note, x.kind), "both": bool(x.both_ways),
                   "note": x.note or "", "detail": x.detail or "", "evidence": x.evidence or "",
                   "parts": x.a_ref.startswith("facet:") and x.b_ref.startswith("facet:")}
                  for x in link_rows]
         routes = [{"id": r.id, "question": r.question, "route": r.moa, "by": r.moa_by, "signal": r.signal,
                    "at": r.signal_at} for r in route_rows]
+        # links whose removal is proposed (by an editor, or by the learning: what they were read from is gone): in
+        # use until someone who may remove links decides
+        drop_q = db.session.query(Link).filter(Link.proposed_drop.isnot(None), Link.status == "approved")
+        drop_rows = drop_q.order_by(Link.proposed_drop_at.desc(), Link.id.desc()).limit(limit).all()
+        drop_titles = _ref_titles([x.a_ref for x in drop_rows] + [x.b_ref for x in drop_rows])
+        from supagent.knowledge.sysmap import described
+
+        removals = [{"id": x.id, "a_title": drop_titles.get(x.a_ref, x.a_ref), "b_title": drop_titles.get(x.b_ref, x.b_ref),
+                     "kind": x.kind, "label": described(x.note, x.kind), "both": bool(x.both_ways), "note": x.note or "",
+                     "why": x.proposed_drop, "at": x.proposed_drop_at, "source": x.source} for x in drop_rows]
         from supagent.knowledge.retire import waiting as retire_waiting
 
         retire, n_retire = retire_waiting(limit)         # parts that look retired: proposed, never done alone
+        from supagent.knowledge.context import proposals as context_proposals
+
+        pages = context_proposals()                      # Context pages changed, new or gone: a person validates
         counts = {"memory": mem_q.count(), "recipes": rec_q.count(),
                   "values": val_q.count(), "relations": len(rel_all), "tags": tag_q.count(), "links": link_q.count(),
-                  "retire": n_retire, "routes": route_q.count()}
+                  "removals": drop_q.count(), "retire": n_retire, "routes": route_q.count(), "context": len(pages)}
         return _json({"memory": memories, "recipes": recipes, "values": values, "found": found, "retire": retire,
-                      "relations": relations, "tags": tags, "links": links, "routes": routes, "counts": counts,
+                      "relations": relations, "tags": tags, "links": links, "removals": removals, "routes": routes,
+                      "context": pages[:limit], "counts": counts, "can_delete": _can_delete(),
                       "waiting": sum(counts[k] for k in ("memory", "recipes", "values", "relations", "tags", "links",
-                                                         "retire"))})
+                                                         "removals", "retire", "context"))})
 
     @expose("/api/facets", methods=("GET",))
     @has_access_api
@@ -2242,14 +2428,17 @@ class AdminView(BaseView):
         for fid, ref in db.session.query(sub.c.fid, sub.c.ref).filter(sub.c.rn <= 5):
             some.setdefault(fid, []).append(ref)
         titles = _ref_titles([r for refs in some.values() for r in refs])
-        wanted = {int(x) for f in rows for x in (f.parents or []) if str(x).isdigit()}
+        from supagent.knowledge.facets import part_of_map
+
+        parts = part_of_map(("approved",))
+        wanted = {int(x) for f in rows for x in parts.get(f.id, [])}
         names = {x.id: x for x in db.session.query(Facet).filter(Facet.id.in_(wanted or [-1]),
                                                                  Facet.status != "rejected")}
         out = [{"id": f.id, "facet": f.facet, "value": f.value, "status": f.status, "source": f.source,
                 "description": f.description, "synonyms": f.synonyms or [], "items": n_items.get(f.id, 0),
                 "examples": [titles.get(r, r) for r in some.get(f.id, [])], "origins": f.origins or [],
                 "parents": [{"id": names[i].id, "facet": names[i].facet, "value": names[i].value}
-                            for i in (f.parents or []) if i in names]} for f in rows]
+                            for i in parts.get(f.id, []) if i in names]} for f in rows]
         order = {"aspect": 0, "subject": 1, "application": 2, "component": 3}
         out.sort(key=lambda x: (order.get(x["facet"], 9), x["status"] != "proposed", -x["items"], x["value"].lower()))
         return _json({"facets": out})
@@ -2283,9 +2472,9 @@ class AdminView(BaseView):
         f.value, f.status, f.source = value, "approved", "admin"
         db.session.flush()
         if "parents" in body:
-            from supagent.knowledge.facets import clean_parents
+            from supagent.knowledge.facets import set_parts
 
-            f.parents = clean_parents(f.id, body.get("parents")) or None
+            set_parts(f.id, body.get("parents"), g.user.username)
         f.description = str(body.get("description") or "").strip() or None
         syn = body.get("synonyms")
         f.synonyms = [x.strip() for x in (syn if isinstance(syn, list) else str(syn or "").split(",")) if x.strip()]
@@ -2342,12 +2531,14 @@ class AdminView(BaseView):
 
         removed = None
         if request.method == "POST":
-            if not _is_admin():
+            if not _can_edit():
                 abort(403)
             body = _body()
             name = " ".join(str(body.get("name") or "").lower().split())
             if not NAME_OK.match(name) or name == "aspect":
                 return _json({"error": "a name of 2 to 24 letters, digits, spaces or _ (not aspect)"}, 400)
+            if body.get("remove") and not _can_delete():
+                return _json({"error": "your role may not remove a category (AI Admin)"}, 403)
             if body.get("remove"):
                 try:
                     removed = remove_category(name, g.user.username)
@@ -2406,6 +2597,9 @@ class AdminView(BaseView):
         if f is None:
             abort(404)
         body = _body()
+        if (body.get("merge_into") or (body.get("status") == "rejected" and f.status == "approved")
+                or (body.get("retire") is True)) and not _can_delete():
+            return _json({"error": "your role may not remove an approved value (AI Admin)"}, 403)
         if "retire" in body:                           # the answer to a proposed retirement: retire it, or keep it
             from supagent.knowledge.retire import decide
 
@@ -2423,33 +2617,11 @@ class AdminView(BaseView):
             touch()
             db.session.commit()
             return _json({"merged_into": to.id})
-        if body.get("accept_parents") or body.get("reject_parents"):   # what the LLM said it is part of
-            from supagent.knowledge.facets import clean_parents
-
-            sug = dict(f.suggested or {})
-            proposed = list(sug.get("parents") or [])
-            if body.get("accept_parents"):
-                # true: all of them; a list: the admin's choice (some of them, or others): the rest declined
-                chosen = proposed if body["accept_parents"] is True else \
-                    [int(x) for x in body["accept_parents"] if str(x).isdigit()]
-                f.parents = clean_parents(f.id, list(f.parents or []) + chosen) or None
-                left = [p for p in proposed if p not in chosen]
-                if left:
-                    sug["declined"] = list(dict.fromkeys(list(sug.get("declined") or []) + left))
-            else:                                      # not proposed again from the same data
-                sug["declined"] = list(dict.fromkeys(list(sug.get("declined") or []) + proposed))
-            sug.pop("parents", None)
-            sug.pop("from", None)
-            f.suggested = sug or None
-            f.reviewed_by, f.reviewed_at = g.user.username, dt.datetime.utcnow()
-            db.session.commit()
-            touch()
-            db.session.commit()
-            return _json({"id": f.id, "parents": f.parents or []})
         def approve(v: Any) -> None:
-            from supagent.knowledge.facets import review_all
+            from supagent.knowledge.facets import approve_parts, review_all
 
             v.status = "approved"
+            approve_parts(v.id, g.user.username)       # what it was proposed to be part of comes with it
             if not review_all():                      # its confident tags are used at once
                 for t in db.session.query(Tag).filter(Tag.facet_id == v.id, Tag.status == "proposed"):
                     if (t.confidence or 0) >= CONFIDENT:
@@ -2467,9 +2639,10 @@ class AdminView(BaseView):
                 if there.status == "rejected":
                     there.status = f.status
                 if "parents" in body:                 # what the admin chose with the change: its parts go along
-                    from supagent.knowledge.facets import clean_parents
+                    from supagent.knowledge.facets import set_parts
 
-                    f.parents = [p for p in clean_parents(f.id, body.get("parents")) if p != there.id] or None
+                    set_parts(f.id, [p for p in (body.get("parents") or []) if str(p) != str(there.id)],
+                              g.user.username)
                 merge_value(f, there)
                 if body.get("status") == "approved" and there.status != "approved":
                     approve(there)                    # "Save and approve" on a value that names an existing proposal
@@ -2498,15 +2671,20 @@ class AdminView(BaseView):
         if "synonyms" in body:
             syn = body.get("synonyms")
             f.synonyms = [x.strip() for x in (syn if isinstance(syn, list) else str(syn or "").split(",")) if x.strip()]
-        if "parents" in body:                          # the values it is part of (a component of two applications)
-            from supagent.knowledge.facets import clean_parents
+        parts: list[int] = []
+        if "parents" in body:                          # the values it is part of (a component of two applications):
+            from supagent.knowledge.facets import set_parts   # links of kind part_of
 
-            f.parents = clean_parents(f.id, body.get("parents")) or None
+            parts = set_parts(f.id, body.get("parents"), g.user.username)
         f.reviewed_by, f.reviewed_at = g.user.username, dt.datetime.utcnow()
         db.session.commit()
         touch()
         db.session.commit()
-        return _json({"id": f.id, "status": f.status, "value": f.value, "facet": f.facet, "parents": f.parents or []})
+        if "parents" not in body:
+            from supagent.knowledge.facets import part_of_map
+
+            parts = part_of_map(("approved",)).get(f.id, [])
+        return _json({"id": f.id, "status": f.status, "value": f.value, "facet": f.facet, "parents": parts})
 
     @expose("/api/tags/<int:tid>", methods=("POST",))
     @has_access_api
@@ -2600,6 +2778,54 @@ class AdminView(BaseView):
             return _json({"error": "route or remove"}, 400)
         db.session.commit()
         return _json({"id": r.id, "route": r.moa, "followed": r.moa_followed, "signal": r.signal})
+
+    @expose("/api/context/proposals", methods=("GET",))
+    @has_access_api
+    def context_proposals(self) -> Response:
+        """The Context pages whose change (or removal) the agent proposes, and the new pages nobody reviewed yet."""
+        from supagent.knowledge.context import proposals
+
+        return _json({"pages": proposals(), "can_delete": _can_delete()})
+
+    @expose("/api/context/<int:page_id>/diff", methods=("POST",))
+    @has_access_api
+    def context_diff(self, page_id: int) -> Response:
+        """The page shown against a text ({"content": ...}: the proposal as being edited), line by line and word by
+        word, for the side-by-side view of To review."""
+        from superset import db
+
+        from supagent.knowledge.context import diff_rows
+        from supagent.models import ContextPage
+
+        p = db.session.get(ContextPage, page_id)
+        if p is None:
+            abort(404)
+        new = _body().get("content")
+        if not isinstance(new, str) or len(new) > 200_000:
+            return _json({"error": "content: the text of the page (200,000 characters at most)"}, 400)
+        return _json({"diff": diff_rows(p.content or "", new)})
+
+    @expose("/api/context/<int:page_id>/review", methods=("POST",))
+    @has_access_api
+    def context_review(self, page_id: int) -> Response:
+        """approve | reject the agent's proposal for a page (a removal approved: an admin's, as any deletion)."""
+        from superset import db
+
+        from supagent.knowledge.context import review
+        from supagent.models import ContextPage
+
+        action = str(_body().get("action") or "")
+        p = db.session.get(ContextPage, page_id)
+        if p is not None and p.proposed_drop and action == "approve" and not _can_delete():
+            return _json({"error": "removing a page is an admin's (AI Admin)"}, 403)
+        body = _body()
+        try:
+            out = review(page_id, action, g.user.username,
+                         content=str(body["content"]) if isinstance(body.get("content"), str) else None)
+        except ValueError as ex:
+            return _json({"error": str(ex)}, 400)
+        _sync_chunks("context:")
+        return _json(out)
 
     @expose("/api/apply", methods=("GET",))
     @has_access_api

@@ -117,15 +117,35 @@ If your config already has a `FLASK_APP_MUTATOR`, chain it:
 Then, once, and again after each upgrade of the package:
 
 ```bash
-superset supagent init        # tables supagent_*, permissions, role "AI Agent" (idempotent)
-superset supagent grant alice bob     # or give the role "AI Agent" in Superset's user list
+superset supagent init        # tables supagent_*, permissions, the roles AI Admin, AI Editor, AI Viewer (idempotent)
+superset supagent grant alice --role editor     # or give the role in Superset's user list (viewer, editor, admin)
 ```
 
 Restart the web server, the Celery workers and beat.
 
-The role **AI Agent** gives the chat and the data dictionary; the settings stay with the
-Admin role. `superset init` never gives these pages to Gamma or Alpha. What a user can query
+The three roles (0.9.6), made from Superset's own as they are:
+
+* **AI Admin**: everything (Superset's Admin with supagent's settings).
+* **AI Editor**: charts, dashboards, datasets explored, SQL Lab, the knowledge written (the catalog, the documents,
+  the Context, notes and memories for the team or a group, the map's parts and links); no settings and no deletion
+  (removing a link of the map is proposed to an AI Admin). Superset's own write on a chart or a dashboard also lets
+  a user delete the ones they own.
+* **AI Viewer**: reads and chats, changes nothing. The data a viewer may query: none given by `init`
+  (`superset supagent init --viewer-data all` gives every dataset; or give the data per team).
+
+**Teams** are Superset's groups (Settings → Groups): a note or a memory can be for a group (its members only), and
+what a group's members may query stays what their roles give. The role **AI Agent** of earlier versions is kept as
+it was (`grant --role agent`). `superset init` never gives these pages to Gamma or Alpha. What a user can query
 through the agent stays what Superset lets that user query.
+
+## Upgrade from 0.9.x to 0.9.6
+
+`pip install` the new wheel on every host, `superset supagent init` once ("schema version 15 -> 17": nullable
+columns for the groups of notes and memories, the Context page's proposed change, a learned answer's summary, a
+link's proposed removal, its way and when the data last showed it; what each value of the categories was part of
+becomes links ("belongs to"), the column kept unread for an older version), restart. `init` also makes the three roles
+(AI Admin, AI Editor, AI Viewer) and keeps AI Agent as it was. Web and Confluence documents are cut again at their
+next reading (their headings now stay headings): their pieces and vectors are made again once.
 
 ## Upgrade from 0.8 to 0.9.0
 
@@ -916,10 +936,8 @@ user of the dictionary (each sees the parts with an item of the databases they m
 of). One column per category (subjects, applications, components, then your own: servers, environments...), each
 part in a box with what it does: its description, else the sentence of a document, a guide or a Context page that
 names it (the one that says what it is, from a document first), and how many items are about it now (a part whose
-items are gone says so). A grey line joins a part to what it is part of; the **interactions** an admin draws
-between parts (depends on, sends data to, reads from, calls, runs on, triggers, monitors) are arrows, with no
-text on them: a click on one shows what it is and what to do when following it (see *Every interaction
-explained*). *Focus on…* shows a part with what it is part of, what it is made of and what it interacts with. Click a
+items are gone says so). The parts are joined by **links** (0.9.6, see below), arrows with no text on them: a
+click on one shows what it is and what to do when following it (see *Every interaction explained*). *Focus on…* shows a part with what it is part of, what it is made of and what it interacts with. Click a
 part: its panel (part of, made of, interactions, its knowledge in the search). Admins: **Edit** to move the boxes
 (their places are kept for everyone), draw an interaction (a part, *Draw an interaction from here*, then another
 part), write what a part is (or take the sentence found), hide a part. Exports: **PNG, SVG, PDF** (the map as
@@ -949,6 +967,45 @@ What is shown (0.9):
   resources and network under "Infrastructure"); their columns are put side by side inside a frame with the
   group's name. Display only: nothing changes for the categories, their values or the agent. A category is in one
   group; a renamed or removed category is followed.
+
+**Links (0.9.6).** One kind of relation between two parts: the **link**. Each says what it is (its description:
+"runs on", "sends the payment files to"), what it does (what to do when following it: what to check on the other
+part, what a problem there does here), and its way: from one part to the other (an arrow) or both ways (an arrow at
+both ends); several links can join the same two parts. What each value was "part of" in earlier versions became a
+link at the upgrade (tables v17), described by what it was ("belongs to"); what the learning reads keeps what it read
+("runs on", "depends on") as the link's description, and the agent follows it as such. A part's panel on the map, and
+*Links…* on its line in Categories, list its links from its end (→ to the other part, ← from it, ↔ both ways) and add
+one; a link's panel shows it, corrects it, turns it around or makes it both ways. An investigation follows a link a
+person drew from its start to its end (both ways: from either end), as it follows "depends on" and "reads from";
+what an item is about still goes up only the links read as "belongs to" (an item about a server is about its
+application), and the map groups a big category by the links read as "belongs to" and "runs on". Who does what:
+
+* **Added**: by an editor (a part's panel or *Links…* in Categories: the other part, what the link is, what it
+  does, its way; or *Edit* → *Add a link from here*, then the other part on the map), or found by the learning, then
+  approved in *To review*: the sentence of a document, a guide, a
+  Context page or a note that states it; what the logs and the spans show; the values two fields of an index have
+  together; the values a metric's series carry together (below).
+* **Removed**: by an AI Admin. An AI Editor proposes it (with why: the link stays drawn, dashed, and followed until
+  decided); the learning proposes it too when the sentence it was read from is no longer in its text or the text is
+  gone, or when the data has not shown it for `categories.data_link_days` days (21). An AI Admin removes it or
+  keeps it (the link's panel, or *To review → Links proposed for removal*). Nothing is removed by itself.
+* **Read from the metrics' labels** (`categories.label_links`, on): a series that carries a server (instance,
+  node, host) with a component or a service links them ("runs on" the server); a disk, a volume with a server:
+  "belongs to" it; a server with an application, a subject or a tenant (`tenant_name`): "belongs to" it.
+  These are facts of the data: linked at once, with where they were seen (the metric, the labels, the number of
+  series), and proposed for removal once the data stops showing them. Off: proposed in To review like an index's.
+  The categories read the labels through `categories.fields` (e.g. `{"server": "^(instance|node|host)$",
+  "application": "^(tenant_name|application)$"}`).
+* **Parts that only mean something with what they belong to** (`categories.qualified`, e.g. `{"disk": "server"}`):
+  every server has its own sda; the value is "srv-1 /dev/sda1", linked to srv-1 ("belongs to"), never one "sda"
+  shared by every server.
+
+**Hundreds of parts (0.9.6).** An open category of more than 40 parts shows them by what they belong to (servers
+under their application, services under theirs, by their links: the category that gives the fewest groups
+covering most of them),
+each group one box ("PAYMENTS · 8 servers") opened and closed with a click; a group or a column shows its first 60
+parts, the others behind one box. Links to a folded group or category go to its box, once per kind. On a lab map of
+718 parts and 1,070 links, every category open draws 229 boxes and 2,827 elements instead of 718 and 7,969.
 
 The map follows the categories by itself (0.8.2): it is read again each time it is shown, when the window comes
 back and every 20 seconds while it is looked at (once a minute for who is not an admin; never while an admin
@@ -1522,6 +1579,36 @@ the catalog describes that the dictionary does not have (misspelled, or not lear
 reaches nothing), rules not given in full (the first 30, 1,500 characters each, are in the
 instructions; the others are found by the search), team memories and learned answers waiting for
 an admin, documents that could not be read. Exit code 1 when there is a problem.
+
+### Misspelled words, documents cut at their sections (0.9.6)
+
+* **A word no piece holds is read as the knowledge spells it** (`search.spelling`, on): a word of 5 letters at
+  least, letters only (a name or an identifier keeps its own near-spelling search), that no piece the user may see
+  holds is read as the known word one typing slip away: a letter missing or typed twice, two letters swapped, a key
+  next to it, a vowel for another; never the first letter; the slip looked for in the word's stem first; the one
+  most pieces hold. Two words typed apart are read as the word they make when one of them is unknown or the
+  knowledge never has them side by side ("wo rking", not "set up"); a word that is two known words run together as
+  those two when some piece has them side by side. A word some piece holds as typed is never changed. The search
+  says it: `search_knowledge` gives `searched_for` and `spelling`, the chat's step shows "Searched for: … 'refunnd'
+  read as 'refund'", the Data dictionary's search too, and the agent's background knowledge names the words it
+  read otherwise. Known means held by a piece the user may see in the store's live index (a word written a minute
+  ago counts); the candidates come from the store's list of words (built with it, kept in step).
+* **Documents cut at their sections**: a Markdown text (a document's page, a repository's file, a web or a
+  Confluence page whose headings now stay headings, a Context page, a guide) is cut at its headings first, the
+  sections that follow together while they fit, each piece titled with the headings it is under ("Bulk API ›
+  Query parameters"); a repository's Markdown file is named by its front matter's title (or its first heading)
+  with its path, its front matter not searched. Web and Confluence documents are cut again at their next reading
+  (their text changes: their pieces and vectors are made again once).
+* **Two pieces of one page at most** among a search's results (the room goes to other pages), one line per page in
+  the background knowledge, and the agent reads the part of each piece its words are in.
+
+Measured (lab) on 2,311 public documentation pages read as four documents, with 500 link texts written by the
+docs' authors as questions, by words only: the right page among the ten first 81 → 90 out of 100 (first: 49 → 60);
+with one word misspelled (a letter missing, doubled, swapped, a key next to it, a space inside, two words run
+together) 39-47 → 80-86 (two slips in one word: 45 → 53, not modelled); three rare words scattered over a page (a
+known-item test) 93 → 93. With an embedding model (a small one, on the same pages; the meaning of the query as
+read): 87 → 93 (first: 59 → 66), misspelled (the same six kinds) 57-81 → 87-94. Correct English words absent from these pages: 49 of
+300 read as a neighbour (shown, "read as").
 
 ### A cross-encoder reranker (0.6, optional)
 

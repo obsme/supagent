@@ -307,6 +307,8 @@ def trace_of(message: Any) -> list[dict]:
     counts = {(r.get("sql") or ""): r.get("row_count") for r in message.results or []}
     out = []
     for s in message.steps or []:
+        if s.get("tool") == "understood":           # how the question was read (0.9.6): no tool call
+            continue
         step = {"tool": s.get("tool"), "called": s.get("tool"), "status": s.get("status"), "args": s.get("args") or {},
                 "seconds": s.get("seconds"), "result": s.get("result") or ""}
         req = step["args"].get("request") if isinstance(step["args"].get("request"), dict) else step["args"]
@@ -320,7 +322,37 @@ def learn_from_helpful(message_id: int, llm: Any = None) -> int | None:
     from supagent.llm import llm_task
 
     with llm_task("helpful", message_id=message_id):
-        return _learn_from_helpful(message_id, llm)
+        rid = _learn_from_helpful(message_id, llm)
+        if rid is not None:                  # 0.9.6: what to keep of it, written from the whole discussion
+            _summarize(rid, message_id, llm)
+        return rid
+
+
+def _summarize(recipe_id: int, message_id: int, llm: Any = None) -> None:
+    from superset.extensions import security_manager
+
+    from supagent.knowledge import helpful
+    from supagent.models import Conversation, Message
+    from supagent.security import acting_as
+
+    try:
+        r, m = db.session.get(Recipe, recipe_id), db.session.get(Message, message_id)
+        conv = db.session.get(Conversation, m.conversation_id) if m is not None else None
+        user = security_manager.get_user_by_id(conv.user_id) if conv is not None else None
+        if r is None or m is None or user is None or (r.summary_by and r.summary_by != "agent"):
+            return
+        said = [u.content or "" for u in db.session.query(Message).filter(
+            Message.conversation_id == m.conversation_id, Message.id < m.id, Message.role == "user").order_by(Message.id)]
+        trace, answer = trace_of(m), m.content or ""
+        db.session.commit()                              # no metadata connection held during the LLM call
+        with acting_as(user.username):
+            out = helpful.summarize(said[-1] if said else "", said[:-1], answer, trace, llm=llm)
+        r = db.session.get(Recipe, recipe_id)
+        if r is not None:
+            helpful.keep(r, out)
+    except Exception:  # pylint: disable=broad-except   (the learned answer stays as it ran)
+        db.session.rollback()
+        log.warning("supagent: the Helpful answer's summary not kept", exc_info=True)
 
 
 def _learn_from_helpful(message_id: int, llm: Any = None) -> int | None:
@@ -646,6 +678,12 @@ def learn_from_answer(message_id: int, user_id: int, question: str, trace: list[
 # --------------------------------------------------------------------------- #
 # using what was learned
 # --------------------------------------------------------------------------- #
+def _brief(r: Any) -> str:
+    from supagent.knowledge.helpful import brief
+
+    return brief(r)
+
+
 def recipes_for(question: str, limit: int = 3) -> list[dict[str, Any]]:
     """Learned answers for a similar question, on databases the current user may query: the ones
     an admin confirmed first, then the ones marked Helpful; never rejected or automatic ones."""
@@ -690,7 +728,7 @@ def recipes_for(question: str, limit: int = 3) -> list[dict[str, Any]]:
 
         out.append({"id": r.id, "question": r.question, "tool": r.tool, "database_id": r.database_id, "query": r.query,
                     "seconds": r.seconds, "rows": r.rows, "status": r.status, "uses": r.uses, "steps": r.steps,
-                    "path": path_brief(of_recipe(r))})
+                    "path": path_brief(of_recipe(r)), "brief": _brief(r)})
         if len(out) >= limit:
             break
     return out
@@ -822,8 +860,17 @@ def _counter_misuse(tree: Any, names: set[str], src: Any) -> str | None:
     if not any(isinstance(a.this, exp.Column) and a.this.name.lower() == "value"
                for a in tree.find_all(exp.Sum, exp.Avg)):
         return None
-    kinds = {o.name: o.metric_type for o in db.session.query(KObject).filter(
+    objs = {o.name: o for o in db.session.query(KObject).filter(
         KObject.source_id == src.id, KObject.kind == "metric", KObject.name.in_(names))}
+    kinds = {n: o.metric_type for n, o in objs.items()}
+    counting = [n for n, o in objs.items() if ((o.stats or {}).get("data_says") or {}).get("increases_only")]
+    if counting and len(counting) == len(names):     # counts without _total, read as gauges (0.9.5: SUM(value)
+        name = counting[0]                           # of an ingress's request total gave 159 million for 77,676)
+        return (f"refused before running: {name} only increases (a running total since its exporter started, though "
+                "no metadata calls it a counter), so SUM(value) or AVG(value) means nothing and its SQL table has no "
+                f"rate or increase column. Count it with promql_query, e.g. sum(increase({name}[1d])) at the end of the "
+                "day (with the labels of the question), or in SQL MAX(value) - MIN(value) per series over the period "
+                "when it did not restart.")
     counters = [n for n in names if kinds.get(n) in ("counter", "histogram", "summary")
                 or (kinds.get(n) in (None, "unknown") and n.endswith(COUNTER_SUFFIXES))]
     if not counters or len(counters) != len(names):

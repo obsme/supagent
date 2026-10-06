@@ -22,7 +22,8 @@ from typing import Any
 VALUE_WORDS = {
     "success": {"success", "succeed", "successful", "complet", "complete", "completed", "ok", "done", "pass",
                 "passed", "reussi", "termin", "termine"},
-    "fail": {"fail", "failed", "failure", "error", "errors", "ko", "crash", "broken", "echec", "echou", "erreur"},
+    "fail": {"fail", "failed", "failure", "failures", "failing", "fails", "error", "errors", "errored", "erroring",
+             "faulty", "unsuccessful", "ko", "crash", "broken", "echec", "echou", "erreur"},
     "run": {"run", "running", "active", "ongoing", "progress", "cours"},
     "kill": {"kill", "killed", "cancel", "cancelled", "canceled", "abort", "aborted", "stop", "stopped", "annul"},
     "warn": {"warn", "warning", "alert", "avertissement"},
@@ -96,6 +97,30 @@ class Support:
             self.numbers |= set(found)
             self.numbers |= {v * f for v in found for f in FACTORS}
             self.numbers |= {COUNT_WORDS[m.group(1).lower()] for m in COUNT_WORD.finditer(low)}   # "more than one"
+
+    def add_finding(self, content: str) -> None:
+        """What an investigation tool found (the switch behind the alerts, a port, a record's id): its names, said
+        for the next queries' conditions; never its figures (a count, a duration, a share in a finding does not make
+        a threshold on that number asked)."""
+        names: list[str] = []
+
+        def walk(v: Any) -> None:
+            if isinstance(v, dict):
+                for x in v.values():
+                    walk(x)
+            elif isinstance(v, list):
+                for x in v:
+                    walk(x)
+            elif isinstance(v, str) and 2 <= len(v) <= 200:
+                names.append(v)
+
+        try:
+            walk(json.loads(content))
+        except (TypeError, ValueError):
+            names.append(str(content or "")[:20000])
+        words = [w for w in " ".join(names).lower().split()          # (its numbers left out: a token that is only a
+                 if not re.fullmatch(r"[-+(]?\d[\d,.]*%?[)]?[,.;:]?", w)]   #  number; xe-0/0/2 is a name)
+        self.text += "\n" + " ".join(words)
 
     def add_result(self, content: str, query: str = "") -> None:
         """What a query of this answer found (its rows, a PromQL result's series): the next queries may use
@@ -261,6 +286,17 @@ def chart_conditions(config: dict) -> list[Condition]:
     return out
 
 
+# an HTTP status class boundary on a status code field: "failed" says it (>= 400, >= 500, > 399, > 499)
+STATUS_CODE = re.compile(r"status.?code|response.?code|http.?code|http.?status|(?:^|[._@])status$", re.I)
+STATUS_BOUNDS = {399.0, 400.0, 499.0, 500.0}
+FLAG_TEXTS = {"true", "false", "yes", "no", "y", "n"}
+
+
+def _fail_said(words: set[str]) -> bool:
+    fam = VALUE_WORDS["fail"] | {"fail"}
+    return any(w in fam or any(len(f) >= 4 and w.startswith(f) for f in fam) for w in words)
+
+
 def _value_said(value: Any, column: str, support: Support) -> bool:
     from supagent.knowledge.describe import stem
     from supagent.knowledge.resolve import name_tokens
@@ -269,6 +305,11 @@ def _value_said(value: Any, column: str, support: Support) -> bool:
         return True                                     # > 0, <> 0: not a choice of the data
     if isinstance(value, float) and value == 1.0 and "(" in column and any(abs(n - 1.0) <= 1e-9 for n in support.numbers):
         return True                                     # COUNT(*) > 1 for "more than one order": a count, not a flag
+    if isinstance(value, float) and value in STATUS_BOUNDS and STATUS_CODE.search(column) and \
+            _fail_said(support.words):
+        return True                                     # status_code >= 400 for "how many failed" (0.9.5)
+    if isinstance(value, str) and value.strip().lower() in FLAG_TEXTS:
+        value = value.strip().lower() in ("true", "yes", "y", "1")    # 'true' as text: a flag (tag.error = 'true')
     if isinstance(value, bool) or (isinstance(value, float) and value == 1.0):
         tokens = set(name_tokens(column))                  # a flag (RELAUNCHED = true): its field said
         if tokens & support.words:
@@ -284,7 +325,7 @@ def _value_said(value: Any, column: str, support: Support) -> bool:
     text = str(value)
     if TIME_LIKE.match(text.strip()):
         return True                                     # a date: the period check
-    core = re.sub(r"[%*^$()|\\.]+", " ", text).strip().lower()   # LIKE / regex marks ('%gpu%', '5..')
+    core = re.sub(r"[%*^$()|\\.]+", " ", text).strip().lower().strip(" :;,/")   # LIKE marks ('%gpu%', 'h:%')
     if not core:
         return True
     if re.search(rf"(?<![\w-]){re.escape(core)}(?![\w-])", support.text):

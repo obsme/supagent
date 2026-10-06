@@ -830,3 +830,51 @@ def test_an_end_of_day_at_23_59_is_the_span_s_own_end(world):
     assert refusal(q, "execute_sql", end_of_day, today) is None
     short = _sql("SELECT COUNT(*) FROM \"jobs\" WHERE \"ts\" >= '2026-09-14 00:00' AND \"ts\" < '2026-09-20 00:00'")
     assert refusal(q, "execute_sql", short, today)                                          # a day short: refused
+
+
+def test_last_weekend_is_the_saturday_and_sunday_before(world):  # noqa: F811
+    """"How many support tickets were opened last weekend?" asked on Wednesday 23 September: 19 and 20 September (a
+    model counted 20 and 21, Sunday and Monday, and no check knew the weekend)."""
+    import datetime as dt
+
+    from supagent.knowledge.period import has_period, ranges_named, refusal
+
+    wed = dt.date(2026, 9, 23)
+    assert ranges_named("How many tickets were opened last weekend?", wed) == [
+        (dt.datetime(2026, 9, 19), dt.datetime(2026, 9, 21))]
+    assert ranges_named("Combien de tickets le week-end dernier ?", wed) == [
+        (dt.datetime(2026, 9, 19), dt.datetime(2026, 9, 21))]
+    sun = dt.date(2026, 9, 20)
+    assert ranges_named("last weekend", sun) == [(dt.datetime(2026, 9, 12), dt.datetime(2026, 9, 14))]
+    assert ranges_named("this weekend", sun) == [(dt.datetime(2026, 9, 19), dt.datetime(2026, 9, 21))]
+    assert ranges_named("this weekend", wed) == []                    # still to come: not a span of the data
+    assert has_period("tickets of last weekend", wed)
+    week = lambda a, b: _sql(f"SELECT COUNT(*) FROM \"jobs\" WHERE \"ts\" >= '{a}' AND \"ts\" < '{b}'")  # noqa: E731
+    q = "How many jobs failed last weekend?"
+    why = refusal(q, "execute_sql", week("2026-09-20 00:00", "2026-09-22 00:00"), wed)
+    assert why and "2026-09-19 00:00 to 2026-09-21 00:00" in why
+    assert refusal(q, "execute_sql", week("2026-09-19 00:00", "2026-09-21 00:00"), wed) is None
+
+
+def test_this_week_and_last_month_are_calendar_spans(world):  # noqa: F811
+    """"How many support tickets were opened this week?" asked on Thursday 24 September: from Monday 21 (a model
+    counted from Tuesday 22, called Monday); a query near the span but off is sent back, the last 7 days are not."""
+    import datetime as dt
+
+    from supagent.knowledge.period import calendar_named, ranges_named, refusal
+
+    thu = dt.date(2026, 9, 24)
+    assert calendar_named("tickets opened this week", thu) == [(dt.datetime(2026, 9, 21), dt.datetime(2026, 9, 28))]
+    assert calendar_named("tickets opened last week", thu) == [(dt.datetime(2026, 9, 14), dt.datetime(2026, 9, 21))]
+    assert calendar_named("revenue last month", thu) == [(dt.datetime(2026, 8, 1), dt.datetime(2026, 9, 1))]
+    assert calendar_named("revenue this month", thu) == [(dt.datetime(2026, 9, 1), dt.datetime(2026, 10, 1))]
+    assert calendar_named("the last weekend", thu) == [] and calendar_named("the last weeks", thu) == []
+    assert calendar_named("cette semaine", thu) == [(dt.datetime(2026, 9, 21), dt.datetime(2026, 9, 28))]
+    week = lambda a, b: _sql(f"SELECT COUNT(*) FROM \"jobs\" WHERE \"ts\" >= '{a}' AND \"ts\" < '{b}'")  # noqa: E731
+    q = "How many jobs failed this week?"
+    assert refusal(q, "execute_sql", week("2026-09-22 00:00", "2026-09-29 00:00"), thu)       # from Tuesday: off
+    assert refusal(q, "execute_sql", week("2026-09-21 00:00", "2026-09-25 00:00"), thu) is None       # up to today
+    assert refusal(q, "execute_sql", week("2026-09-21 00:00", "2026-09-28 00:00"), thu) is None       # the whole week
+    assert refusal("How many jobs failed in the last 7 days?", "execute_sql", week("2026-09-17 00:00", "2026-09-24 00:00"),
+                   thu) is None
+    assert ranges_named("jobs last week", thu) == [(dt.datetime(2026, 9, 14), dt.datetime(2026, 9, 21))]

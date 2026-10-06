@@ -428,8 +428,18 @@ def _run_learning(reason: str, databases: list[str] | None, llm: bool, max_minut
                 if llm and reason == "schedule" and classify_follows():
                     stats["categories"] = "after tonight's Context build"       # (it reads what the Context says)
                 elif llm:                             # the categories of what changed (the router's evidence)
-                    stats.update(_categories(run_id, steps, max(60.0, llm_deadline - time.time()),
-                                             int(settings.get("learn.classify_per_run") or 400)))
+                    stats.update(_categories(run_id, steps, max(60.0, llm_deadline - time.time()), classify_limit()))
+                else:                                 # no LLM (0.9.5): what the data says of the categories' values
+                    from supagent.knowledge.facets import seed
+
+                    steps.begin("categories: the values read in the data")
+                    try:
+                        stats["seeded"] = seed()
+                    except Exception as ex:  # pylint: disable=broad-except
+                        db.session.rollback()
+                        stats["seeded"] = {"error": str(ex)[:300]}
+                    steps.end(**_flat(stats["seeded"]))
+                    stats.update(_from_data(steps, 240.0))
                 check(force=True)
                 steps.begin("search index and embeddings")
                 stats["index"] = index_knowledge()
@@ -473,6 +483,58 @@ def _run_learning(reason: str, databases: list[str] | None, llm: bool, max_minut
     return {"run": run_id, "status": status, "error": error, **stats}
 
 
+def _from_data(steps: "Steps", seconds: float) -> dict[str, Any]:
+    """What the data itself says, no LLM (0.9.5): the kind of each index (logs and their shipper, spans, events...),
+    the names an inventory gives as one thing (learn.aliases), then the calls the span tables show
+    (learn.interactions_spans), each a step."""
+    from supagent.knowledge.stopping import LearningStopped
+
+    out: dict[str, Any] = {}
+    t0 = time.time()
+    steps.begin("the kind of each index (logs, spans, events...)")
+    try:
+        from supagent.knowledge.indexkinds import run as index_kinds
+
+        out["kinds"] = index_kinds()
+    except LearningStopped:
+        raise
+    except Exception as ex:  # pylint: disable=broad-except
+        db.session.rollback()
+        out["kinds"] = {"error": str(ex)[:300]}
+    steps.end(**_flat({k: v for k, v in out["kinds"].items() if k != "kinds"}))
+    for key, setting, title, module in (("aliases", "learn.aliases", "names of one thing (an inventory's aliases)", "aliases"),
+                                        ("pod_names", "learn.pod_names", "names of one service (the pods they share)",
+                                         "podnames"),
+                                        ("from_spans", "learn.interactions_spans", "interactions the spans show", "spans"),
+                                        ("usual", "learn.behaviour", "the usual day of each service (spans)", "behaviour"),
+                                        ("usual_logs", "learn.usual_logs", "what the logs say every day", "logusual"),
+                                        ("same_events", "learn.same_events", "the same events in two log tables",
+                                         "duplicates"),
+                                        ("usual_latency", "learn.usual_latency", "the usual latency of each service "
+                                         "(histograms)", "metricusual")):
+        if not settings.get(setting):
+            continue
+        steps.begin(title)
+        try:
+            mod = __import__(f"supagent.knowledge.{module}", fromlist=["run"])
+            out[key] = mod.run(seconds=max(10.0, min(180.0, seconds - (time.time() - t0))))
+        except LearningStopped:
+            raise
+        except Exception as ex:  # pylint: disable=broad-except
+            db.session.rollback()
+            out[key] = {"error": str(ex)[:300]}
+        steps.end(**_flat(out[key]))
+    return out
+
+
+def classify_limit(limit: int | None = None) -> int:
+    """The knowledge items a run may give their categories: the limit asked, else learn.classify_per_run; 0 is none
+    (0.9.5: 0 was read as 400, and a learning meant to read the data only called the LLM)."""
+    if limit is None:
+        limit = settings.get("learn.classify_per_run")
+    return 400 if limit is None else max(0, int(limit))
+
+
 def _categories(run_id: int, steps: Steps, seconds: float, limit: int) -> dict[str, Any]:
     """The categories' part of a run, each piece a step with its time and counts (the daily learning's end, and
     the classify run): the values read in the data's fields, what waits settled, the items that changed given
@@ -486,8 +548,11 @@ def _categories(run_id: int, steps: Steps, seconds: float, limit: int) -> dict[s
     out: dict[str, Any] = {}
     t0 = time.time()
     try:
-        with llm_task("classify", run_id=run_id):
-            out["classified"] = classify(LLM(), seconds=seconds, limit=limit, steps=steps)
+        if limit <= 0:                                   # learn.classify_per_run = 0: no item given to the LLM
+            out["classified"] = {"off": "learn.classify_per_run = 0"}
+        else:
+            with llm_task("classify", run_id=run_id):
+                out["classified"] = classify(LLM(), seconds=seconds, limit=limit, steps=steps)
     except LearningStopped:
         raise
     except Exception as ex:  # pylint: disable=broad-except
@@ -506,6 +571,7 @@ def _categories(run_id: int, steps: Steps, seconds: float, limit: int) -> dict[s
         db.session.rollback()
         out["retired"] = {"error": str(ex)[:300]}
     steps.end(**_flat(out["retired"]))
+    out.update(_from_data(steps, max(30.0, seconds - (time.time() - t0))))     # aliases, the spans' calls (no LLM)
     if settings.get("learn.interactions"):               # what the texts say of how the parts interact
         from supagent.knowledge.interactions import run as read_interactions
 
@@ -609,7 +675,7 @@ def _run_classification(reason: str, minutes: int | None, limit: int | None) -> 
             username = learning_username()
             stats["user"] = username
             with acting_as(username):
-                stats.update(_categories(run_id, steps, seconds, int(limit or settings.get("learn.classify_per_run") or 400)))
+                stats.update(_categories(run_id, steps, seconds, classify_limit(limit)))
                 if (stats.get("classified") or {}).get("error") or (stats.get("interactions") or {}).get("error"):
                     status = "partial"
                 from supagent.knowledge.index import sync
@@ -653,7 +719,7 @@ def due_today(now: dt.datetime | None = None) -> bool:
         return False
     if running_run() is not None:
         return False
-    start_of_day_utc = dt.datetime.utcnow() - dt.timedelta(hours=now.hour, minutes=now.minute)
+    start_of_day_utc = dt.datetime.utcnow() - (now - now.replace(hour=0, minute=0, second=0, microsecond=0))
     today = db.session.query(Run).filter(Run.kind == "learn", Run.started_at >= start_of_day_utc).all()
     if any(r.status in ("done", "partial") for r in today):
         return False

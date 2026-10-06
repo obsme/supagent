@@ -71,6 +71,11 @@ def agent_with(monkeypatch, replies: list, results=None, rich: bool = True):
     return a, ran
 
 
+def last_calls(m: dict) -> bool:
+    """The message that says how many tool calls are left (its count filled in)."""
+    return m["role"] == "user" and "left for this answer: write the answer for the user now" in str(m["content"])
+
+
 def tool_messages(llm: ScriptedLLM) -> list[str]:
     return [m["content"] for m in llm.seen[-1] if m["role"] == "tool"]
 
@@ -360,23 +365,19 @@ def test_a_call_written_as_text_after_the_last_call_is_not_the_answer(ctx, monke
 def test_two_calls_before_the_end_the_model_is_told_to_answer(ctx, monkeypatch):
     """An investigation that used its calls up wrote nothing (the retail lab's X2): two calls before the end, the
     model is told to answer from what it found."""
-    from supagent.agent import LAST_CALLS
-
     sql = [{"request": {"database_id": 1, "sql": f"SELECT {i} AS n"}} for i in range(9)]
     a, ran = agent_with(monkeypatch, [call("execute_sql", q) for q in sql] + [say("Found: 8 checks, nothing more.")])
     answer, _trace = a.ask("Which jobs failed, application by application?")
-    told = [m for m in a.llm.seen[-1] if m["role"] == "user" and m["content"] == LAST_CALLS]
-    assert len(told) == 1 and len(ran) == 9
+    told = [m for m in a.llm.seen[-1] if last_calls(m)]
+    assert len(told) == 1 and len(ran) == 9 and told[0]["content"].startswith("(2 tool calls are left")
 
 
 def test_an_investigation_gets_twice_the_calls(ctx, no_ledger, monkeypatch):
     """The facts, where, why, the check of the cause: an investigation needs more calls than an answer (0.9)."""
-    from supagent.agent import LAST_CALLS
-
     sql = [{"request": {"database_id": 1, "sql": f"SELECT {i} AS n"}} for i in range(19)]
     a, ran = agent_with(monkeypatch, [call("execute_sql", q) for q in sql] + [say("The cause is in the results above.")])
     answer, _trace = a.ask("Why did the jobs fail?")                  # 10 calls for an answer: 20 here
-    told = [m for m in a.llm.seen[-1] if m["role"] == "user" and m["content"].startswith(LAST_CALLS)]
+    told = [m for m in a.llm.seen[-1] if last_calls(m)]
     assert len(told) == 1 and len(ran) == 19 and answer.startswith("The cause")
     assert "used up" not in answer
 

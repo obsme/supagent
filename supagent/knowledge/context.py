@@ -340,14 +340,135 @@ def write_summary(spec: dict[str, Any], llm: Any) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # saving
 # --------------------------------------------------------------------------- #
+SAME_STATEMENT = 0.85      # two statements this close (difflib ratio, normalized) are the same one
+
+
+def statements(markdown: str) -> list[str]:
+    """The statements of a page: its lines and sentences, without Markdown marks, citations or headings' hashes,
+    normalized (lower case, single spaces); headings and empty lines left out."""
+    out: list[str] = []
+    for line in (markdown or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or set(line) <= set("-|: "):
+            continue
+        line = re.sub(r"\[E\d+\]|\*\*|__|`|^[-*+>]\s+|^\d+[.)]\s+", "", line)
+        for part in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", line):
+            norm = " ".join(part.lower().split()).strip(" .;:")
+            if len(norm) >= 12:
+                out.append(norm)
+    return out
+
+
+def compare(old: str, new: str) -> dict[str, list[str]]:
+    """What `new` adds to `old` and what it leaves out of it, statement by statement (no LLM)."""
+    import difflib
+
+    a, b = statements(old), statements(new)
+
+    def has(x: str, pool: list[str]) -> bool:
+        return any(x == y or difflib.SequenceMatcher(None, x, y).ratio() >= SAME_STATEMENT for y in pool)
+
+    return {"added": [x for x in b if not has(x, a)][:40], "dropped": [x for x in a if not has(x, b)][:40]}
+
+
+def _words(a: str, b: str) -> tuple[list[list[str]], list[list[str]]]:
+    """Two versions of a line, word by word: [["eq"|"del", text], ...] for the old one, [["eq"|"ins", text], ...]
+    for the new one (the words that changed, to show in red and green)."""
+    import difflib
+
+    ta, tb = re.findall(r"\s+|[^\s]+", a or ""), re.findall(r"\s+|[^\s]+", b or "")
+    old_parts: list[list[str]] = []
+    new_parts: list[list[str]] = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ta, tb, autojunk=False).get_opcodes():
+        if op == "equal":
+            old_parts.append(["eq", "".join(ta[i1:i2])])
+            new_parts.append(["eq", "".join(tb[j1:j2])])
+            continue
+        if i2 > i1:
+            old_parts.append(["del", "".join(ta[i1:i2])])
+        if j2 > j1:
+            new_parts.append(["ins", "".join(tb[j1:j2])])
+
+    def merged(parts: list[list[str]], changed: str) -> list[list[str]]:
+        """A space between two changed words is part of the change: one highlight, not several."""
+        out: list[list[str]] = []
+        for k, (op, text) in enumerate(parts):
+            if op == "eq" and not text.strip() and out and out[-1][0] == changed and k + 1 < len(parts) and \
+                    parts[k + 1][0] == changed:
+                op = changed
+            if out and out[-1][0] == op:
+                out[-1][1] += text
+            else:
+                out.append([op, text])
+        return out
+
+    return merged(old_parts, "del"), merged(new_parts, "ins")
+
+
+REWRITTEN = 0.5            # a changed line this unlike its old one is shown as removed and added, not word by word
+
+
+def diff_rows(old: str, new: str) -> list[dict[str, Any]]:
+    """The old and the new version of a page line by line, for a side-by-side view: {"op": same | del | add | mod,
+    "o": line number in the old (or None), "n": in the new, "old": text, "new": text}, a changed line ("mod") with its
+    words ("old_parts", "new_parts"). A changed block pairs its lines in order; what is left over is removed or added."""
+    import difflib
+
+    a, b = (old or "").splitlines(), (new or "").splitlines()
+    rows: list[dict[str, Any]] = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == "equal":
+            rows += [{"op": "same", "o": i1 + k + 1, "n": j1 + k + 1, "old": a[i1 + k], "new": b[j1 + k]}
+                     for k in range(i2 - i1)]
+            continue
+        pairs = min(i2 - i1, j2 - j1) if op == "replace" else 0
+        for k in range(pairs):
+            o, n = a[i1 + k], b[j1 + k]
+            if difflib.SequenceMatcher(None, o, n, autojunk=False).ratio() < REWRITTEN:
+                rows.append({"op": "del", "o": i1 + k + 1, "n": None, "old": o, "new": None})
+                rows.append({"op": "add", "o": None, "n": j1 + k + 1, "old": None, "new": n})
+                continue
+            op_parts = _words(o, n)
+            rows.append({"op": "mod", "o": i1 + k + 1, "n": j1 + k + 1, "old": o, "new": n,
+                         "old_parts": op_parts[0], "new_parts": op_parts[1]})
+        rows += [{"op": "del", "o": i + 1, "n": None, "old": a[i], "new": None} for i in range(i1 + pairs, i2)]
+        rows += [{"op": "add", "o": None, "n": j + 1, "old": None, "new": b[j]} for j in range(j1 + pairs, j2)]
+    return rows
+
+
+def _propose(p: ContextPage, page: dict[str, Any], kind: str, input_hash: str) -> str:
+    """The agent's new version of a page that exists: a proposal a person validates (the page shown stays as it
+    is). A proposal not validated yet is replaced by this one, and what it said that this one does not is kept
+    with it ("left out"), as is what the page shown says that this one no longer does ("obsolete")."""
+    if p.proposed_hash == input_hash and p.proposed_content:
+        return "unchanged"
+    now_vs = compare(p.content or "", page["content"])
+    earlier = compare(p.proposed_content or "", page["content"]) if p.proposed_content else {"dropped": []}
+    done = dict(p.compared or {})
+    p.compared = {"added": now_vs["added"], "obsolete": now_vs["dropped"], "left_out": earlier["dropped"],
+                  "replaced": int(done.get("replaced") or 0) + (1 if p.proposed_content else 0),
+                  "replaced_at": dt.datetime.utcnow().isoformat(timespec="seconds") if p.proposed_content else None}
+    p.proposed_content, p.proposed_sources, p.proposed_kind = page["content"], page.get("sources") or [], kind
+    p.proposed_hash, p.proposed_at, p.proposed_drop = input_hash, dt.datetime.utcnow(), False
+    db.session.commit()
+    return "proposed"
+
+
 def save_page(page: dict[str, Any], kind: str, input_hash: str, llm_calls: int = 0, tokens: int = 0) -> str:
-    """written | unchanged | kept (a person's edit)."""
+    """written | proposed (a change waiting for a person's validation, context.review) | unchanged | kept (a
+    person's edit)."""
     p = (db.session.query(ContextPage).filter(ContextPage.section == page["section"], ContextPage.slug == page["slug"])
          .one_or_none())
     if p is not None and (p.author or "agent") != "agent":
         return "kept"
     if p is not None and p.input_hash == input_hash and p.content:
+        if p.proposed_content or p.proposed_drop:          # the evidence came back to what the page says
+            p.proposed_content = p.proposed_sources = p.proposed_kind = p.proposed_hash = p.compared = None
+            p.proposed_at, p.proposed_drop = None, False
+            db.session.commit()
         return "unchanged"
+    if p is not None and p.content and settings.get("context.review"):
+        return _propose(p, page, kind, input_hash)
     if p is None:
         p = ContextPage(section=page["section"], slug=page["slug"], version=0)
         db.session.add(p)
@@ -360,14 +481,73 @@ def save_page(page: dict[str, Any], kind: str, input_hash: str, llm_calls: int =
 
 
 def drop_pages(keep: set[tuple[str, str]]) -> int:
-    """Pages of the agent whose subject is gone (a database or an application no longer found)."""
+    """Pages of the agent whose subject is gone (a database or an application no longer found): deleted, or with
+    context.review proposed for removal (a person validates it)."""
     n = 0
+    review = settings.get("context.review")
     for p in db.session.query(ContextPage).filter(ContextPage.author == "agent"):
         if (p.section, p.slug) not in keep:
-            db.session.delete(p)
-            n += 1
+            if review:
+                if not p.proposed_drop:
+                    p.proposed_drop, p.proposed_at = True, dt.datetime.utcnow()
+                    n += 1
+            else:
+                db.session.delete(p)
+                n += 1
     db.session.commit()
     return n
+
+
+def review(page_id: int, action: str, by: str, content: str | None = None) -> dict[str, Any]:
+    """A person's answer to the agent's proposal for a page: approve (the proposed content is shown, or the page
+    removed) or reject (the page stays as it is; a removal refused keeps the page as theirs, never proposed again).
+    `content`: the proposal (or a new page) as the person edited it before approving: that text is shown; the agent
+    proposes again only when its evidence changes, compared with this text (what of it a proposal drops is listed)."""
+    p = db.session.get(ContextPage, page_id)
+    if p is None:
+        raise ValueError("no such page")
+    if action not in ("approve", "reject"):
+        raise ValueError("approve or reject")
+    if not (p.proposed_content or p.proposed_drop or (action == "approve" and not p.reviewed_by)):
+        raise ValueError("nothing to review on this page")
+    now = dt.datetime.utcnow()
+    if action == "approve" and p.proposed_drop:
+        db.session.delete(p)
+        db.session.commit()
+        return {"removed": page_id}
+    edited = (content or "").strip() or None
+    if edited is not None and len(edited) > 200_000:
+        raise ValueError("the page is too long (200,000 characters at most)")
+    if action == "approve" and p.proposed_content:
+        p.content, p.sources, p.kind = edited or p.proposed_content, p.proposed_sources or [], p.proposed_kind or p.kind
+        p.input_hash, p.version, p.updated_at = p.proposed_hash, (p.version or 0) + 1, now
+        p.edited_by = by if edited is not None and edited != p.proposed_content.strip() else None
+    elif action == "approve" and edited is not None and edited != (p.content or "").strip():
+        p.content, p.version, p.updated_at, p.edited_by = edited, (p.version or 0) + 1, now, by   # a new page edited
+    elif action == "reject" and p.proposed_drop:
+        p.author = by                                   # kept by a person: the agent leaves it alone
+    p.proposed_content = p.proposed_sources = p.proposed_kind = p.proposed_hash = p.compared = None
+    p.proposed_at, p.proposed_drop = None, False
+    p.reviewed_by, p.reviewed_at = by, now
+    db.session.commit()
+    return {"page": p.id, "version": p.version, "reviewed_by": by, "edited": p.edited_by == by}
+
+
+def proposals() -> list[dict[str, Any]]:
+    """The pages with a change or a removal waiting, and the new pages nobody reviewed yet (for To review)."""
+    out = []
+    for p in db.session.query(ContextPage).order_by(ContextPage.section, ContextPage.title):
+        if p.proposed_content or p.proposed_drop or (not p.reviewed_by and (p.author or "agent") == "agent"):
+            c = p.compared or {}
+            what = "remove" if p.proposed_drop else "change" if p.proposed_content else "new"
+            out.append({"id": p.id, "section": p.section, "title": p.title, "slug": p.slug, "what": what,
+                        "diff": diff_rows(p.content or "", "" if what == "remove" else p.proposed_content or "")
+                        if what != "new" else diff_rows("", p.content or ""),
+                        "content": p.content or "", "proposed": p.proposed_content or "",
+                        "added": c.get("added") or [], "obsolete": c.get("obsolete") or [],
+                        "left_out": c.get("left_out") or [], "replaced": c.get("replaced") or 0,
+                        "proposed_at": p.proposed_at, "version": p.version})
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -450,6 +630,9 @@ def build_context(reason: str = "manual", llm: bool = True, force: bool = False)
                     if p is not None and p.input_hash == h and p.content and not force:
                         res["unchanged"] += 1
                         continue
+                    if p is not None and p.proposed_hash == h and p.proposed_content and not force:
+                        res["waiting"] += 1                   # its proposal waits for a person: no LLM call again
+                        continue
                     if not spec["evidence"]:
                         continue
                     if res["llm_calls"] >= budget:
@@ -525,7 +708,7 @@ def classify_follows() -> bool:
     if not (settings.get("context.enabled") and settings.get("context.classify_after")):
         return False
     now = dt.datetime.now()
-    start_of_day_utc = dt.datetime.utcnow() - dt.timedelta(hours=now.hour, minutes=now.minute)
+    start_of_day_utc = dt.datetime.utcnow() - (now - now.replace(hour=0, minute=0, second=0, microsecond=0))
     done = (db.session.query(Run.id).filter(Run.kind == "context", Run.started_at >= start_of_day_utc,
                                             Run.status.in_(("done", "partial"))).first())
     return done is None
@@ -542,7 +725,7 @@ def context_due(now: dt.datetime | None = None) -> bool:
         return False
     if running_run() is not None:
         return False
-    start_of_day_utc = dt.datetime.utcnow() - dt.timedelta(hours=now.hour, minutes=now.minute)
+    start_of_day_utc = dt.datetime.utcnow() - (now - now.replace(hour=0, minute=0, second=0, microsecond=0))
     today = db.session.query(Run).filter(Run.kind == "context", Run.started_at >= start_of_day_utc).all()
     return not any(r.status in ("done", "partial") for r in today) and len(today) < 3
 
@@ -557,3 +740,122 @@ def visible_pages() -> list[ContextPage]:
     dbs = visible_databases()
     return [p for p in db.session.query(ContextPage).order_by(ContextPage.section, ContextPage.title)
             if set(p.database_ids or []) <= dbs]
+
+
+# --------------------------------------------------------------------------- #
+# the Context as a book (0.9.6): parts, chapters, numbers, a summary, related pages
+# --------------------------------------------------------------------------- #
+CHAPTERS = (   # (part, chapter title, the slugs it takes: exact, or a prefix ending with "-")
+    ("functional", "Overview", ("overview",)),
+    ("functional", "Applications", ("application-",)),
+    ("functional", "Glossary, rules and facts", ("glossary", "rules-and-facts")),
+    ("technical", "Architecture", ("architecture",)),
+    ("technical", "Data sources", ("data-sources-",)),
+    ("technical", "Inventories", ("inventory-",)),
+    ("technical", "Links between data sources", ("links-",)),
+    ("technical", "Dashboards", ("dashboard-", "dashboards")),
+)
+PARTS = (("functional", "Functional"), ("technical", "Technical"))
+RELATED = 5               # related pages listed per page at most
+
+
+def _chapter_of(p: ContextPage) -> int:
+    slug = p.slug or ""
+    for i, (part, _title, slugs) in enumerate(CHAPTERS):
+        if part == p.section and any(slug == s or (s.endswith("-") and slug.startswith(s)) for s in slugs):
+            return i
+    return len(CHAPTERS) + (0 if p.section == "functional" else 1)      # "Other pages" of its part
+
+
+def subject(p: ContextPage) -> str:
+    """What a page is about, as a name other pages would write: an application's, a data source's ("Application
+    BILLING" -> "BILLING", "Data source: Lab (osagg)" -> "Lab (osagg)")."""
+    title = p.title or ""
+    m = re.match(r"^(?:application|data source|inventory|dashboard)\s*:?\s*(.+)$", title, re.I)
+    return (m.group(1) if m else "").strip()
+
+
+def lead(markdown: str, chars: int = 220) -> str:
+    """The first sentence of a page's first paragraph (headings, lists' marks and citations left out)."""
+    for block in re.split(r"\n\s*\n", markdown or ""):
+        lines = [ln for ln in block.strip().splitlines() if ln.strip() and not ln.lstrip().startswith(("#", "|"))]
+        if not lines:
+            continue
+        text = " ".join(re.sub(r"\[E\d+\]|\*\*|__|`|^[-*+>]\s+|^\d+[.)]\s+", "", ln.strip()) for ln in lines)
+        text = " ".join(text.split())
+        m = re.match(r"(.{8,}?[.!?])(\s|$)", text)
+        out = m.group(1) if m else text
+        return out[:chars].rstrip() + ("..." if len(out) > chars else "")
+    return ""
+
+
+def related_pages(pages: list[ContextPage]) -> dict[int, list[int]]:
+    """For each page, the pages most related to it: the same sources (documents, catalog entries), the same databases,
+    a page naming the other's subject (an application, a data source); the strongest first, RELATED at most."""
+    score: dict[int, dict[int, float]] = {p.id: {} for p in pages}
+    refs = {p.id: {str(s.get("ref")) for s in (p.sources or []) if isinstance(s, dict) and s.get("ref")} for p in pages}
+    dbs = {p.id: set(p.database_ids or []) for p in pages}
+    names = {p.id: subject(p).lower() for p in pages}
+    texts = {p.id: (p.content or "").lower() for p in pages}
+    for a in pages:
+        for b in pages:
+            if a.id == b.id:
+                continue
+            s = 0.0
+            shared = refs[a.id] & refs[b.id]
+            if shared:
+                s += min(3.0, 0.5 * len(shared))
+            if dbs[a.id] and dbs[a.id] == dbs[b.id]:
+                s += 1.5
+            elif dbs[a.id] & dbs[b.id]:
+                s += 0.75
+            if names[b.id] and len(names[b.id]) >= 3 and names[b.id] in texts[a.id]:
+                s += 2.0                                  # a names b's subject
+            if names[a.id] and len(names[a.id]) >= 3 and names[a.id] in texts[b.id]:
+                s += 1.0
+            if s:
+                score[a.id][b.id] = s
+    return {pid: [b for b, _s in sorted(sc.items(), key=lambda kv: (-kv[1], kv[0]))[:RELATED]]
+            for pid, sc in score.items()}
+
+
+def book(pages: list[ContextPage]) -> dict[str, Any]:
+    """The pages as a book: {"parts": [{"title", "chapters": [{"number", "title", "pages": [{"number", "page"}]}]}],
+    "numbers": {page id: "2.3"}, "related": {page id: [ids]}, "summary": Markdown}. Chapters in the order of
+    CHAPTERS (pages of no chapter last, as "Other pages"), numbered across the book."""
+    by_chapter: dict[int, list[ContextPage]] = {}
+    for p in pages:
+        by_chapter.setdefault(_chapter_of(p), []).append(p)
+    parts, numbers, n = [], {}, 0
+    for key, part_title in PARTS:
+        chapters = []
+        keys = [i for i, c in enumerate(CHAPTERS) if c[0] == key] + [len(CHAPTERS) + (0 if key == "functional" else 1)]
+        for i in keys:
+            mine = sorted(by_chapter.get(i) or [], key=lambda p: (p.title or "").lower())
+            if not mine:
+                continue
+            n += 1
+            title = CHAPTERS[i][1] if i < len(CHAPTERS) else "Other pages"
+            entries = []
+            for k, p in enumerate(mine, start=1):
+                numbers[p.id] = f"{n}.{k}"
+                entries.append({"number": f"{n}.{k}", "page": p})
+            chapters.append({"number": str(n), "title": title, "pages": entries})
+        if chapters:
+            parts.append({"title": part_title, "chapters": chapters})
+    lines = [f"This book holds {len(pages)} page{'s' if len(pages) != 1 else ''} of the system's Context in "
+             f"{n} chapter{'s' if n != 1 else ''}: what the system is functionally (its applications, the team's words, "
+             "rules and facts) and technically (its architecture, data sources, inventories and the links between them), "
+             "written from the team's knowledge (documents, catalog, team memory, data dictionary). Pages marked "
+             "AI-written were written by the agent from that knowledge: check them before relying on them.", ""]
+    for part in parts:
+        lines.append(f"## {part['title']}")
+        lines.append("")
+        for ch in part["chapters"]:
+            lines.append(f"**{ch['number']} {ch['title']}**")         # a chapter, then its pages, each in a line
+            lines.append("")
+            for e in ch["pages"]:
+                gist = lead(e["page"].content or "")
+                lines.append(f"- {e['number']} {e['page'].title}" + (f": {gist}" if gist else ""))
+            lines.append("")
+    return {"parts": parts, "numbers": numbers, "related": related_pages(pages), "summary": "\n".join(lines).strip()}

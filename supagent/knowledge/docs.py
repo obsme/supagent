@@ -48,6 +48,7 @@ from supagent.models import Doc
 log = logging.getLogger(__name__)
 BLOCK_TAGS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "pre",
               "table", "ul", "ol", "dd", "dt", "blockquote"}
+HEADINGS = ("h1", "h2", "h3", "h4", "h5", "h6")
 READERS = ("web", "confluence", "bitbucket")
 AUTH_TYPES = ("bearer", "basic", "header")
 USER_AGENT = "supagent (Superset AI agent) document reader"
@@ -101,6 +102,8 @@ class _Text(HTMLParser):
                 self.links.append(href)
         if tag in BLOCK_TAGS:
             self.parts.append("\n")
+            if tag in HEADINGS and not self._skip:    # a heading stays one (0.9.6): the pieces are cut at sections
+                self.parts.append("#" * int(tag[1]) + " ")
         elif tag in ("td", "th"):
             self.parts.append(" | ")                  # the cells of a row stay apart
 
@@ -740,6 +743,30 @@ def _one_file(t: dict[str, Any]) -> dict[str, Any]:
     return {"path": t["path"], "raw": f"{t['api']}/raw/{path}{at}", "web": f"{t['web']}/browse/{path}{at}"}
 
 
+FRONT_MATTER = re.compile(r"\A---[ \t]*\n(.*?)\n(?:---|\.\.\.)[ \t]*(?:\n|\Z)", re.S)
+FRONT_KEY = re.compile(r"^(title|description|summary)[ \t]*:[ \t]*(.+?)[ \t]*$", re.M | re.I)
+FIRST_HEADING = re.compile(r"^#[ \t]+(.+?)[ \t]*#*[ \t]*$", re.M)
+
+
+def repo_page(url: str, path: str, text: str) -> tuple[str, str, str]:
+    """A text file of a repository as a page (its address, its title, its text): a Markdown file's front matter (the
+    YAML block of Jekyll, Hugo, MkDocs... at its top) is not its text, its title (or its first heading) names the page
+    with the file's path, its description starts the text."""
+    title, body = "", text or ""
+    if path.lower().endswith((".md", ".markdown")):
+        m = FRONT_MATTER.match(body)
+        meta: dict[str, str] = {}
+        if m:
+            for k, v in FRONT_KEY.findall(m.group(1)):
+                meta.setdefault(k.lower(), v.strip().strip("'\""))
+            body = body[m.end():]
+            if meta.get("description") or meta.get("summary"):
+                body = (meta.get("description") or meta.get("summary") or "") + "\n\n" + body.lstrip("\n")
+        h = FIRST_HEADING.search(body)
+        title = meta.get("title") or (h.group(1).strip() if h else "")
+    return url, (f"{title} ({path})" if title and title != path else path), body
+
+
 def _read_bitbucket(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
     """The text files of a repository folder through the REST API, the documentation first, up to max_pages."""
     t = bitbucket_target(doc.url or "")
@@ -782,7 +809,7 @@ def _read_bitbucket(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
         text = got.text()
         if f["path"].lower().endswith((".html", ".htm")):
             text = html_to_text(text)[1]
-        pages.append((f["web"], f["path"], text))
+        pages.append(repo_page(f["web"], f["path"], text))
     if not pages:
         raise DocError(f"{t['name']}: none of its text files{where} could be read ({last})")
     return pages, f"{t['name']}{(' ' + t['path']) if t['path'] else ''}", skipped

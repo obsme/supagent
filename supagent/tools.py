@@ -1124,8 +1124,18 @@ def search_knowledge(query: str, kind: str | None = None, limit: int = 8) -> dic
                 kinds = ("guide", USERS_NOTES)
             elif kind in ("guide", "guides"):
                 kinds = ("guide",)
+            from supagent.knowledge.search import excerpt
+
             found = search(query, k=max(1, min(int(limit or 8), 20)), kinds=kinds)
-            return {"query": query, "results": [{**f, "text": (f["text"] or "")[:1200]} for f in found]}
+            out = {"query": query, "results": [{**f, "text": excerpt(f["text"] or "", query)} for f in found]}
+            from supagent.knowledge.spelling import correct, said
+
+            read = correct(query)          # the words no piece holds, read as the knowledge spells them (cached)
+            if read["changes"]:
+                out["searched_for"] = read["query"]
+                out["spelling"] = read["changes"]
+                out["note"] = f"searched with {said(read['changes'])} (no piece holds the word as typed)"
+            return out
     except Exception as ex:  # pylint: disable=broad-except
         return {"error": f"{type(ex).__name__}: {str(ex)[:500]}"}
 
@@ -1239,15 +1249,15 @@ def search_notes(words: str = "", since: str | None = None, until: str | None = 
 
 
 def _note_user() -> tuple[int | None, str, bool]:
-    """(the user's id, their username, admin) inside _as_user()."""
+    """(the user's id, their username, editor) inside _as_user(): an editor (AI Editor, AI Admin) changes the team's
+    and the groups' notes too (0.9.6)."""
     from flask import g
-    from superset.extensions import security_manager
 
     user = getattr(g, "user", None)
     try:
-        from supagent.views import ADMIN_VIEW
+        from supagent.views import _can_edit
 
-        admin = bool(security_manager.is_admin()) or bool(security_manager.can_access("can_write", ADMIN_VIEW))
+        admin = _can_edit()
     except Exception:  # pylint: disable=broad-except
         admin = False
     return getattr(user, "id", None), str(getattr(user, "username", "") or ""), admin
@@ -1258,7 +1268,9 @@ def _note_view(n: Any, me: int | None, admin: bool, names: dict[int, str], chars
 
     text = n.text or ""
     return {"id": n.id, "title": n.title, "author": names.get(n.user_id, "?"), "day": N.day_of(n).isoformat(),
-            "for": "the team" if n.scope == "team" else "its author only", "tags": n.tags or [],
+            "for": "the team" if n.scope == "team" else
+                   f"the group {N.group_names({n.group_id}).get(n.group_id, n.group_id)}" if n.scope == "group" else
+                   "its author only", "tags": n.tags or [],
             "can_change": N.can_change(n, me, admin), "earlier_versions": len(n.versions or []),
             "text": text[:chars] + (" …" if len(text) > chars else "")}
 
@@ -1313,11 +1325,14 @@ def read_note(note_id: int) -> dict:
 
 @mcp.tool
 def add_note(text: str, title: str | None = None, personal: bool = False, tags: str | None = None,
-             day: str | None = None) -> dict:
+             day: str | None = None, group: str | None = None) -> dict:
     """Write a note the user asks for (what a meeting decided, a fact to keep), in their words: for the team,
-    or for the user only (personal=true when they say "for me", "my note", "personal", "private"). day: the day
-    it is about (a meeting's, YYYY-MM-DD) when said; tags: a few words, comma-separated. Never add a fact the
-    user did not give. Returns the saved note: say its title and for whom."""
+    or for the user only (personal=true when they say "for me", "my note", "personal", "private"), or for one of
+    their groups (group: its name, when they name their team: "for the payments team"). day: the day it is about (a
+    meeting's, YYYY-MM-DD) when said; tags: a few words, comma-separated. Never add a fact the user did not give.
+    Returns the saved note: say its title and for whom."""
+    from flask import g
+
     from supagent.knowledge import notes as N
 
     try:
@@ -1325,8 +1340,15 @@ def add_note(text: str, title: str | None = None, personal: bool = False, tags: 
             me, name, admin = _note_user()
             if me is None:
                 return {"error": "no user: a note is written by a user"}
-            n = N.add(me, text, title=title, scope="user" if personal else "team", tags=tags, meeting_on=day or None,
-                      source="agent", by=name)
+            from supagent.views import _can_share, _is_admin
+
+            scope = "user" if personal else "group" if group else "team"
+            if scope != "user" and not _can_share():
+                return {"error": "your role (AI Viewer) writes notes for yourself only: ask to keep it as your own "
+                                 "note (personal), or ask an editor"}
+            found = N.group_of(group, g.user, admin=_is_admin()) if scope == "group" else None
+            n = N.add(me, text, title=title, scope=scope, tags=tags, meeting_on=day or None,
+                      source="agent", by=name, group_id=found.id if found is not None else None)
             _notes_changed()
             return {"saved": _note_view(n, me, admin, N.authors({n.user_id}))}
     except N.NoteError as ex:
@@ -1768,7 +1790,9 @@ def check_health(start: str, end: str, entities: list[str] | None = None, checks
     whether the same breach also happened in this window on the previous days (earlier_days;
     usual: true = on most of them: it does not single out this window). The new ones come first.
     `start` / `end`: local times ("2026-09-24 02:00"); `entities`: only these servers,
-    applications or pools (label values, e.g. ["srv-amer-002"]); `checks`: only these checks."""
+    applications or pools (label values, e.g. ["web-01"]); a part the system map says is made of
+    others (a pool and its servers) is checked with them, each breach found that way saying via which;
+    `checks`: only these checks."""
     try:
         with _as_user():
             cat = _catalog()
@@ -1792,6 +1816,9 @@ def check_health(start: str, end: str, entities: list[str] | None = None, checks
                     raise ToolError(f"time range longer than {MAX_PROMQL_RANGE_DAYS:g} days")
                 step = max(60_000, (t1 - t0) // 1440 // 60_000 * 60_000)
                 wanted = {e.lower() for e in entities or []}
+                added = _parts_of_named(entities or [])          # a pool's servers (agent.with_parts)
+                via = {m.lower(): whole for whole, ms in added.items() for m in ms if m.lower() not in wanted}
+                wanted |= set(via)
                 found, errors = [], {}
 
                 def one(item):
@@ -1818,11 +1845,14 @@ def check_health(start: str, end: str, entities: list[str] | None = None, checks
                     thr = float(c.get(op))
                     min_ms = parse_duration(str(c.get("for", "0s"))) if c.get("for") else 0
                     for b in _breaches(conn, series or [], op, thr, min_ms, step):
-                        if wanted and not ({str(v).lower() for v in b["labels"].values()} & wanted):
+                        hit = {str(v).lower() for v in b["labels"].values()} & wanted
+                        if wanted and not hit:
                             hidden += 1
                             continue
+                        through = sorted({via[h] for h in hit if h in via}) if hit and hit <= set(via) else []
                         found.append({"check": name, "description": c.get("description", ""),
-                                      "threshold": f"{op} {thr:g}{c.get('unit', '')}", **b})
+                                      "threshold": f"{op} {thr:g}{c.get('unit', '')}", **b,
+                                      **({"via": ", ".join(through)} if through else {})})
                 found.sort(key=lambda b: (b["from"], b["check"]))
                 usual = _breaches_usual(conn, defs, found, t0, t1, step) if found else 0
                 found.sort(key=lambda b: bool(b.get("usual")))       # the new ones first (stable: by time within)
@@ -1837,9 +1867,14 @@ def check_health(start: str, end: str, entities: list[str] | None = None, checks
                                if hidden else ""))
                 elif not found and hidden:
                     note = f"no breach on {sorted(wanted)}; {hidden} breach(es) on other entities"
+                if added:
+                    note = (note + "; " if note else "") + (
+                        "parts_added: the parts the system map says these are made of were checked too; a breach "
+                        "found on one of them says via which")
                 return {"database": db_obj.database_name, "from": start, "to": end,
                         "step_minutes": step // 60000, "checks": list(defs), "breaches": found[:200],
-                        "breach_count": len(found), "errors": errors, "note": note}
+                        "breach_count": len(found), "errors": errors, "note": note,
+                        **({"parts_added": added} if added else {})}
             finally:
                 conn.close()
     except ToolError as ex:
@@ -2148,7 +2183,7 @@ def _group_fields(table: str, fixed: set[str], label_column: str | None) -> list
     category is read from first (application, server...), never an identifier nor a field the scope pins."""
     from superset.extensions import db
 
-    from supagent.knowledge.facets import field_rules
+    from supagent.knowledge.facets import field_matches, field_rules
     from supagent.models import KObject
 
     rules = [rx for _c, rx in field_rules()]
@@ -2159,7 +2194,7 @@ def _group_fields(table: str, fixed: set[str], label_column: str | None) -> list
         if not (2 <= int(card or 0) <= 80) or o.name in fixed or o.name == label_column or ID_NAME.search(o.name) or \
                 kind in ("date", "boolean", "text", "timestamp") or kind in NUMERIC:
             continue
-        rows.append((not any(rx.match(o.name) for rx in rules), int(card), o.name))
+        rows.append((not any(field_matches(rx, o.name) for rx in rules), int(card), o.name))
     return [n for _a, _b, n in sorted(rows)][:GROUP_FIELDS]
 
 
@@ -3186,7 +3221,7 @@ def compare_groups(table: str, start: str, end: str, group_by: list[str] | None 
             t0, t1 = G.clock(start), G.clock(end)
             if t1 <= t0:
                 raise ToolError("end must be after start")
-            table = G.name(table)
+            table = G.table(table)
             db_obj = _table_database(table, database)
             tf, not_used = _row_time_field(table, time_field)
             security_manager.raise_for_access(database=db_obj, sql=f'SELECT COUNT(*) FROM "{table}"', schema="default")
@@ -3246,13 +3281,26 @@ LOG_SECONDS = 40.0               # ... while the call has run less than this (a 
 LOG_OWN = 50                     # lines of a pattern counted read in each third (its names, its wordings)
 
 
-def _message_field(table: str) -> str | None:
-    """The field that holds a log line's text: a text field of many values (the dictionary), the one named like a
-    message first."""
+def _table_kind(table: str) -> dict[str, Any]:
+    """The kind the dictionary learned for a table (indexkinds: logs and their shipper, spans...), or {}."""
     from superset.extensions import db
 
     from supagent.models import KObject
 
+    o = db.session.query(KObject).filter(KObject.kind == "index", KObject.name == table, KObject.gone_at.is_(None)).first()
+    return dict((o.stats or {}).get("kind") or {}) if o is not None else {}
+
+
+def _message_field(table: str) -> str | None:
+    """The field that holds a log line's text: the one its kind says (body, log, message: 0.9.5), else a text field
+    of many values (the dictionary), the one named like a message first."""
+    from superset.extensions import db
+
+    from supagent.models import KObject
+
+    kind = _table_kind(table)
+    if kind.get("kind") in ("logs", "events") and kind.get("message"):
+        return str(kind["message"])
     best: list[tuple[int, int, str]] = []
     for o in db.session.query(KObject).filter(KObject.kind == "field", KObject.parent == table, KObject.gone_at.is_(None)):
         kind = str(o.data_type or "").lower()
@@ -3265,17 +3313,249 @@ def _message_field(table: str) -> str | None:
     return max(best)[2] if best else None
 
 
+TEXT_LEVELS = ("FATAL", "CRITICAL", "ERROR", "WARN", "WARNING", "INFO", "DEBUG")
+
+
+def _text_level(msg: str, level: str) -> str:
+    """A level written in the line itself (Fluent Bit's container stdout: "... ERROR [inventory] ...", "WARN:",
+    "[ERROR]", logfmt level=error, JSON "level":"error"), as a SQL condition on the line's field."""
+    up, low = str(level).upper(), str(level).lower()
+    forms = [f"% {up} %", f"{up} %", f"% {up}:%", f"{up}:%", f"%[{up}]%", f"%level={low}%", f'%"level":"{low}"%']
+    return "(" + " OR ".join(f"\"{msg}\" LIKE '{f}'" for f in forms) + ")"
+
+
 def _level_field(table: str) -> str | None:
-    """The field that holds a log line's level (INFO, WARN, ERROR...): named like one, of few values."""
+    """The field that holds a log line's level (INFO, WARN, ERROR...): the one its kind says (severity.text,
+    log.level: 0.9.5, they were not found and every line was read without its level), else named like one, of few
+    values."""
     from superset.extensions import db
 
     from supagent.models import KObject
 
+    kind = _table_kind(table)
+    if kind.get("kind") == "logs" and kind.get("level"):
+        return str(kind["level"])
     for o in db.session.query(KObject).filter(KObject.kind == "field", KObject.parent == table, KObject.gone_at.is_(None)):
-        if re.fullmatch(r"(log_?)?(level|severity|loglevel|lvl|priority_name)", o.name, re.I) and \
+        if re.fullmatch(r"(log[_.]?)?(level|severity|loglevel|lvl|priority_name)", o.name, re.I) and \
                 int((o.stats or {}).get("cardinality") or 0) <= 12:
             return o.name
     return None
+
+
+SHARED_MIN = 3                  # rows of interest a value must hold to be said
+SHARED_LIFT = 1.5               # how much more often among them than among all the rows
+SHARED_SHOWN = 4                # values said per field
+
+
+def _identity_field(table: str, names: list[str]) -> str | None:
+    """The field of a table that names the pod (or the host) of each row, by its kind."""
+    from superset.extensions import db
+
+    from supagent.models import KObject
+
+    ix = db.session.query(KObject).filter(KObject.kind == "index", KObject.name == table, KObject.gone_at.is_(None)).first()
+    kind = ((ix.stats or {}).get("kind") or {}) if ix is not None else {}
+    return kind.get("pod") or kind.get("host")
+
+
+def _shared_lifts(label: str, counts: dict[str, list[int]], k_all: int, n_all: int) -> dict[str, Any] | None:
+    """A derived field's values (a node, a rack, a switch port) compared as the rows' own fields are."""
+    said = []
+    for value, (n, k) in counts.items():
+        if k < SHARED_MIN or not n_all or not k_all:
+            continue
+        share_k, share_n = k / k_all, n / n_all
+        lift = share_k / share_n if share_n else 0.0
+        if lift >= SHARED_LIFT or (share_k >= 0.9 and share_n < 0.9):
+            said.append({"value": value, "of_interest": f"{k} of {k_all} ({100 * share_k:.0f} %)",
+                         "of_all": f"{n} of {n_all} ({100 * share_n:.0f} %)", "times": round(lift, 1),
+                         "_score": share_k * math.log(max(lift, 1.0001))})
+    every = [v for v, (_n, k) in counts.items() if k == k_all]
+    if not said and not every:
+        return None
+    said.sort(key=lambda x: -x["_score"])
+    return {"field": label, **({"all_of_them": every[0]} if every else {}),
+            "values": [{k: v for k, v in x.items() if k != "_score"} for x in said[:SHARED_SHOWN]],
+            "_score": max([x["_score"] for x in said] or [0.0]) + (1.0 if every else 0.0)}
+
+
+def _shared_below(db_obj: Any, table: str, ident: str, window: str, focus_sql: str) -> list[dict[str, Any]]:
+    """The nodes the rows' pods run on (read in a table of the data that has both, e.g. the container logs), and the
+    inventory's rack and switch port of those nodes, compared between the rows of interest and all the rows."""
+    from superset.extensions import db
+
+    from supagent.knowledge.inventory import load
+    from supagent.models import KObject
+
+    out: list[dict[str, Any]] = []
+    with _db_connection(db_obj, extract=False) as conn:
+        cur = conn.cursor()
+        cur.execute(f'SELECT "{ident}", COUNT(*) AS n, SUM(CASE WHEN ({focus_sql}) THEN 1 ELSE 0 END) AS k '
+                    f'FROM "{table}" WHERE {window} GROUP BY 1')
+        per = {str(r[0]): [int(r[1] or 0), int(r[2] or 0)] for r in cur.fetchall() if r[0] is not None}
+        n_all, k_all = sum(v[0] for v in per.values()), sum(v[1] for v in per.values())
+        if not per or not k_all:
+            return out
+        node_of: dict[str, str] = {}
+        for ix in db.session.query(KObject).filter(KObject.kind == "index", KObject.gone_at.is_(None)):
+            kind = (ix.stats or {}).get("kind") or {}
+            if not (kind.get("pod") and kind.get("node")) or ix.name == table:
+                continue
+            listed = ", ".join("'" + p.replace("'", "''") + "'" for p in list(per)[:200])
+            try:
+                cur.execute(f'SELECT "{kind["pod"]}", "{kind["node"]}" FROM "{ix.name}" WHERE "{kind["pod"]}" IN ({listed}) '
+                            f'GROUP BY 1, 2 LIMIT 1000')
+                for pod, node in cur.fetchall():
+                    if pod is not None and node is not None:
+                        node_of.setdefault(str(pod), str(node))
+            except Exception:  # pylint: disable=broad-except   (another table may say it)
+                continue
+            if len(node_of) >= len(per):
+                break
+    if node_of:
+        nodes: dict[str, list[int]] = {}
+        for pod, (n, k) in per.items():
+            if pod in node_of:
+                c = nodes.setdefault(node_of[pod], [0, 0])
+                c[0] += n
+                c[1] += k
+        x = _shared_lifts("node (where their pods run)", nodes, k_all, n_all)
+        if x:
+            out.append(x)
+    else:
+        nodes = {p: v for p, v in per.items()}            # the identity is already a host
+    inv = load()
+    if inv.get("rows"):
+        racks: dict[str, list[int]] = {}
+        ports: dict[str, list[int]] = {}
+        for node, (n, k) in nodes.items():
+            row = inv["index"].get(node.lower())
+            if row is None:
+                continue
+            rack = next((v for f, v in row["facts"].items() if re.search(r"rack|zone|site|room", f, re.I)), None)
+            if rack:
+                c = racks.setdefault(f"{rack}", [0, 0])
+                c[0] += n
+                c[1] += k
+            for kind_, _f, tgt, detail in row["rel"]:
+                if kind_ == "connected_to":
+                    c = ports.setdefault(f"{tgt} {detail}".strip(), [0, 0])
+                    c[0] += n
+                    c[1] += k
+        for label, counts in (("rack (inventory)", racks), ("switch port (inventory)", ports)):
+            x = _shared_lifts(label, counts, k_all, n_all)
+            if x:
+                out.append(x)
+    return out
+
+
+@mcp.tool
+def what_they_share(table: str, start: str, end: str, focus: str, where: str = "", fields: list[str] | None = None,
+                    time_field: str | None = None, database: str | int | None = None) -> dict:
+    """What do some rows have in common (the failing calls, the slow requests, the errors) that the other rows of
+    the same window do not? Over start-end (local times, "2030-01-15 06:00"), the rows `focus` keeps (SQL conditions:
+    "tag.error" = 'true', "duration" > 5000000) against all the rows of the window and of `where` (the scope, e.g.
+    "process.serviceName" = 'checkout'): for each field of few values (the dictionary's, or `fields`), the values far
+    more frequent among them (their share among them, their share among all, how many times more), most telling
+    first; a field where they all hold one value says so. Then what an inventory says those values stand on (a pod's
+    node, a node's rack and switch port) and what they share below them. One call instead of grouping field by field.
+    """
+    began = time.time()
+    try:
+        with _as_user():
+            from superset.extensions import db as meta, security_manager
+
+            from supagent.knowledge import groups as G
+
+            t0, t1 = G.clock(start), G.clock(end)
+            if t1 <= t0:
+                raise ToolError("end must be after start")
+            table = G.table(table)
+            db_obj = _table_database(table, database)
+            tf, _computed = _row_time_field(table, time_field)
+            security_manager.raise_for_access(database=db_obj, sql=f'SELECT COUNT(*) FROM "{table}"', schema="default")
+            cond_focus, _labels = G.scope(focus, None)
+            if cond_focus is None:
+                raise ToolError("focus: the conditions of the rows of interest (\"tag.error\" = 'true')")
+            cond_where, _l2 = G.scope(where, None)
+            asked = [G.name(f) for f in fields or []][:GROUP_FIELDS]
+            names = asked or [f for f in _group_fields(table, G.fixed_fields(cond_where), None) if f != tf]
+            if not names:
+                raise ToolError(f"no field of few values in {table}: give fields")
+            focus_sql = G.render(cond_focus)
+            scope_sql = G.render(cond_where) if cond_where is not None else "TRUE"
+            window = f'"{tf}" >= {G.lit(t0)} AND "{tf}" < {G.lit(t1)} AND ({scope_sql})'
+            out_fields: list[dict[str, Any]] = []
+            totals = None
+            with _db_connection(db_obj, extract=False) as conn:
+                meta.session.commit()
+                cur = conn.cursor()
+                for f in names:
+                    if time.time() - began > GROUP_SECONDS:
+                        break
+                    cur.execute(f'SELECT "{f}", COUNT(*) AS n, SUM(CASE WHEN ({focus_sql}) THEN 1 ELSE 0 END) AS k '
+                                f'FROM "{table}" WHERE {window} GROUP BY 1')
+                    rows = [(r[0], int(r[1] or 0), int(r[2] or 0)) for r in cur.fetchall()]
+                    n_all, k_all = sum(r[1] for r in rows), sum(r[2] for r in rows)
+                    totals = totals or {"rows": n_all, "of_interest": k_all}
+                    if not k_all or not n_all:
+                        continue
+                    said = []
+                    for value, n, k in rows:
+                        if value is None or k < SHARED_MIN:
+                            continue
+                        share_k, share_n = k / k_all, n / n_all
+                        lift = share_k / share_n if share_n else 0.0
+                        if lift >= SHARED_LIFT or (share_k >= 0.9 and share_n < 0.9):
+                            said.append({"value": value, "of_interest": f"{k} of {k_all} ({100 * share_k:.0f} %)",
+                                         "of_all": f"{n} of {n_all} ({100 * share_n:.0f} %)", "times": round(lift, 1),
+                                         "_score": share_k * math.log(max(lift, 1.0001))})
+                    said.sort(key=lambda x: -x["_score"])
+                    every = [r for r in rows if r[2] == k_all and r[0] is not None]
+                    if said or every:
+                        out_fields.append({"field": f, **({"all_of_them": every[0][0]} if every else {}),
+                                           "values": [{k: v for k, v in x.items() if k != "_score"}
+                                                      for x in said[:SHARED_SHOWN]],
+                                           "_score": max([x["_score"] for x in said] or [0.0])})
+            # below the pods or hosts of the rows: their nodes (from a table that says where each pod runs), then
+            # the inventory's rack and switch port of those nodes, compared the same way (0.9.6)
+            ident = _identity_field(table, names)
+            if ident and time.time() - began < GROUP_SECONDS:
+                try:
+                    out_fields += _shared_below(db_obj, table, ident, window, focus_sql)
+                except Exception as ex:  # pylint: disable=broad-except   (the rows' own fields are told anyway)
+                    meta.session.rollback()
+                    log.info("supagent what_they_share: below %s: %s", ident, str(ex)[:200])
+            out_fields.sort(key=lambda x: -x["_score"])
+            for x in out_fields:
+                x.pop("_score", None)
+            res: dict[str, Any] = {"table": table, "window": f"{t0:%Y-%m-%d %H:%M} to {t1:%Y-%m-%d %H:%M} on {tf}",
+                                   "focus": focus_sql, **(totals or {"rows": 0, "of_interest": 0}),
+                                   "what_they_share": out_fields[:8]}
+            if not (totals or {}).get("of_interest"):
+                res["note"] = "no row of the window keeps the focus: nothing to compare"
+                return res
+            top = [str(v["value"]) for x in out_fields[:4] for v in x["values"][:2]] + \
+                [str(x["all_of_them"]) for x in out_fields[:4] if x.get("all_of_them") is not None]
+            try:                                  # what an inventory says those values stand on (0.9.6)
+                from supagent.knowledge.inventory import walk
+
+                below = walk(list(dict.fromkeys(top))[:8]) if top else None
+            except Exception as ex:  # pylint: disable=broad-except
+                log.info("supagent what_they_share: inventory: %s", str(ex)[:200])
+                below = None
+            if below:
+                res["what_they_stand_on"] = below
+            res["note"] = ("values far more frequent among the rows of interest than among all the rows of the window "
+                           "(times: how many times more); a cause below them (a node, a rack, a port) shows in "
+                           "what_they_stand_on")
+            return res
+    except (ToolError, Exception) as ex:  # pylint: disable=broad-except
+        from supagent.knowledge.groups import GroupsError
+
+        if isinstance(ex, (ToolError, GroupsError)):
+            return {"error": str(ex)}
+        return {"error": f"{type(ex).__name__}: {str(ex)[:500]}"}
 
 
 @mcp.tool
@@ -3306,7 +3586,7 @@ def compare_logs(table: str, start: str, end: str, where: str = "", days: int = 
             t0, t1 = G.clock(start), G.clock(end)
             if t1 <= t0:
                 raise ToolError("end must be after start")
-            table = G.name(table)
+            table = G.table(table)
             db_obj = _table_database(table, database)
             tf, _computed = _row_time_field(table, time_field)
             msg = G.name(message_field) if message_field else _message_field(table)
@@ -3368,7 +3648,8 @@ def compare_logs(table: str, start: str, end: str, where: str = "", days: int = 
                     n = run(f'SELECT COUNT(*) AS n FROM "{table}" WHERE {window(back)}')
                     if n and n[0][0]:
                         windows.append(back)
-                if len(windows) < 3:
+                if len(windows) < 2:                 # one earlier day is compared with, said so (0.9.5: a short
+                    # retention, a data stream whose first generations are deleted: refused with a day to compare)
                     raise ToolError("no earlier day with lines to compare with: check the table, the scope and the dates")
                 usual_days = len(windows) - 1
                 ref_windows: list[tuple[str, dt.timedelta]] = []
@@ -3380,6 +3661,7 @@ def compare_logs(table: str, start: str, end: str, where: str = "", days: int = 
                 # the levels (of the window asked and of the day before: a level gone is read too), the quiet ones
                 # (INFO, DEBUG) left out unless asked
                 found_levels: dict[str, int] = {}
+                in_text = False                      # no level field: the level written in the line (0.9.5)
                 if lvl:
                     for back in windows[:2]:
                         for r in run(f'SELECT "{lvl}", COUNT(*) AS n FROM "{table}" WHERE {window(back)} GROUP BY "{lvl}"'):
@@ -3388,14 +3670,24 @@ def compare_logs(table: str, start: str, end: str, where: str = "", days: int = 
                     wanted = [x for x in (levels or [k for k in found_levels if k.lower() not in LOG_LEVELS_QUIET])
                               if x in found_levels] or list(found_levels)
                 else:
-                    wanted = [None]
+                    for back in windows[:2]:
+                        for word in TEXT_LEVELS:
+                            n = run(f'SELECT COUNT(*) AS n FROM "{table}" WHERE {window(back)} AND {_text_level(msg, word)}')
+                            if n and n[0][0]:
+                                found_levels[word] = found_levels.get(word, 0) + (int(n[0][0]) if back == windows[0] else 0)
+                    asked = [str(x).upper() for x in levels or []]
+                    wanted = [x for x in (asked or [k for k in found_levels if k.lower() not in LOG_LEVELS_QUIET])
+                              if x in found_levels] or ([] if asked else list(found_levels))
+                    in_text = bool(wanted)
+                    if not wanted:
+                        wanted = [None]              # no level in the lines either: every line, as before
                 cols = ", ".join(f'"{c}"' for c in [msg, *where_fields, *([lvl] if lvl else [])])
                 names = [msg, *where_fields, *([lvl] if lvl else []), "_t"]
                 thirds = [(t0 + (t1 - t0) * i / 3, t0 + (t1 - t0) * (i + 1) / 3) for i in range(3)]
                 found: dict[str, dict] = {}
                 per_level: dict[str, list[float]] = {}
                 for level in wanted:
-                    on = f' AND "{lvl}" = {quote(level)}' if lvl else ""
+                    on = (f' AND "{lvl}" = {quote(level)}' if lvl else f" AND {_text_level(msg, level)}" if in_text else "")
                     samples, totals = [], []
                     for back in every:
                         total = run(f'SELECT COUNT(*) AS n FROM "{table}" WHERE {window(back)}{on}')
@@ -3407,13 +3699,14 @@ def compare_logs(table: str, start: str, end: str, where: str = "", days: int = 
                             rows += [dict(zip(names, r)) for r in got]
                         samples.append(rows)
                     per_level[str(level)] = totals
-                    L.merge(found, L.read(samples, totals, msg, where_fields, level=str(level) if lvl else None))
+                    L.merge(found, L.read(samples, totals, msg, where_fields, level=str(level) if lvl or in_text else None))
                 # the patterns that will be said, counted line by line in the database (what was read of each window
                 # is a part of it: a burst at one time of a window can crowd the other patterns out of what is read)
                 dates = [f"{t0 - b:%Y-%m-%d}" for b in windows[1:]]
                 said = sorted(found.items(), key=lambda kv: (L.judge(kv[1], usual_days)["verdict"] == "as usual",
                                                              -kv[1]["counts"][0]))
-                levels_on = (f' AND "{lvl}" IN ({", ".join(quote(x) for x in wanted)})' if lvl else "")
+                levels_on = (f' AND "{lvl}" IN ({", ".join(quote(x) for x in wanted)})' if lvl else
+                             " AND (" + " OR ".join(_text_level(msg, x) for x in wanted) + ")" if in_text else "")
                 checked, used, stopped, uncounted = 0, set(), False, ""
                 for key, p in said:
                     if checked >= LOG_CHECKED:
@@ -3462,9 +3755,13 @@ def compare_logs(table: str, start: str, end: str, where: str = "", days: int = 
                        "levels": {str(k): {"now": int(v[0]), "usual": statistics.median(v[1:usual_days + 1])}
                                   for k, v in per_level.items() if k != "None"},
                        "patterns": res["patterns"],
-                       "compared_with": "the same window on " + ", ".join(dates) + " (the usual: their median)",
+                       "compared_with": ("the same window on " + ", ".join(dates) + " (the usual: their median)")
+                       if len(dates) > 1 else (f"the same window on {dates[0]} only: no other earlier day has lines in "
+                                               "this window (the usual is that one day)"),
                        **({"against": [t for t, _b in ref_windows]} if ref_windows else {}),
-                       "read": f"the lines of the levels {', '.join(map(str, wanted))}" if lvl else "every line",
+                       "read": (f"the lines of the levels {', '.join(map(str, wanted))}" if lvl else
+                                f"the lines of the levels {', '.join(map(str, wanted))} (the level read in the line: the "
+                                f"table has no level field)" if in_text else "every line"),
                        "note": (f"the patterns are counted from up to {3 * LOG_ROWS} lines of each level read in each "
                                 "window (spread over its three thirds), scaled to the lines it has; the ones said "
                                 "\"counted: line by line\" are exact")}
@@ -3627,9 +3924,18 @@ def system_links(names: list[str]) -> dict:
     try:
         with _as_user():
             from supagent.knowledge.brief import links_of
+            from supagent.knowledge.inventory import walk
 
-            res = links_of([str(n) for n in (names or [])][:8])
-            if not res.get("parts"):
+            asked = [str(n) for n in (names or [])][:8]
+            res = links_of(asked)
+            try:                                  # what an inventory (a CMDB) says they stand on (0.9.5)
+                below = walk(asked)
+            except Exception as ex:  # pylint: disable=broad-except   (no inventory read: the map alone)
+                log.info("supagent system_links: inventory: %s", str(ex)[:200])
+                below = None
+            if below:
+                res["inventory"] = below
+            if not res.get("parts") and not below:
                 res["note"] = ("none of these names is a value of the team's categories (Data dictionary, "
                                "Categories): search_knowledge may know them")
             return res
@@ -3654,7 +3960,7 @@ def repeated_keys(database: Any, table: str, key: str) -> int | None:
     hit = _REPEATS.get(at)
     if hit and _time.time() - hit[0] < REPEATS_TTL:
         return hit[1]
-    name, col = G.name(table), G.name(key)
+    name, col = G.table(table), G.name(key)
     security_manager.raise_for_access(database=database, sql=f'SELECT COUNT(*) FROM "{name}"', schema="default")
     found: int | None = None
     with _db_connection(database, extract=False) as conn:
@@ -3676,8 +3982,36 @@ def repeated_keys(database: Any, table: str, key: str) -> int | None:
     return found
 
 
+def _parts_of_named(names: list[str]) -> dict[str, list[str]]:
+    """{a named part: its parts} from the system map, for the parts made of others (agent.with_parts); {} when off
+    or when the map cannot be read (the tool works on the names as given)."""
+    if not names:
+        return {}
+    try:
+        from supagent import settings
+        from supagent.knowledge.brief import members
+
+        if not settings.get("agent.with_parts"):
+            return {}
+        return members([str(n) for n in names])
+    except Exception as ex:  # pylint: disable=broad-except
+        log.info("supagent: the parts of %s not read: %s", names[:3], str(ex)[:200])
+        try:
+            from superset.extensions import db as meta
+
+            meta.session.rollback()
+        except Exception:  # pylint: disable=broad-except
+            pass
+        return {}
+
+
 RECORD_TABLE = re.compile(r"change|release|deploy|alert|incident|maintenance|outage|ticket|patch|event", re.I)
 RECORD_KEYS = 6                  # keyword fields of a record table matched against the names
+RECORD_PART = re.compile(r"target|service|host|instance|node|server|component|application|app\b|asset|ci\b|system|"
+                         r"object|name|device|resource|pod|container|database|cluster", re.I)
+RECORD_ENUM = re.compile(r"(^|[._])(status|state|severity|priority|type|kind|level|result|outcome|risk|category)$", re.I)
+RECORD_PROSE = re.compile(r"description|summary|message|title|text|comment|details|note|reason|body|subject|"
+                          r"resolution|cause|impact|action", re.I)
 RECORD_TABLES = 6
 
 
@@ -3696,8 +4030,16 @@ def _record_tables() -> list[tuple[str, list[str], list[str]]]:
         fields = db.session.query(KObject).filter(KObject.kind == "field", KObject.parent == t,
                                                   KObject.gone_at.is_(None)).all()
         kinds = {f.name: str(f.data_type or "").lower() for f in fields if f.name and not f.name.startswith(("@", "_"))}
-        keys = [n for n, k in kinds.items() if k in ("keyword", "string", "varchar")][:RECORD_KEYS]
-        texts = [n for n, k in kinds.items() if k == "text"][:2]
+        card = {f.name: int((f.stats or {}).get("cardinality") or 0) for f in fields}
+        strings = [n for n, k in kinds.items() if k in ("keyword", "string", "varchar", "text")]
+        # the fields that name a part (target, service, host, instance...) first; (0.9.5: an OpenSearch text field
+        # with a keyword subfield was read as long text, and only the first two by name were searched: the changes'
+        # "target" never was)
+        # prose: named so, or a text field of many (or unknown) values; a text field of a few values names things
+        prose = [n for n in strings if RECORD_PROSE.search(n) or (kinds[n] == "text" and not 0 < card.get(n, 0) <= 50)]
+        keys = sorted((n for n in strings if n not in prose and not RECORD_ENUM.search(n)),
+                      key=lambda n: (not RECORD_PART.search(n), n))[:RECORD_KEYS]
+        texts = sorted(prose, key=lambda n: (not RECORD_PROSE.search(n), -card.get(n, 0)))[:2]
         if keys or texts:
             out.append((t, keys, texts))
     return out[:RECORD_TABLES]
@@ -3710,7 +4052,8 @@ def records_about(names: list[str], until: str, days: int = 7) -> dict:
     is one of `names` or whose text mentions one, over the `days` before `until` (local time, "2030-01-15 02:10":
     when the effect began). In an investigation, the change or record behind the cause: give the parts you name as
     the cause (the server, the pool, the feed, the service, the license...), not only the applications of the
-    question. Each table: how many records, the latest ones and the SQL."""
+    question; a part the system map says is made of others (a pool and its servers) is looked for with them. Each
+    table: how many records, the latest ones and the SQL."""
     try:
         with _as_user():
             from superset.extensions import db as meta, security_manager
@@ -3720,6 +4063,16 @@ def records_about(names: list[str], until: str, days: int = 7) -> dict:
             parts = [str(n).strip() for n in names or [] if str(n).strip()][:8]
             if not parts:
                 raise ToolError("names: the parts of the system to look for (a server, a pool, a feed, a service)")
+            try:                                  # and what an inventory says they stand on (0.9.5): their nodes,
+                from supagent.knowledge.inventory import below     # the switch those connect to
+
+                under = [b for b in below(parts) if b not in parts][:8]
+            except Exception as ex:  # pylint: disable=broad-except
+                log.info("supagent records_about: inventory: %s", str(ex)[:200])
+                under = []
+            made_of = _parts_of_named(parts)      # and the parts the map says they are made of (a pool's servers)
+            under += [m for ms in made_of.values() for m in ms if m not in parts and m not in under][:16]
+            parts += under
             t1 = G.clock(until)
             span = max(1, min(int(days or 7), 31))
             listed = ", ".join("'" + p.replace("'", "''") + "'" for p in parts)
@@ -3732,7 +4085,7 @@ def records_about(names: list[str], until: str, days: int = 7) -> dict:
                     continue
                 try:
                     db_obj = _table_database(table, None)
-                    security_manager.raise_for_access(database=db_obj, sql=f'SELECT COUNT(*) FROM "{G.name(table)}"',
+                    security_manager.raise_for_access(database=db_obj, sql=f'SELECT COUNT(*) FROM "{G.table(table)}"',
                                                       schema="default")
                 except Exception:  # pylint: disable=broad-except   (a table this user may not read: left out)
                     continue
@@ -3752,8 +4105,12 @@ def records_about(names: list[str], until: str, days: int = 7) -> dict:
                 return {"names": parts, "until": until, "note": "no record table (changes, alerts, incidents...) in "
                                                                 "the data dictionary that this user may read"}
             return {"names": parts, "until": until, "days": span, "tables": out,
+                    **({"also_what_they_stand_on": under} if under else {}),
                     "note": "records whose target or text names one of the parts, the latest first; none in a table "
-                            "is a finding too (nothing recorded on those parts in those days)"}
+                            "is a finding too (nothing recorded on those parts in those days)"
+                            + ("; also_what_they_stand_on: the parts an inventory says the names run on, connect to or "
+                               "depend on, and the parts the system map says they are made of, looked for too"
+                               if under else "")}
     except ToolError as ex:
         return {"error": str(ex)}
     except Exception as ex:  # pylint: disable=broad-except
@@ -3763,34 +4120,91 @@ def records_about(names: list[str], until: str, days: int = 7) -> dict:
 @mcp.tool
 def list_alerts(database: str | int | None = None) -> dict:
     """Alerts firing or pending now in the metrics backend (Mimir ruler / Prometheus) and the
-    alerting rules defined there."""
+    alerting rules defined there; and the alerts recorded in the data (an Alertmanager archive indexed with the logs:
+    the tables whose kind is alerts) whose status says they are still firing."""
+    out: dict[str, Any] = {}
     try:
         with _as_user():
-            db_obj = _metrics_database(database)
-            conn = _promagg_connection(db_obj)
             try:
+                db_obj = _metrics_database(database)
+            except ToolError as ex:
+                db_obj, out["backend"] = None, str(ex)
+            if db_obj is not None:
+                conn = _promagg_connection(db_obj)
                 try:
-                    alerts = conn.client.alerts()
-                except Exception as ex:  # pylint: disable=broad-except
-                    return {"error": f"alerts are not available on this backend: {str(ex)[:300]}"}
-                try:
-                    groups = conn.client.rules()
-                except Exception:  # pylint: disable=broad-except
-                    groups = []
-                rules = [{"group": g.get("name"), "name": r.get("name"), "query": r.get("query"),
-                          "state": r.get("state"), "health": r.get("health")}
-                         for g in groups for r in g.get("rules") or [] if r.get("type") == "alerting"]
-                return {"database": db_obj.database_name,
-                        "alerts": [{"name": a.get("labels", {}).get("alertname"), "state": a.get("state"),
-                                    "labels": a.get("labels"), "since": a.get("activeAt"), "value": a.get("value"),
-                                    "summary": (a.get("annotations") or {}).get("summary")} for a in alerts],
-                        "rules": rules}
-            finally:
-                conn.close()
+                    try:
+                        alerts = conn.client.alerts()
+                    except Exception as ex:  # pylint: disable=broad-except
+                        alerts, out["backend"] = [], f"alerts are not available on this backend: {str(ex)[:300]}"
+                    try:
+                        groups = conn.client.rules()
+                    except Exception:  # pylint: disable=broad-except
+                        groups = []
+                    rules = [{"group": g.get("name"), "name": r.get("name"), "query": r.get("query"),
+                              "state": r.get("state"), "health": r.get("health")}
+                             for g in groups for r in g.get("rules") or [] if r.get("type") == "alerting"]
+                    out.update({"database": db_obj.database_name,
+                                "alerts": [{"name": a.get("labels", {}).get("alertname"), "state": a.get("state"),
+                                            "labels": a.get("labels"), "since": a.get("activeAt"),
+                                            "value": a.get("value"),
+                                            "summary": (a.get("annotations") or {}).get("summary")} for a in alerts],
+                                "rules": rules})
+                finally:
+                    conn.close()
+            recorded = _recorded_alerts()        # (0.9.5: an empty ruler was answered "no alert firing" while the
+            if recorded:                         # Alertmanager archive of the data had three)
+                out["in_the_data"] = recorded
+                out["note"] = ("in_the_data: the alerts recorded in the data's alert tables whose status says firing "
+                               "now (the metrics backend's own alerts above, when it has a ruler)")
+            if not out.get("alerts") and not recorded and out.get("backend"):
+                return {"error": out["backend"]}
+            return out
     except ToolError as ex:
         return {"error": str(ex)}
     except Exception as ex:  # pylint: disable=broad-except
         return {"error": f"{type(ex).__name__}: {str(ex)[:1500]}"}
+
+
+def _recorded_alerts() -> list[dict]:
+    """The alerts of the data's alert tables (indexkinds: kind alerts) still firing at the agent's now: status says
+    firing, or no end yet, started before now; each table with its SQL."""
+    from superset.extensions import db as meta, security_manager
+
+    from supagent.knowledge import groups as G
+    from supagent.models import KObject
+
+    out: list[dict] = []
+    for ix in meta.session.query(KObject).filter(KObject.kind == "index", KObject.gone_at.is_(None)):
+        kind = (ix.stats or {}).get("kind") or {}
+        if kind.get("kind") != "alerts" or not kind.get("start"):
+            continue
+        try:
+            db_obj = _table_database(ix.name, None)
+            security_manager.raise_for_access(database=db_obj, sql=f'SELECT COUNT(*) FROM "{G.table(ix.name)}"',
+                                              schema="default")
+        except Exception:  # pylint: disable=broad-except   (a table this user may not read: left out)
+            continue
+        from supagent.agent import now
+
+        at = now().replace(tzinfo=None)
+        start, status, end = G.name(kind["start"]), kind.get("status"), kind.get("end")
+        still = (f"\"{G.name(status)}\" = 'firing'" if status else "TRUE") + (
+            f' AND ("{G.name(end)}" IS NULL OR "{G.name(end)}" > {G.lit(at)})' if end and not status else "")
+        sql = (f'SELECT * FROM "{G.table(ix.name)}" WHERE {still} AND "{start}" <= {G.lit(at)} '
+               f'ORDER BY "{start}" DESC LIMIT 50')
+        try:
+            with _db_connection(db_obj, extract=False) as conn:
+                cur = conn.cursor()
+                cur.execute(sql)
+                cols = [c[0] for c in (cur.description or [])]
+                rows = [{c: (f"{v:%Y-%m-%d %H:%M}" if isinstance(v, dt.datetime) else v) for c, v in zip(cols, r)
+                         if v not in (None, "") and not str(c).startswith("_")} for r in cur.fetchall()]
+        except Exception as ex:  # pylint: disable=broad-except
+            meta.session.rollback()
+            log.info("supagent list_alerts: %s: %s", ix.name, str(ex)[:200])
+            continue
+        out.append({"table": ix.name, "firing": len(rows), "alerts": rows[:20], "sql": sql})
+    return out
 
 
 def _metric_profile(conn: Any, name: str, labels: list[str]) -> dict[str, list[str]]:

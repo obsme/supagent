@@ -104,6 +104,18 @@ def _score(ws: set[str], *texts: Any, weights: dict[str, float] | None = None) -
     return sum((weights or {}).get(w, 1.0) for w in hit)
 
 
+KIND_WORDS = {"logs": "log logs logged line lines message messages", "spans": "trace traces tracing span spans call calls "
+              "latency request requests", "events": "event events kubernetes k8s", "alerts": "alert alerts alerting "
+              "firing", "inventory": "inventory cmdb asset assets", "metrics": "metric metrics measure measures"}
+
+
+def _kind_text(st: dict[str, Any]) -> str:
+    """The words of a table's kind (logs, traces, events, alerts...) and its shipper, for the topic's match (0.9.5:
+    "the logs of the database server" did not reach the log tables, whose names and fields say nothing of logs)."""
+    kind = st.get("kind") or {}
+    return f"{KIND_WORDS.get(kind.get('kind'), '')} {kind.get('layout') or ''}"
+
+
 def _weights(ws: set[str], bags: list[set[str]]) -> dict[str, float]:
     """A topic word found in many objects says little about any of them."""
     out = {}
@@ -171,6 +183,8 @@ def _indices(src: Source, database: Any, ws: set[str], only: str | None,
              allowed: set[int]) -> list[tuple[float, list[str]]]:
     """One section per index, with its relevance to the topic."""
     q = db.session.query(KObject).filter(KObject.source_id == src.id, KObject.gone_at.is_(None))
+    from supagent.knowledge.containers import lines as container_lines
+
     indices = [o for o in q.filter(KObject.kind == "index") if not only or o.name == only]
     if not indices:
         return []
@@ -184,7 +198,7 @@ def _indices(src: Source, database: Any, ws: set[str], only: str | None,
     for ix in indices:
         fs = fields.get(ix.name, [])
         fscores = {f.id: (sum(weights.get(w, 1.0) for w in ws & bags[f.id]) if ws else 1) for f in fs}
-        head = _score(ws, ix.name, ix.description, ix.category, weights=weights)
+        head = _score(ws, ix.name, ix.description, ix.category, _kind_text(ix.stats or {}), weights=weights)
         scored.append((head + max(fscores.values(), default=0), ix, fscores))
     scored.sort(key=lambda x: (-x[0], x[1].name))
     chosen = [(sc, ix, fsc) for sc, ix, fsc in scored if sc > 0] if ws else scored
@@ -196,6 +210,23 @@ def _indices(src: Source, database: Any, ws: set[str], only: str | None,
         out = [f"\nIndex {ix.name}: {(ix.description or '').strip()}{marker(ix)}",
                f'  SQL: FROM "{ix.name}" on database id {database.id} "{database.database_name}"'
                + (f"; Superset dataset id {ds.id} (charts: dataset_id={ds.id})" if ds else "")]
+        out += ["  " + x for x in container_lines(st, ix.name)]     # a data stream, an alias, its other names (0.9.5)
+        if st.get("kind"):                       # logs and their shipper, spans and their units... (0.9.5)
+            from supagent.knowledge.indexkinds import line as kind_line
+
+            out.append("  " + kind_line(st["kind"]))
+        if st.get("same_events"):                # the same events shipped twice (0.9.5)
+            from supagent.knowledge.duplicates import line as same_line
+
+            out.append("  " + same_line(st["same_events"]))
+        if st.get("usual"):                      # the services' usual day, from the spans (0.9.5)
+            from supagent.knowledge.behaviour import line as usual_line
+
+            out.append("  " + usual_line(st["usual"]))
+        if st.get("usual_logs"):                 # the services' patterns of every day (0.9.5)
+            from supagent.knowledge.logusual import line as logs_line
+
+            out.append("  " + logs_line(st["usual_logs"]))
         fs = fields.get(ix.name, [])
         if st.get("docs") is not None:
             rng = st.get("time_range") or [None, None]
@@ -205,7 +236,9 @@ def _indices(src: Source, database: Any, ws: set[str], only: str | None,
                 from supagent.knowledge.period import as_day
 
                 span = f" from {as_day(rng[0])} to {as_day(rng[1])} (days: compare it with dates alone)"
-            out.append(f"  {_num(st['docs'])} documents" + (f"; time field {st.get('time_field')}{span}"
+            fam = (f" in {st['members']} indices ({st.get('first')} .. {st.get('latest')}: query the pattern, not one "
+                   f"of them; an index's day may be the UTC day)") if st.get("family") and st.get("members") else ""
+            out.append(f"  {_num(st['docs'])} documents{fam}" + (f"; time field {st.get('time_field')}{span}"
                                                             if st.get("time_field") else "")
                        + (f" ({st['timezone']} time, as SQL shows it)" if st.get("timezone") and span and not days
                           else ""))
@@ -240,6 +273,14 @@ def _indices(src: Source, database: Any, ws: set[str], only: str | None,
     return sections
 
 
+def _database_name(source_id: int) -> str:
+    from superset.models.core import Database
+
+    src = db.session.get(Source, source_id)
+    d = db.session.get(Database, src.database_id) if src is not None and src.database_id else None
+    return d.database_name if d is not None else f"source {source_id}"
+
+
 def _join_lines(index: str, rels: list[tuple[Relation, KObject, KObject]], ws: set[str],
                 shown: set[tuple[str, str]], per_pair: int = 8) -> list[str]:
     """Relations of an index's fields, one line per other index: curated ones with their text,
@@ -258,11 +299,16 @@ def _join_lines(index: str, rels: list[tuple[Relation, KObject, KObject]], ws: s
             out.append(f"  relationship: {_relation_text(rel, a, b)}")
             continue
         ev = rel.evidence or {}
-        if other.kind == "field":
+        if other.kind == "field" and other.source_id != mine.source_id:
+            # another database: no SQL reads both (0.9.5: told "joins", the agent joined an index of the other)
+            where = f"{other.parent} in database \"{_database_name(other.source_id)}\""
+            on = f'"{mine.name}" = "{other.name}"'
+        elif other.kind == "field":
             on = f'"{mine.name}"' if mine.name == other.name else f'"{mine.name}" = {other.parent}."{other.name}"'
         else:
             where = "metric labels"
-            on = f'"{mine.name}" = label {other.name}'
+            on = f'"{mine.name}" = label {other.name}' + (
+                f" (its host: {other.name} is host:port, {other.name} LIKE '<host>:%')" if ev.get("port_stripped") else "")
         rank = (2 if ws & words(mine.name.replace("_", " ")) else 0) + (rel.confidence or 0)
         measured[where].append((rank, f"{on} ({ev.get('common')} values in common)"))
     for where, items in sorted(measured.items(), key=lambda kv: -max(r for r, _t in kv[1])):
@@ -271,6 +317,9 @@ def _join_lines(index: str, rels: list[tuple[Relation, KObject, KObject]], ws: s
         if where == "metric labels":
             out.append("  same values as metric labels (join a metric on them): "
                        + ", ".join(t for _r, t in items[:per_pair]) + more + " (measured)")
+        elif " in database " in where:
+            out.append(f"  same values as {where} (another database: no SQL joins them; query each, then match the "
+                       f"values): " + ", ".join(t for _r, t in items[:per_pair]) + more + " (measured)")
         else:
             out.append(f"  joins {where} on " + ", ".join(t for _r, t in items[:per_pair]) + more + " (measured)")
     for rel, a, b in rels:
@@ -330,6 +379,19 @@ def _metric_lines(m: KObject, labels: list[KObject], tables: dict[str, Any], ds:
         facts.append(f"p50 {_num(st.get('p50'))}, p95 {_num(st.get('p95'))} over {st.get('window')}")
     if st.get("note"):
         facts.append(st["note"])
+    if st.get("usual"):                      # a latency histogram: each service's usual day (0.9.5)
+        from supagent.knowledge.metricusual import line as usual_line
+
+        facts.append(usual_line(st["usual"]))
+    said = st.get("data_says") or {}
+    if said.get("increases_only"):           # no metadata: what the samples say of its type (0.9.5)
+        facts.append(f"its values only increased over a day ({_num(said['increases_only'])} changes, never down): if it "
+                     f"counts something (requests, errors, octets, commits), the number over a period is its increase "
+                     f"(promql_query increase({m.name}[1h]), rate() per second), never its value (a total since a "
+                     f"restart); a size that grows is read by its value")
+    if said.get("goes_down"):
+        facts.append(f"a level, not a count: its values go down as well as up ({_num(said['goes_down'])} decreases in a "
+                     f"day), whatever its name says: read its value, never rate or increase")
     if facts:
         out.append("      " + "; ".join(facts))
     parts = []
@@ -425,7 +487,9 @@ def _metrics(src: Source, database: Any, ws: set[str], only: str | None, cat: di
             out.append(f"  relationship: {_relation_text(rel, a, b)}")
         else:
             lb, f = (a, b) if a.kind == "label" else (b, a)
-            measured.append(f'{lb.name} = {f.parent}."{f.name}" ({(rel.evidence or {}).get("common")} values in common)')
+            ev = rel.evidence or {}
+            host = (f" (its host: {lb.name} is host:port, {lb.name} LIKE '<host>:%')" if ev.get("port_stripped") else "")
+            measured.append(f'{lb.name} = {f.parent}."{f.name}"{host} ({ev.get("common")} values in common)')
     if measured:
         out.append("  labels with the same values as index fields (join jobs and metrics on them): "
                    + ", ".join(measured[:12]) + (f" and {len(measured) - 12} more" if len(measured) > 12 else "")
@@ -476,7 +540,18 @@ def describe(topic: str | None = None, name: str | None = None) -> str | None:
         known = db.session.query(KObject.id).filter(
             KObject.source_id.in_([s.id for s, _d in sources]), KObject.kind.in_(("index", "metric")),
             KObject.name == name, KObject.gone_at.is_(None)).first()
-        if known is None:
+        host = None
+        if known is None:                       # another name of a table: an alias on it, or on a part of it (0.9.5)
+            from supagent.knowledge.containers import other_names
+
+            host = next((o for o in db.session.query(KObject).filter(
+                KObject.source_id.in_([s.id for s, _d in sources]), KObject.kind == "index", KObject.gone_at.is_(None))
+                if name in other_names(o.stats or {})), None)
+        if host is not None:
+            out.append(f"({name!r} is not a table of its own: it reads the documents of {host.name!r}, or a part of "
+                       f"them; below: {host.name!r})")
+            name = host.name
+        elif known is None:
             out.append(f"(there is no index or metric named {name!r}; below: what matches the topic)")
             topic = f"{topic or ''} {name.replace('_', ' ')}"
             name = None

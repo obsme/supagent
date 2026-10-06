@@ -8,8 +8,12 @@
   --muted: #74828c;
   --line: #e1e7eb;
   --line-2: #eef2f4;
+  --field-line: #d4dce1;
+  --diff-del-bg: #fdecea; --diff-del-word: #f5b5ae; --diff-add-bg: #e6f5ec; --diff-add-word: #a6dcbb;
+  --diff-del-mark: #c62828; --diff-add-mark: #2e7d4f;
   --accent: #1f86a8;
   --accent-ink: #ffffff;
+  --accent-btn: #1f86a8;
   --accent-soft: #e3f2f7;
   --user-bubble: #e8f3f7;
   --code-bg: #f1f4f6;
@@ -29,27 +33,35 @@
   color-scheme: light;
 }
 :root[data-theme="dark"] {
-    --bg: #12181c;
-    --panel: #1a2228;
-    --ink: #e4eaee;
-    --ink-2: #b9c4cb;
-    --muted: #8a979f;
-    --line: #2c373e;
-    --line-2: #232d33;
-    --accent: #4fb3d4;
-    --accent-ink: #0d1417;
-    --accent-soft: #173440;
-    --user-bubble: #1d3440;
-    --code-bg: #111719;
-    --ok: #6cc28f;
-    --warn: #e0a84a;
-    --bad: #f08a80;
+    /* Superset 6.1's night look (its dark theme: Ant Design's dark algorithm on a black base, measured on its own
+       pages): a black page, panels and the top bar #141414, table heads #1d1d1d, borders #303030 (fields #424242),
+       text white at 85 / 65 % as solid colors on black (muted 55 %: Superset's 45 % is too faint for small text on
+       #141414), links #2893b3, buttons #25809b */
+    --bg: #000000;
+    --panel: #141414;
+    --ink: #d9d9d9;
+    --ink-2: #a6a6a6;
+    --muted: #8c8c8c;
+    --line: #303030;
+    --line-2: #1d1d1d;
+    --field-line: #424242;
+    --diff-del-bg: #3a1613; --diff-del-word: #7a2a22; --diff-add-bg: #10301e; --diff-add-word: #1f6b40;
+    --diff-del-mark: #f0697a; --diff-add-mark: #5ac189;
+    --accent: #2893b3;
+    --accent-ink: #ffffff;
+    --accent-btn: #25809b;
+    --accent-soft: #15333c;
+    --user-bubble: #13262c;
+    --code-bg: #0a0a0a;
+    --ok: #5ac189;
+    --warn: #fcc700;
+    --bad: #f0697a;
     --llm: #b99ae6;
-    --llm-soft: #2a2238;
+    --llm-soft: #251f2e;
     --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
     --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
-    --grid: #26313a;
-    --axis: #3a4750;
+    --grid: #262626;
+    --axis: #424242;
     color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -79,11 +91,11 @@ h2 { font-size: 16px; margin: 0 0 6px; }
 .btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 6px; cursor: pointer; text-decoration: none;
   border: 1px solid var(--line); background: var(--panel); color: var(--ink); font: inherit; }
 .btn:hover { border-color: var(--accent); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.btn.primary { background: var(--accent-btn); border-color: var(--accent-btn); color: var(--accent-ink); font-weight: 600; }
 .btn:disabled { opacity: .55; cursor: default; }
 .btn.wide { width: 100%; justify-content: center; }
 .btn.small { padding: 3px 9px; font-size: 12px; }
-input, select, textarea { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+input, select, textarea { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--field-line);
   border-radius: 6px; padding: 7px 9px; max-width: 100%; }
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
 textarea { resize: vertical; }
@@ -129,10 +141,21 @@ details.query pre.err { color: var(--bad); }
 .msg.assistant.error .bubble { border-color: var(--bad); }
 .answer > :first-child { margin-top: 0; }
 .answer > :last-child { margin-bottom: 0; }
-.answer table { border-collapse: collapse; margin: 8px 0; font-variant-numeric: tabular-nums; display: block;
-  overflow-x: auto; max-width: 100%; }
-.answer th, .answer td { border: 1px solid var(--line); padding: 4px 9px; text-align: left; }
-.answer th { background: var(--line-2); }
+/* a table of an answer: its own box scrolls sideways (common.js fitTables); cells break between words only, never
+   inside one (the bubble's overflow-wrap: anywhere squeezed wide tables letter by letter), numbers on one line */
+.answer .tbl { overflow-x: auto; max-width: 100%; margin: 8px 0; }
+.answer table { border-collapse: separate; border-spacing: 0; font-variant-numeric: tabular-nums; }
+.answer > table { display: block; overflow-x: auto; max-width: 100%; margin: 8px 0; }   /* before fitTables runs */
+.answer th, .answer td { border: 1px solid var(--line); border-width: 0 1px 1px 0; padding: 4px 9px; text-align: left;
+  vertical-align: top; overflow-wrap: normal; word-break: normal; }
+.answer tr > :first-child { border-left-width: 1px; }
+.answer thead tr:first-child > *, .answer table > tr:first-child > *, .answer tbody:first-child tr:first-child > * {
+  border-top-width: 1px; }
+.answer th { background: var(--line-2); font-weight: 600; min-width: 3.5em; }
+.answer td { background: var(--panel); max-width: 34em; }
+.answer .num { white-space: nowrap; text-align: right; }
+.answer .tbl tr > :first-child { position: sticky; left: 0; z-index: 1; text-align: left; }
+.msg.assistant:has(.tbl) { max-width: min(1400px, 100%); }
 .answer pre { white-space: pre; line-height: 1.35; }
 .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; color: var(--muted); font-size: 12px; }
 .fb { border: 1px solid var(--line); background: var(--panel); color: var(--muted); border-radius: 6px; padding: 2px 8px;
@@ -141,7 +164,7 @@ details.query pre.err { color: var(--bad); }
 .fb-wrap { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .fb-why { display: inline-flex; gap: 6px; flex: 1 1 260px; min-width: 0; }
 .fb-why[hidden] { display: none; }
-.fb-why input { flex: 1; min-width: 0; padding: 3px 8px; border: 1px solid var(--line); border-radius: 6px;
+.fb-why input { flex: 1; min-width: 0; padding: 3px 8px; border: 1px solid var(--field-line); border-radius: 6px;
   background: var(--panel); color: var(--ink); font: inherit; font-size: 12.5px; }
 .fb-said { font-size: 12.5px; overflow-wrap: anywhere; }
 details.steps { margin-top: 8px; font-size: 12.5px; }
@@ -161,9 +184,15 @@ details.steps summary { cursor: pointer; color: var(--ink-2); }
 .files img { max-width: 100%; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
 .files a.file { display: inline-flex; gap: 8px; align-items: center; padding: 6px 10px; border: 1px solid var(--line);
   border-radius: 6px; text-decoration: none; width: fit-content; }
-.composer { display: flex; gap: 8px; align-items: flex-end; padding: 12px 16px 16px; border-top: 1px solid var(--line);
-  background: var(--panel); }
-.composer textarea { flex: 1; min-height: 44px; max-height: 40vh; }
+.composer { position: relative; display: flex; gap: 8px; align-items: flex-end; padding: 12px 16px 16px;
+  border-top: 1px solid var(--line); background: var(--panel); }
+.composer textarea { flex: 1; min-height: 44px; max-height: 70vh; resize: none; }
+/* the question box is resized from its top edge (it sits at the bottom of the page: dragging up makes it taller) */
+.composer-grip { position: absolute; left: 0; right: 0; top: -5px; height: 10px; cursor: ns-resize; z-index: 2;
+  display: flex; align-items: center; justify-content: center; touch-action: none; }
+.composer-grip span { width: 44px; height: 4px; border-radius: 2px; background: var(--line); transition: background .15s; }
+.composer-grip:hover span, .composer-grip:focus-visible span, .composer-grip.dragging span { background: var(--accent); }
+.composer-grip:focus-visible { outline: none; }
 .welcome { max-width: 680px; margin: 8vh auto 0; text-align: center; }
 .welcome p { color: var(--ink-2); }
 .suggestions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 16px; }
@@ -399,7 +428,7 @@ textarea.context-edit { width: 100%; font-family: var(--mono, monospace); font-s
 .usage-range { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
 .usage-range label { display: grid; gap: 3px; font-size: 12px; color: var(--muted); }
 .usage-range label[hidden] { display: none; }
-.usage-range select, .usage-range input { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px;
+.usage-range select, .usage-range input { padding: 5px 8px; border: 1px solid var(--field-line); border-radius: 6px;
   background: var(--panel); color: var(--ink); font: inherit; font-size: 13px; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
 .tile { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px;
@@ -740,6 +769,13 @@ button.map-cat.off i { opacity: .35; }
 .map-link-long p { margin-top: 4px; }
 .link-explain input, .link-explain textarea { width: 100%; }
 .map-edge.on { stroke: var(--accent); stroke-width: 2.5; }
+/* 0.9.6: "is part of" is a link like the others, drawn thin and grey (the structure), the others in the accent */
+.map-link.map-part.on .map-part-line, .map-link.map-part:hover .map-part-line { stroke: var(--accent); stroke-width: 2.5; }
+.map-link.map-edge-new .map-part-line { stroke: var(--accent); stroke-width: 2.6; }
+.map-link-dir { margin: 2px 0 6px; }
+.map-drop-note { border-left: 3px solid var(--warn, #b7791f); padding: 4px 8px; margin: 6px 0; }
+.map-links li { margin: 2px 0; }
+.map-links .badge { margin-right: 4px; }
 .map-fold rect:first-child { stroke-dasharray: 2 3; }
 .map-none { cursor: pointer; }
 .map-none:focus { outline: none; }
@@ -770,3 +806,90 @@ details.plan li.dropped .title { text-decoration: line-through; }
 details.plan li.in_progress .title { font-weight: 600; }
 details.plan .note { color: var(--ink-2); }
 details.plan pre { white-space: pre-wrap; margin: 4px 0 0; }
+
+/* how the question was understood (0.9.6), above the answer; a knowledge search's items, readable */
+.understood { font-size: 12.5px; color: var(--ink-2); border-left: 3px solid var(--accent-soft); padding: 4px 10px;
+  margin: 0 0 10px; display: grid; gap: 2px; }
+.understood .lbl { color: var(--muted); }
+.understood ul { margin: 2px 0 0; padding-left: 18px; }
+.step .found-q, .step .found-none { font-size: 12.5px; color: var(--ink-2); margin: 4px 0; }
+.step ul.found { margin: 4px 0 6px; padding-left: 18px; font-size: 12.5px; }
+.step ul.found .badge { margin-right: 4px; }
+
+/* a Context page's proposed change in To review (0.9.6) */
+.ctx-diff-h { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.ctx-diff { margin: 2px 0 4px; padding-left: 18px; font-size: 12.5px; }
+.ctx-diff.add li { color: var(--ok); }
+.ctx-diff.drop li { color: var(--bad); }
+.ctx-diff.left li { color: var(--warn); }
+.ctx-full pre { white-space: pre-wrap; max-height: 320px; overflow: auto; font-size: 12px; }
+.ctx-editor { display: grid; gap: 6px; margin-top: 8px; }
+.ctx-editor .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* a page's two versions, side by side (0.9.6): red where the old goes, green where the new comes */
+.diff { display: grid; gap: 6px; margin: 8px 0; }
+.diff-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.diff-sum { font-size: 12.5px; color: var(--ink-2); }
+.diff-n { font-weight: 600; font-variant-numeric: tabular-nums; }
+.diff-n.add { color: var(--diff-add-mark); }
+.diff-n.del { color: var(--diff-del-mark); }
+.diff-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; max-height: 520px; overflow-y: auto; }
+.diff-table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
+.diff-table.split { table-layout: fixed; }
+.diff-table th { position: sticky; top: 0; background: var(--line-2); color: var(--ink-2); font-family: var(--font);
+  font-size: 12px; font-weight: 600; text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); z-index: 1; }
+.diff-table td { padding: 1px 8px; vertical-align: top; white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff-table td.ln, .diff-table th.ln { width: 3.2em; text-align: right; color: var(--muted); user-select: none;
+  font-variant-numeric: tabular-nums; padding-right: 6px; }
+.diff-table td.sign { width: 1.4em; text-align: center; user-select: none; font-weight: 700; }
+.diff-table.split td.code.old { border-right: 1px solid var(--line); }
+.diff-table td.gone { background: var(--diff-del-bg); }
+.diff-table td.come { background: var(--diff-add-bg); }
+.diff-table tr.d-del td.sign { color: var(--diff-del-mark); background: var(--diff-del-bg); }
+.diff-table tr.d-add td.sign { color: var(--diff-add-mark); background: var(--diff-add-bg); }
+.diff-table tr.d-del td.ln, .diff-table tr.d-add td.ln { color: var(--ink-2); }
+.diff-table.split tr.d-del td.code.new, .diff-table.split tr.d-add td.code.old { background: var(--line-2); }
+.diff-table .w-del { background: var(--diff-del-word); border-radius: 2px; text-decoration: line-through;
+  text-decoration-color: var(--diff-del-mark); }
+.diff-table .w-add { background: var(--diff-add-word); border-radius: 2px; }
+.diff-table tr.d-same td.code { color: var(--ink-2); }
+.diff-table tr.d-fold td { text-align: center; background: var(--line-2); padding: 2px; }
+
+/* what a Helpful answer keeps (0.9.6) */
+.recipe-summary { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); }
+.recipe-summary .rs-title { font-weight: 600; }
+.recipe-summary .rs-desc { color: var(--ink-2); }
+.recipe-summary ol, .recipe-summary ul { margin: 2px 0; padding-left: 20px; }
+.recipe-summary ul.rs-tasks li::marker { content: "\2713  "; color: var(--ok); }
+.recipe-edit .recipe-title { width: 100%; font-weight: 600; }
+.recipe-edit .recipe-desc, .recipe-edit .recipe-how, .recipe-edit .recipe-tasks { width: 100%; }
+.muted.small, .rtext.small { font-size: 12.5px; }
+
+/* the Context as a book (0.9.6): chapters and numbers in the reader's contents, related pages under a page */
+.toc-chapter { font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+  margin: 8px 0 2px 4px; }
+.toc-num { color: var(--muted); font-variant-numeric: tabular-nums; margin-right: 6px; min-width: 2.2em;
+  display: inline-block; }
+.ctx-related { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; margin: 14px 0 6px;
+  padding-top: 10px; border-top: 1px solid var(--line); font-size: 13px; }
+.toc-item .toc-title { flex: 1; min-width: 0; text-align: left; }
+.toc-item .toc-num { flex: none; }
+/* 0.9.6: a big category's parts by what they belong to (a group, folded until opened) and the parts past a page */
+.map-node.map-group-box > rect:first-of-type { stroke-dasharray: 4 3; }
+.map-node.map-group-box.open > rect:first-of-type { stroke-dasharray: none; }
+.map-node.map-more text { font-style: italic; }
+.map-edit input[type=text], .map-edit textarea { width: 100%; box-sizing: border-box; }
+/* 0.9.6: the links of a part (the map's panel, Categories → Links…) */
+.links-box { margin-top: 6px; }
+.links-list { list-style: none; margin: 4px 0; padding: 0; }
+.links-list .link-item { padding: 4px 0; border-bottom: 1px solid var(--line); }
+.links-list .link-item.proposed { opacity: .8; }
+.links-list .link-dir { display: inline-block; width: 1.2em; text-align: center; color: var(--accent); font-weight: 700; }
+.links-list .link-work { margin: 2px 0 0 1.4em; font-size: 12px; }
+.links-list .actions { margin: 2px 0 0 1.4em; }
+.link-form { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
+.link-form input[type=text], .link-form textarea { width: 100%; box-sizing: border-box; }
+/* one kind of relation (0.9.6): every link light until hovered or chosen */
+.map-link .map-link-line { stroke-opacity: .5; }
+.map-link:hover .map-link-line, .map-link.on .map-link-line, .map-link:focus .map-link-line { stroke-opacity: 1; }

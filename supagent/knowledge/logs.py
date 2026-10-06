@@ -372,6 +372,38 @@ def line(key: str, p: dict[str, Any], j: dict[str, Any], fields: list[str], refs
 
 
 OFF = ("new", "above usual", "rare", "numbers above usual")
+# a name of the system in a pattern's text (a site, a pool, a host, a resource: SITE1, POOL_A, CPU), not a word of it
+PART_WORD = re.compile(r"(?<![<\w'])(?=[A-Za-z0-9_.-]*(?:\d|[A-Z]{2}|_))[A-Za-z][A-Za-z0-9_.-]*[A-Za-z0-9](?![\w>'])")
+LEVEL_WORDS = {"WARN", "WARNING", "ERROR", "INFO", "DEBUG", "FATAL", "CRITICAL", "OK", "ID", "MS", "NS", "US", "KB", "MB",
+               "GB", "TB", "KIB", "MIB", "GIB", "UTC", "HTTP", "HTTPS", "URL", "API", "JSON", "SQL"}   # units, formats
+
+
+def shared_part(texts: list[str]) -> tuple[int, int, list[str], list[str]] | None:
+    """Two patterns that name different parts and share another (two services slow "from SITE1", two steps "waiting
+    for a CPU"): (i, j, the shared names, the names that differ), the first such pair; None otherwise. What two
+    different targets have in common, seen from the same place, is a cause of both that neither target is."""
+    names = [{w for w in PART_WORD.findall(t) if w.upper() not in LEVEL_WORDS} for t in texts]
+    for i in range(len(texts)):
+        for j in range(i + 1, len(texts)):
+            both, apart = names[i] & names[j], names[i] ^ names[j]
+            if both and apart:
+                return i, j, sorted(both), sorted(apart)
+    return None
+
+
+
+def shared_note(off: list[tuple[str, dict[str, Any], dict[str, Any]]]) -> str:
+    """Two different parts seen from one place: two patterns that share a part's name and name another each ("request
+    to CACHE_A from SITE1", "request to DB_B from SITE1"). What they have in common can explain both; one target
+    alone does not. (One pattern whose name slot holds several parts is left alone: on the stored investigations it
+    fired on jobs killed by the OOM killer and on jobs waiting for their inputs, where it says nothing new.)"""
+    common = shared_part([said(k, p) for k, p, _j in off])
+    if not common:
+        return ""
+    i, j, both, apart = common
+    return (f" ({i + 1}) and ({j + 1}) both name {', '.join(both)} while each names another part ({', '.join(apart[:4])}): "
+            f"what they share ({', '.join(both)}: the place, the network or the resource they have in common) can explain "
+            f"both, which neither {apart[0]} nor {apart[-1]} alone does.")
 
 
 def survey(found: dict[str, dict[str, Any]], days: int, fields: list[str], dates: list[str] | None = None,
@@ -403,6 +435,7 @@ def survey(found: dict[str, dict[str, Any]], days: int, fields: list[str], dates
             f"({i + 1}) {line(k, p, j, fields, refs)}." for i, (k, p, j) in enumerate(off[:SHOWN]))
         if len(off) > SHOWN:
             text += f" And {len(off) - SHOWN} more of fewer lines."
+        text += shared_note(off[:SHOWN])
     else:
         text = "Nothing new in the logs: every pattern of the window is there on the earlier days as much."
     if gone:

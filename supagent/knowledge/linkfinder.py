@@ -124,7 +124,7 @@ def _lines(t: dict[str, Any], days: int, per_day: int, budget: "Budget") -> list
     if database is None:
         return []
     owners = list(t["owners"])
-    msg, tf, table = G.name(t["message"]), G.name(t["time"]), G.name(t["table"])
+    msg, tf, table = G.name(t["message"]), G.name(t["time"]), G.table(t["table"])
     cols = ", ".join(f'"{G.name(c)}"' for c in owners) + f', "{msg}", "{tf}"'
     lvl = tools._level_field(t["table"])
     out: list[dict[str, Any]] = []
@@ -177,7 +177,7 @@ def _pattern_lines(t: dict[str, Any], pieces: list[str], days: int, budget: "Bud
     if database is None or not pieces:
         return []
     owners = list(t["owners"])
-    msg, tf, table = G.name(t["message"]), G.name(t["time"]), G.name(t["table"])
+    msg, tf, table = G.name(t["message"]), G.name(t["time"]), G.table(t["table"])
     cols = ", ".join(f'"{G.name(c)}"' for c in owners) + f', "{msg}"'
     out: list[dict[str, Any]] = []
     with tools._db_connection(database, extract=False) as conn:

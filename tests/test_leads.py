@@ -22,8 +22,13 @@ def elsewhere(system):  # noqa: F811
     pool = Facet(facet="pool", value="grid-b", status="approved", source="admin")
     db.session.add(pool)
     db.session.flush()
+    from conftest import part_of
+
     for n in ("srv-8", "srv-9", "srv-10"):
-        db.session.add(Facet(facet="server", value=n, status="approved", source="admin", parents=[pool.id]))
+        srv = Facet(facet="server", value=n, status="approved", source="admin")
+        db.session.add(srv)
+        db.session.flush()
+        part_of(srv, pool)
     touch()
     db.session.commit()
     return system

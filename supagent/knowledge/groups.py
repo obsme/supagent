@@ -51,6 +51,18 @@ class GroupsError(ValueError):
     pass
 
 
+TABLE = re.compile(r"^[A-Za-z0-9_@.\-*? ]{1,250}$")
+
+
+def table(name_: str) -> str:
+    """A table name as written by the model or the dictionary: an index, or a pattern over several (logs-*: a family
+    of daily indices), checked (0.9.5: patterns were refused as field names, so no comparison could read daily logs)."""
+    t = str(name_ or "").strip().strip('"').strip("`").strip()
+    if not TABLE.match(t):
+        raise GroupsError(f"not a table name: {name_!r}")
+    return t
+
+
 def name(field: str) -> str:
     """A field name as written by the model (quotes around it or not), checked."""
     f = str(field or "").strip().strip('"').strip("`").strip()

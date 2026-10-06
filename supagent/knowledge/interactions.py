@@ -168,14 +168,51 @@ def apply(found: list[dict[str, Any]], text: str, g: dict[str, Any], origin: str
     return n
 
 
+EVIDENCE = re.compile(r'^"(.+)" \((.+)\)$', re.S)
+
+
+def stale() -> int:
+    """(0.9.6) The interactions read in a text whose sentence is no longer in it, or whose text is gone: their
+    removal is proposed (they stay in use until someone who may remove links decides). Counted."""
+    from supagent.models import Link
+
+    texts: dict[str, list[str]] = {}
+    for it in items():
+        texts.setdefault(it["title"][:80] or it["ref"], []).append(_norm(it["text"]))
+    n = 0
+    now = dt.datetime.utcnow()
+    for x in db.session.query(Link).filter(Link.source == "llm", Link.status == "approved", Link.proposed_drop.is_(None),
+                                           Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%")):
+        m = EVIDENCE.match((x.evidence or "").strip())
+        if not m:
+            continue
+        quote, origin = _norm(m.group(1)), m.group(2)
+        here = texts.get(origin)
+        if here is None:
+            x.proposed_drop = f"the text it was read from is gone ({origin[:120]})"
+        elif not any(quote in t for t in here):
+            x.proposed_drop = f"the sentence it was read from is no longer in {origin[:120]}: \"{m.group(1)[:200]}\""
+        else:
+            continue
+        x.proposed_drop_at = now
+        n += 1
+    db.session.flush()
+    return n
+
+
 def run(llm: Any, seconds: float = 600.0, limit: int = 50, again: bool = False) -> dict[str, Any]:
-    """The texts not read yet, until `seconds` or `limit`; the next run continues."""
+    """The texts not read yet, until `seconds` or `limit`; the next run continues. First, the interactions whose
+    sentence or text is gone are proposed for removal (stale)."""
     from supagent.knowledge.brief import _graph, named
     from supagent.knowledge.stopping import check
     from supagent.models import Classified
 
     t0 = time.time()
     out: dict[str, Any] = {"texts": 0, "calls": 0, "proposed": 0}
+    gone = stale()
+    if gone:
+        out["removal_proposed"] = gone
+    db.session.commit()
     g = _graph()
     if len(g["values"]) < 2:
         return out
@@ -247,7 +284,7 @@ def unexplained(limit: int = 200) -> list[Any]:
     empty is written), the approved ones first."""
     from supagent.models import Link
 
-    q = (db.session.query(Link).filter(Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%"),
+    q = (db.session.query(Link).filter(Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%"), Link.kind != "part_of",
                                        Link.status.in_(("approved", "proposed")),
                                        (Link.note.is_(None)) | (Link.detail.is_(None)))
          .order_by((Link.status == "approved").desc(), Link.id))

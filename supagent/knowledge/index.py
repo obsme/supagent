@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import logging
+import re
 from typing import Any, Iterator
 
 from superset import db
@@ -34,7 +35,8 @@ def _hash(*parts: Any) -> str:
 
 
 def split_text(text: str, size: int = PART_CHARS, overlap: int = OVERLAP) -> list[str]:
-    """Parts of about `size` characters, cut at paragraph or sentence ends, overlapping a little."""
+    """Parts of about `size` characters, cut at paragraph or sentence ends, overlapping a little (from a word's
+    start)."""
     text = (text or "").strip()
     if len(text) <= size:
         return [text] if text else []
@@ -48,8 +50,85 @@ def split_text(text: str, size: int = PART_CHARS, overlap: int = OVERLAP) -> lis
         parts.append(text[start:end].strip())
         if end >= len(text):
             break
-        start = max(end - overlap, start + 1)
+        nxt = max(end - overlap, start + 1)
+        space = text.find(" ", nxt, end)
+        start = space + 1 if space >= 0 else nxt
     return [p for p in parts if p]
+
+
+HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+HEADING_ATTRS = re.compile(r"\s*\{[:#][^}]*\}\s*$")     # {: .label} {#an-id} after a heading (kramdown, Pandoc)
+FENCE = re.compile(r"^[ \t]*(```|~~~)")
+SHORT_SECTION = 300      # a section shorter than this (a heading and a line) goes with the next one
+PACK_SIBLINGS = True     # the sections that follow (siblings too) go together while they fit
+SECTION_CHARS = 2000     # a section and the ones after it together, up to this (2,000 rather than 1,500: 26%
+#                          fewer pieces, words scattered over a section found better, topics the same)
+
+
+def sections(text: str) -> list[tuple[list[str], str]]:
+    """The sections of a Markdown text, in order: (the headings above it, the outermost first, its own last; its text
+    from its heading line). A text with no heading is one section under none. A heading inside a code block is not
+    one."""
+    out: list[tuple[list[str], str]] = []
+    path: list[tuple[int, str]] = []
+    here: list[str] = []
+    lines: list[str] = []
+    fence = None
+    for line in (text or "").split("\n"):
+        m = None
+        f = FENCE.match(line)
+        if f:
+            fence = None if fence == f.group(1) else (fence or f.group(1))
+        elif fence is None:
+            m = HEADING.match(line)
+        if m:
+            if "".join(lines).strip():
+                out.append((here, "\n".join(lines).strip()))
+            level, title = len(m.group(1)), HEADING_ATTRS.sub("", m.group(2)).strip()
+            path = [(lv, t) for lv, t in path if lv < level] + [(level, title)]
+            here, lines = [t for _lv, t in path], []
+        lines.append(line)
+    if "".join(lines).strip():
+        out.append((here, "\n".join(lines).strip()))
+    return out
+
+
+def split_sections(text: str, size: int | None = None, overlap: int = OVERLAP) -> list[tuple[str, str]]:
+    """Parts of a text cut at its sections (Markdown headings) first: (the headings of the part, "A \u203a B", ""
+    for none; its text). A section and the sections under it go together while they fit in `size`; a section too long
+    is cut as split_text cuts, each part under its headings; a short section (a heading and a line) goes with the
+    next one. A text with no heading: split_text's parts."""
+    size = size or SECTION_CHARS
+    secs = sections(text)
+    if len(secs) <= 1 and not (secs and secs[0][0]):
+        return [("", p) for p in split_text(text, size, overlap)]
+    out: list[tuple[str, str]] = []
+    cur: list[tuple[list[str], str]] = []
+
+    def flush() -> None:
+        if not cur:
+            return
+        head = cur[0][0]
+        others = [p[-1] for p, _t in cur[1:] if p and p[:len(head)] != head]     # a sibling taken along
+        label = " \u203a ".join(head) + ("".join(f" \u00b7 {t}" for t in others[:3]) if others else "")
+        out.append((label, "\n\n".join(t for _p, t in cur)))
+        cur.clear()
+
+    for path, body in secs:
+        if len(body) > size:
+            flush()
+            for part in split_text(body, size, overlap):
+                out.append((" \u203a ".join(path), part))
+            continue
+        if cur:
+            length = sum(len(t) + 2 for _p, t in cur)
+            head = cur[0][0]
+            under = len(path) > len(head) and path[:len(head)] == head
+            if length + len(body) > size or not (under or length < SHORT_SECTION or PACK_SIBLINGS):
+                flush()
+        cur.append((path, body))
+    flush()
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -84,6 +163,23 @@ def _object_pieces(only: set[int] | None = None) -> Iterator[dict[str, Any]]:
         # again): the text changes when the meaning does
         if st.get("time_field"):
             lines.append(f"time field {st['time_field']}")
+        if st.get("kind"):                   # logs and their shipper, spans... (0.9.5: found by what they are)
+            from supagent.knowledge.indexkinds import line as kind_line
+
+            lines.append(kind_line(st["kind"]))
+        if st.get("data_stream"):
+            lines.append("a data stream (rolled over into hidden backing indices)")
+        others = [n["name"] for n in st.get("names") or []] + [p["name"] for p in st.get("parts") or []]
+        if others:                           # its other names and the aliases on a part of it (0.9.5)
+            lines.append("also reached as: " + ", ".join(others))
+        same = sorted({m.group(1) for s in st.get("same_events") or [] for m in [re.search(r'also in "([^"]+)"', s)] if m})
+        if same:
+            lines.append("the same events as: " + ", ".join(same))
+        said = st.get("data_says") or {}
+        if said.get("increases_only"):
+            lines.append("its values only increase: it counts (its increase over a period, never its value)")
+        if said.get("goes_down"):
+            lines.append("a level, not a count (its values go up and down)")
         kid_word = "labels" if o.kind == "metric" else "fields"
         described = []
         for k in sorted(kids, key=lambda x: x.name)[:120]:
@@ -123,9 +219,9 @@ def _entry_pieces() -> Iterator[dict[str, Any]]:
                    "title": f"{term} ({e.category or 'glossary'})", "text": f"{term}: {definition}"}
         if terms:
             continue
-        for i, part in enumerate(split_text(e.content or "")):
+        for i, (where, part) in enumerate(split_sections(e.content or "")):
             yield {"ref": f"entry:{e.id}#{i}", "kind": e.classification, "database_id": database_id,
-                   "title": e.title + (f" ({e.category})" if e.category else ""), "text": part}
+                   "title": _titled(e.title, where, f" ({e.category})" if e.category else ""), "text": part}
 
 
 def _recipe_pieces() -> Iterator[dict[str, Any]]:
@@ -168,17 +264,25 @@ def _doc_pieces() -> Iterator[dict[str, Any]]:
         category = f" ({d.category})" if d.category else ""
         pages = _doc_pages(d)
         if pages is None:
-            for i, part in enumerate(split_text(d.content or "")):
-                yield {"ref": f"doc:{d.id}#{i}", "kind": "doc", "title": name + category, "text": part}
+            for i, (where, part) in enumerate(split_sections(d.content or "")):
+                yield {"ref": f"doc:{d.id}#{i}", "kind": "doc", "title": _titled(name, where, category), "text": part}
             continue
         i = 0
         for url, title, text in pages:
             named = f"{name} \u203a {title}" if title and title != name else name
-            named = named[:480 - len(category)] + category     # the piece's title column holds 512 characters
-            for part in split_text(text):
-                yield {"ref": f"doc:{d.id}#{i}", "kind": "doc", "title": named,
+            for where, part in split_sections(text):
+                yield {"ref": f"doc:{d.id}#{i}", "kind": "doc", "title": _titled(named, where, category),
                        "text": f"Source: {url}\n{part}" if url else part}
                 i += 1
+
+
+def _titled(name: str, where: str, category: str = "") -> str:
+    """A piece's title: its document (and page), the headings of its section, its category; the piece's title
+    column holds 512 characters (the section's headings cut first)."""
+    if where and where.split(" \u203a ")[0].strip().lower() == name.rsplit(" \u203a ", 1)[-1].strip().lower():
+        where = " \u203a ".join(where.split(" \u203a ")[1:])      # the page's own title as its first heading
+    full = f"{name} \u203a {where}" if where else name
+    return full[:480 - len(category)] + category
 
 
 CATALOG_COPIES = ("glossary", "rules-and-facts")       # Context pages that gather catalog entries and memories
@@ -193,8 +297,9 @@ def _context_pieces() -> Iterator[dict[str, Any]]:
             continue                                    # the catalog's own pieces are searched
         ai = p.kind == "summary" and (p.author or "agent") == "agent"
         label = "Context (AI-written overview)" if ai else "Context"
-        for i, part in enumerate(split_text(p.content or "")):
-            yield {"ref": f"context:{p.id}#{i}", "kind": "context", "title": f"{label}: {p.title}", "text": part}
+        for i, (where, part) in enumerate(split_sections(p.content or "")):
+            yield {"ref": f"context:{p.id}#{i}", "kind": "context", "title": _titled(f"{label}: {p.title}", where),
+                   "text": part}
 
 
 def _filters_text(params: dict) -> str:

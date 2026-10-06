@@ -219,3 +219,41 @@ def test_a_memory_that_applies_when_the_user_says_x_is_no_support_without_x(ctx)
     q2 = "How many NOVA jobs failed in PROD?"
     s2 = build([{"role": "user", "content": block + "\n" + q2}], [q2, block])
     assert unsaid(sql_conditions(sql), s2) == []
+
+
+def test_failing_says_an_error_flag_and_a_status_class():
+    """"How many of them failed?" counted with http_response_status_code >= 400, "the failing calls" kept with
+    tag.error = 'true': both were sent back as conditions nobody asked for (0.9.5)."""
+    from supagent.knowledge.conditions import Support, _value_said
+
+    s = Support()
+    s.add("And how many of them failed?", people=True)
+    assert _value_said(400.0, "http_response_status_code", s) and _value_said(500.0, "tag.http@status_code", s)
+    assert not _value_said(404.0, "http_response_status_code", s)          # a code of its own: to be said
+    assert not _value_said(400.0, "amount", s)                             # not a status field
+    f = Support()
+    f.add("What do the failing calls have in common?", people=True)
+    assert _value_said("true", "tag.error", f)
+    n = Support()
+    n.add("How many calls were there yesterday?", people=True)
+    assert not _value_said("true", "tag.error", n) and not _value_said(400.0, "http_response_status_code", n)
+
+
+def test_a_value_an_investigation_tool_found_supports_its_condition():
+    """records_about named the switch behind the alerts (sw-core-01): the next query filtered on it was refused as a
+    condition nobody asked for (0.9.5); what the investigation tools find is said for the next queries."""
+    from supagent.agent import FINDING_TOOLS
+    from supagent.knowledge.conditions import Support, _value_said
+
+    s = Support()
+    s.add("What was the most frequent error of the inventory service this morning?", people=True)
+    assert not _value_said("sw-core-01:%", "instance", s)
+    s.add_finding('{"tables": [{"table": "alerts", "records": 3, "latest": [{"alertname": "SwitchPortErrors", '
+                  '"labels.instance": "sw-core-01", "labels.ifName": "xe-0/0/2", "max_ms": 4997}]}]}')   # (as the loop)
+    assert _value_said("sw-core-01:%", "instance", s) and _value_said("xe-0/0/2", "ifName", s)
+    assert not _value_said(4997.0, "duration_ms", s)            # a finding's figure never makes a threshold asked
+    assert not _value_said("4997", "duration_ms", s) and 4997.0 not in s.numbers
+    t = Support()
+    t.add_finding("not json: the switch sw-core-01 had 4997 errors")
+    assert _value_said("sw-core-01", "instance", t) and not _value_said(4997.0, "errors", t)
+    assert "records_about" in FINDING_TOOLS and "describe_data" not in FINDING_TOOLS

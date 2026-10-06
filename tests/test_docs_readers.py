@@ -445,8 +445,9 @@ def test_a_bitbucket_data_center_folder_documentation_first(env, servers, monkey
              auth={"type": "bearer"}, secret=SECRET)
     out = D.refresh(d)
     assert out["status"] == "ok" and out["reader"] == "bitbucket", out
-    assert [p["title"] for p in d.pages] == ["docs/README.md", "docs/notes.txt", "docs/guide/setup.md",
-                                            "docs/jobs.sql"]          # documentation first; 4 at most
+    assert [p["title"] for p in d.pages] == ["Runbooks (docs/README.md)", "docs/notes.txt",
+                                            "Setup (docs/guide/setup.md)", "docs/jobs.sql"]
+    # documentation first; 4 at most; a Markdown file named by its first heading with its path (0.9.6)
     assert out["skipped"] == 1 and "x" * 2000 not in d.content       # the large one skipped
     raw = [r["path"] for r in s.got if "/raw/" in r["path"]]
     assert not any(p.endswith((".png", ".exe", "app.yaml")) for p in raw)   # text files only; beyond max_pages

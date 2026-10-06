@@ -34,12 +34,14 @@ ROUTER_CHARS = 500        # what the question names, for the router
 SCOPE_CHARS = 700
 ATOM = re.compile(r"[A-Za-z0-9À-ÿ_][A-Za-z0-9À-ÿ_.:/\-]*")
 OUT = {"depends_on": "depend on", "runs_on": "run on", "reads_from": "read from", "sends_to": "send data to",
-       "calls": "call", "triggers": "trigger", "monitors": "monitor", "about": "relate to"}
+       "calls": "call", "triggers": "trigger", "monitors": "monitor", "about": "relate to", "link": "are linked to"}
 ONE = {"depends_on": "depends on", "runs_on": "runs on", "reads_from": "reads from", "sends_to": "sends data to",
-       "calls": "calls", "triggers": "triggers", "monitors": "monitors", "about": "relates to"}
+       "calls": "calls", "triggers": "triggers", "monitors": "monitors", "about": "relates to", "link": "is linked to"}
 IN = {"depends_on": "needed by", "runs_on": "what runs on them", "reads_from": "read by", "sends_to": "receive data from",
-      "calls": "called by", "triggers": "triggered by", "monitors": "monitored by", "about": "related"}
-FOLLOWED = ("depends_on", "reads_from", "runs_on", "calls", "sends_to")     # what a slowdown or a delay can come from
+      "calls": "called by", "triggers": "triggered by", "monitors": "monitored by", "about": "related",
+      "link": "linked from"}
+FOLLOWED = ("depends_on", "reads_from", "runs_on", "calls", "sends_to", "link")   # what a slowdown or a delay can
+#                                       come from (0.9.6: a link a person drew is followed from its start to its end)
 USUAL_NAME = re.compile(r"^(avg|average|mean|usual|baseline|median|typical)[_ ]", re.I)
 _CACHE: dict[str, Any] = {"stamp": None, "graph": None, "fields": {}}
 _LOCK = threading.Lock()
@@ -60,9 +62,12 @@ def _graph() -> dict[str, Any]:
     values: dict[int, dict[str, Any]] = {}
     names: dict[str, list[int]] = {}
     children: dict[int, list[int]] = {}
+    from supagent.knowledge.facets import PART_OF, part_of_map
+
+    parts = part_of_map()                             # what each is part of: links of kind part_of (0.9.6)
     for f in db.session.query(Facet).filter(Facet.status == "approved", Facet.facet.in_(cats)):
         values[f.id] = {"id": f.id, "cat": f.facet, "name": f.value, "about": (f.description or "").strip(),
-                        "parents": [int(p) for p in (f.parents or []) if str(p).isdigit()]}
+                        "parents": list(parts.get(f.id, []))}
         for n in [f.value] + [str(x) for x in (f.synonyms or [])]:
             n = " ".join(n.lower().split())
             if len(n) >= 2:
@@ -74,15 +79,20 @@ def _graph() -> dict[str, Any]:
     out_links: dict[int, list[tuple[str, int, str]]] = {}
     in_links: dict[int, list[tuple[str, int, str]]] = {}
     long: dict[tuple[int, str, int], str] = {}        # what to do when following an interaction (its long explanation)
-    rows = db.session.query(Link.a_ref, Link.b_ref, Link.kind, Link.note, Link.detail).filter(
-        Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%"), Link.status == "approved")
-    for a_ref, b_ref, kind, note, detail in rows:
+    from supagent.knowledge.sysmap import generic
+
+    rows = db.session.query(Link.a_ref, Link.b_ref, Link.kind, Link.note, Link.detail, Link.both_ways).filter(
+        Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%"), Link.status == "approved", Link.kind != PART_OF)
+    for a_ref, b_ref, kind, note, detail, both in rows:
         a, b = a_ref.split(":", 1)[1], b_ref.split(":", 1)[1]
         if a.isdigit() and b.isdigit() and int(a) in values and int(b) in values:
-            out_links.setdefault(int(a), []).append((kind, int(b), (note or "").strip()))
-            in_links.setdefault(int(b), []).append((kind, int(a), (note or "").strip()))
-            if (detail or "").strip():
-                long[(int(a), kind, int(b))] = " ".join(detail.split())
+            kind = "link" if generic(kind) else kind      # a person's link: "is linked to", with what it is
+            ways = [(int(a), int(b)), (int(b), int(a))] if both else [(int(a), int(b))]
+            for x, y in ways:
+                out_links.setdefault(x, []).append((kind, y, (note or "").strip()))
+                in_links.setdefault(y, []).append((kind, x, (note or "").strip()))
+                if (detail or "").strip():
+                    long[(x, kind, y)] = " ".join(detail.split())
     g = {"values": values, "names": names, "children": children, "out": out_links, "in": in_links, "rank": cats,
          "long": long}
     with _LOCK:
@@ -133,7 +143,7 @@ def _first_sentence(text: str, chars: int = 150) -> str:
 def _fields_of(cats: list[str], names: dict[str, list[str]]) -> dict[str, list[str]]:
     """Where each category is in the data the user may query: the fields and the metric labels its values are
     read from (categories.fields), else where its named values are found among the learned values."""
-    from supagent.knowledge.facets import field_rules
+    from supagent.knowledge.facets import field_matches, field_rules
     from supagent.knowledge.resolve import _databases, value_rows
     from supagent.models import KObject, Source
 
@@ -159,7 +169,7 @@ def _fields_of(cats: list[str], names: dict[str, list[str]]) -> dict[str, list[s
                 KObject.kind.in_(("field", "label")), KObject.gone_at.is_(None), KObject.source_id.in_(list(by_source)))
             for sid, kind, parent, name in rows:
                 for cat, rx in rules:
-                    if rx.match(name or ""):
+                    if field_matches(rx, name or ""):
                         (fields if kind == "field" else labels).setdefault((cat, by_source[sid].id, name), []).append(parent or "")
             known = {}
             for (cat, dbid, name), tables in sorted(fields.items()):
@@ -443,7 +453,8 @@ def named_line(question: str) -> str:
     return text[:ROUTER_CHARS]
 
 
-INPUT_KINDS = ("depends_on", "reads_from")          # what a part takes in (and what sends data to it)
+INPUT_KINDS = ("depends_on", "reads_from", "link")  # what a part takes in (and what sends data to it); a link a person
+#                                                     drew: what it points to (both ways: both ends)
 
 
 def inputs_of(names: list[str], hops: int = 2, limit: int = 14) -> list[tuple[str, str, str]]:
@@ -472,6 +483,24 @@ def inputs_of(names: list[str], hops: int = 2, limit: int = 14) -> list[tuple[st
         if len(out) >= limit or not frontier:
             break
     return out[:limit]
+
+
+MEMBERS_MAX = 16      # a part made of more parts than this is not expanded (a subject of forty applications)
+
+
+def members(names: list[str]) -> dict[str, list[str]]:
+    """{a named part: the parts it consists of} for the named parts the system map says are made of other parts (a
+    pool's servers, a cluster's nodes), by name: what the health checks and the records of such a part are looked
+    for on too (agent.with_parts). A part with more than MEMBERS_MAX parts is left as it is (name the ones meant)."""
+    g = _graph()
+    V = g["values"]
+    out: dict[str, list[str]] = {}
+    for raw in names[:8]:
+        for i in (named(str(raw), g) or g["names"].get(" ".join(str(raw).lower().split()), []))[:1]:
+            kids = [k for k in dict.fromkeys(g["children"].get(i, [])) if k != i]
+            if kids and len(kids) <= MEMBERS_MAX:
+                out[V[i]["name"]] = [V[k]["name"] for k in kids]
+    return out
 
 
 def links_of(names: list[str]) -> dict[str, Any]:

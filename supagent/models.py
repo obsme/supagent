@@ -16,7 +16,7 @@ from superset.extensions import encrypted_field_factory
 
 from supagent.textsafe import SafeString, SafeText
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 17
 
 
 def _now() -> dt.datetime:
@@ -254,6 +254,13 @@ class Recipe(db.Model):  # type: ignore[name-defined]
     edited_by = sa.Column(SafeString(255))       # 14: an admin changed its question or its query
     edited_at = sa.Column(sa.DateTime)
     previous = sa.Column(sa.JSON)                # 14: its question and query before the last change
+    # 0.9.6: what to keep of it, written by the agent from the whole discussion (knowledge.helpful), or by a person
+    title = sa.Column(SafeString(120))
+    description = sa.Column(SafeText)
+    how = sa.Column(sa.JSON)                     # the steps, in order, each once
+    tasks = sa.Column(sa.JSON)                   # the checks to do each time
+    summary_by = sa.Column(SafeString(255))      # agent | the person who wrote it
+    summary_at = sa.Column(sa.DateTime)
 
 
 class Association(db.Model):  # type: ignore[name-defined]
@@ -302,8 +309,9 @@ class Memory(db.Model):  # type: ignore[name-defined]
 
     __tablename__ = "supagent_memory"
     id = sa.Column(sa.Integer, primary_key=True)
-    scope = sa.Column(SafeString(8), default="user")          # user | team
+    scope = sa.Column(SafeString(8), default="user")          # user | team | group (0.9.6)
     user_id = sa.Column(sa.Integer, index=True)               # the author
+    group_id = sa.Column(sa.Integer, index=True)              # scope group: the Superset group (a team)
     kind = sa.Column(SafeString(16), default="preference")     # preference | rule | fact
     text = sa.Column(SafeText, nullable=False)
     category = sa.Column(SafeString(128))
@@ -324,8 +332,9 @@ class Note(db.Model):  # type: ignore[name-defined]
 
     __tablename__ = "supagent_note"
     id = sa.Column(sa.Integer, primary_key=True)
-    scope = sa.Column(SafeString(8), default="team", index=True)     # team | user
+    scope = sa.Column(SafeString(8), default="team", index=True)     # team | user | group (0.9.6)
     user_id = sa.Column(sa.Integer, index=True)                       # the author
+    group_id = sa.Column(sa.Integer, index=True)                      # scope group: the Superset group (a team)
     title = sa.Column(SafeString(300))
     text = sa.Column(SafeText, nullable=False)
     tags = sa.Column(sa.JSON)                                         # ["pricing", "meeting"]
@@ -483,6 +492,17 @@ class ContextPage(db.Model):  # type: ignore[name-defined]
     tokens = sa.Column(sa.Integer, default=0)
     created_at = sa.Column(sa.DateTime, default=_now)
     updated_at = sa.Column(sa.DateTime, default=_now)
+    # 0.9.6: a change the agent proposes waits for a person's validation (one at a time: the next replaces it)
+    proposed_content = sa.Column(SafeText)                    # the new Markdown proposed
+    proposed_sources = sa.Column(sa.JSON)
+    proposed_kind = sa.Column(SafeString(16))
+    proposed_hash = sa.Column(SafeString(64))
+    proposed_at = sa.Column(sa.DateTime)
+    proposed_drop = sa.Column(sa.Boolean)                     # its subject is gone: removing it is proposed
+    compared = sa.Column(sa.JSON)                             # {"added", "obsolete", "left_out", "replaced"}
+    reviewed_by = sa.Column(SafeString(255))                  # who validated the content shown (None: not yet)
+    reviewed_at = sa.Column(sa.DateTime)
+    edited_by = sa.Column(SafeString(255))                    # who edited the agent's version before approving it
 
 
 class Route(db.Model):  # type: ignore[name-defined]
@@ -573,6 +593,12 @@ class Link(db.Model):  # type: ignore[name-defined]
     detail = sa.Column(SafeText)
     evidence = sa.Column(SafeText)              # 15: where it was found (the sentence of a document, with its title)
     explained_by = sa.Column(SafeString(255))   # 15: who wrote the explanations: "llm" or the admin
+    # 17: why removing it is proposed (what it was read from is gone, the data no longer shows it...): it stays in
+    # use until a person approves the removal or keeps it
+    proposed_drop = sa.Column(SafeText)
+    proposed_drop_at = sa.Column(sa.DateTime)
+    seen_at = sa.Column(sa.DateTime)            # 17: a link read from the data: when the data showed it last
+    both_ways = sa.Column(sa.Boolean)           # 17: the link goes both ways (else from a to b)
 
 
 class Classified(db.Model):  # type: ignore[name-defined]
@@ -689,6 +715,38 @@ def _link_notes_as_evidence() -> None:
     db.session.flush()
 
 
+def _parts_as_links() -> int:
+    """0.9.6: what a value was part of (Facet.parents, and the parents the LLM or the data suggested) becomes links
+    of kind part_of between the values, approved and proposed (the column is kept as it was, no longer read: an
+    older version still finds what it wrote). Counted."""
+    n = 0
+    have = {(a, b) for a, b in db.session.query(Link.a_ref, Link.b_ref).filter(Link.kind == "part_of")}
+    rows = db.session.query(Facet).filter(sa.or_(Facet.parents.isnot(None), Facet.suggested.isnot(None))).all()
+    ids = {f.id for f in db.session.query(Facet.id)}
+    for f in rows:
+        sug = f.suggested if isinstance(f.suggested, dict) else {}
+        said = sug.get("from") if isinstance(sug.get("from"), dict) else {}
+        for status, parents in (("approved", f.parents), ("proposed", sug.get("parents")),
+                                ("rejected", sug.get("declined"))):
+            for p in parents if isinstance(parents, list) else []:
+                if not str(p).isdigit() or int(p) == f.id or int(p) not in ids:
+                    continue
+                key = (f"facet:{f.id}", f"facet:{int(p)}")
+                if key in have:
+                    continue
+                have.add(key)
+                # a proposed value's parts were approved with it: proposed with it now
+                st = "proposed" if status == "approved" and f.status == "proposed" else status
+                db.session.add(Link(a_ref=key[0], b_ref=key[1], kind="part_of", status=st,
+                                    source=f.source if f.source in ("llm", "data", "admin") else "admin",
+                                    evidence=str(said.get(str(p)) or "")[:2000] or None))
+                n += 1
+        if sug.get("parents") or sug.get("declined") or sug.get("from"):
+            f.suggested = {k: v for k, v in sug.items() if k not in ("parents", "declined", "from")} or None
+    db.session.flush()
+    return n
+
+
 def create_or_upgrade() -> tuple[int, int]:
     """Create the missing tables and columns and record the schema version; (version before, after)."""
     engine = db.engine
@@ -711,6 +769,8 @@ def create_or_upgrade() -> tuple[int, int]:
         _rename_classification("note", "guide")
     if 0 < before < 15:
         _link_notes_as_evidence()
+    if 0 < before < 17:
+        _parts_as_links()
     if row is None:
         db.session.add(Meta(key="schema_version", value=str(SCHEMA_VERSION)))
     else:

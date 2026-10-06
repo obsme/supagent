@@ -4,7 +4,7 @@
 (function () {
   "use strict";
   var S = window.supagent, el = S.el, esc = S.esc;
-  var state = { page: 0, size: 50, total: 0, admin: S.isAdmin };
+  var state = { page: 0, size: 50, total: 0, admin: S.canEdit };
   var $ = function (id) { return document.getElementById(id); };
   var KIND = { metric: "metric", label: "label", family: "family", index: "index", field: "field" };
 
@@ -538,7 +538,8 @@
                                                                                              el("pre", { text: r.path })]) : null]);
         var actions = el("td", { class: "row-actions" });
         var u = r.use || {};
-        var q = el("td", {}, [el("div", { text: r.question }), el("div", { class: "use-why" + (r.demoted ? " bad" : r.rank > 0.2 ? " good" : ""),
+        var q = el("td", {}, [r.title ? el("div", { class: "rs-title", text: r.title, title: r.description || "" }) : null,
+          el("div", { class: r.title ? "muted small" : "", text: r.question }), el("div", { class: "use-why" + (r.demoted ? " bad" : r.rank > 0.2 ? " good" : ""),
           text: r.why || "" }), r.edited_by ? el("div", { class: "muted small-note", text: "edited by " + r.edited_by + ", " + S.when(r.edited_at) }) : null]);
         var tr = el("tr", { class: r.demoted ? "demoted" : "" }, [q, way,
           el("td", { class: "num", text: r.seconds !== null && r.seconds !== undefined ? S.num(r.seconds) + " s" : "" }),
@@ -563,7 +564,7 @@
             } }));
           if (r.status !== "rejected" && r.status !== "auto") actions.appendChild(el("button", { type: "button", class: "linkish", text: "Reject",
             onclick: function () { S.dict("POST", "recipes/" + r.id, { status: "rejected" }).then(function () { if (D.saved) D.saved(); recipes(); }); } }));
-          actions.appendChild(S.sureButton("Delete", function () { S.dict("DELETE", "recipes/" + r.id).then(recipes); },
+          if (S.canDelete) actions.appendChild(S.sureButton("Delete", function () { S.dict("DELETE", "recipes/" + r.id).then(recipes); },
             { ask: "Delete this learned answer?", detail: "It is no longer proposed; a new Helpful answer may teach it again. " +
               "Reject keeps it without using it." }));
         }
@@ -653,11 +654,16 @@
       var all = ctx.pages.filter(function (p) { return p.section === sec[0]; }).length;
       toc.appendChild(el("div", { class: "toc-head" }, [el("span", { text: sec[1] }),
         el("span", { class: "muted", text: q ? S.num(pages.length) + " of " + S.num(all) : S.num(all) })]));
-      var ul = el("ul", { class: "toc-list" });
+      var ul = el("ul", { class: "toc-list" }), chapter = null;
       pages.forEach(function (p) {
         var on = p.id === ctx.current;
+        if (p.chapter && p.chapter !== chapter) {        // the book's chapters (0.9.6)
+          chapter = p.chapter;
+          ul.appendChild(el("li", { class: "toc-chapter", text: p.chapter }));
+        }
         ul.appendChild(el("li", {}, [el("button", { type: "button", class: "toc-item" + (on ? " on" : ""),
           "aria-current": on ? "page" : null, onclick: function () { ctxShow(p.id); } }, [
+            p.number ? el("span", { class: "toc-num", text: p.number }) : null,
             el("span", { class: "toc-title", text: p.title }),
             p.ai ? el("span", { class: "badge llm", text: "AI", title: "AI-written" }) :
               p.author !== "agent" ? el("span", { class: "badge curated", text: "edited", title: "Edited by " + p.author }) : null])]));
@@ -676,17 +682,24 @@
     var art = $("ctx-article");
     art.innerHTML = "";
     var meta = [p.section === "functional" ? "Functional" : "Technical", p.author !== "agent" ? "edited by " + p.author : null,
+                p.author === "agent" && p.edited_by ? "edited by " + p.edited_by + " before approving" : null,
                 "updated " + S.when(p.updated_at), "version " + p.version].filter(Boolean).join(" · ");
     art.appendChild(el("header", { class: "ctx-head" }, [
-      el("h2", { id: "ctx-title", text: p.title }),
+      el("h2", { id: "ctx-title", text: (p.number ? p.number + " " : "") + p.title }),
       el("div", { class: "ctx-meta" }, [p.ai ? el("span", { class: "badge llm", text: "AI-written",
         title: "Written by the LLM from the sources below: check before relying on it" }) : null,
+        p.waiting ? el("span", { class: "badge warn", text: p.waiting === "remove" ? "removal proposed" : "a change waits",
+          title: "The agent proposes " + (p.waiting === "remove" ? "to remove this page" : "a new version of this page") +
+                 ": Knowledge, To review. This page stays as it is until someone approves." }) : null,
+        !p.reviewed_by && p.author === "agent" ? el("span", { class: "badge", text: "not reviewed",
+          title: "Nobody has read this page yet (Knowledge, To review)" }) : null,
         el("span", { class: "muted", text: (p.ai ? " " : "") + meta }),
         el("span", { class: "grow" }),
         el("span", { class: "export-label", text: "This page:" }),
         el("a", { class: "btn small", href: ctxExport("docx", p.id), text: "Word" }),
         el("a", { class: "btn small", href: ctxExport("pdf", p.id), text: "PDF" })])]));
     var body = el("div", { class: "answer context-page", html: p.html || "" });   // Markdown made safe on the server
+    S.fitTables(body);
     var first = body.firstElementChild;                  // its first heading only repeats the page's title: left out
     if (first && /^H[1-3]$/.test(first.tagName) && first.textContent.trim().toLowerCase() === (p.title || "").trim().toLowerCase()) {
       first.remove();
@@ -696,6 +709,15 @@
       art.appendChild(el("details", { class: "ctx-sources" }, [el("summary", { text: "Written from " + p.sources.length + " source" +
         (p.sources.length === 1 ? "" : "s") }), el("ol", {}, p.sources.map(function (x) {
           return el("li", { text: x.title + " (" + x.ref + ")" }); }))]));
+    }
+    var near = (p.related || []).map(function (rid) { return ctx.pages.filter(function (x) { return x.id === rid; })[0]; })
+      .filter(Boolean);
+    if (near.length) {                                  // the pages related to this one, to read next (0.9.6)
+      art.appendChild(el("nav", { class: "ctx-related", "aria-label": "Related pages" }, [el("span", { class: "muted", text: "Related pages: " })]
+        .concat(near.map(function (x) {
+          return el("button", { type: "button", class: "linkish", text: (x.number ? x.number + " " : "") + x.title,
+                                onclick: function () { ctxShow(x.id); } });
+        }))));
     }
     if (state.admin) {
       var area = el("textarea", { class: "context-edit", rows: "16", "aria-label": "The page (Markdown)" });
@@ -772,8 +794,9 @@
       found.rows = d.results || [];
       found.total = found.rows.length;
       found.page = 0;
-      $("k-count").textContent = d.error ? d.error : !found.total ? "Nothing found." :
-        S.num(found.total) + (found.total === 1 ? " result" : " results") + (d.capped ? " (the " + S.num(found.total) + " best)" : "");
+      $("k-count").textContent = (d.error ? d.error : !found.total ? "Nothing found." :
+        S.num(found.total) + (found.total === 1 ? " result" : " results") + (d.capped ? " (the " + S.num(found.total) + " best)" : "")) +
+        S.readAs(d.read);
       foundPage();
     });
   });

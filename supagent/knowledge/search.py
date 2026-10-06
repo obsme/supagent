@@ -31,7 +31,7 @@ def _allowed_query(kinds: tuple[str, ...] | None = None) -> Any:
 
     from supagent.knowledge.context import visible_pages
     from supagent.knowledge.curated import sources_of_user
-    from supagent.security import visible_databases
+    from supagent.security import group_scopes, visible_databases
 
     user_id = getattr(getattr(g, "user", None), "id", None)
     sources = [s.id for s in sources_of_user()] or [-1]
@@ -39,7 +39,8 @@ def _allowed_query(kinds: tuple[str, ...] | None = None) -> Any:
     q = (db.session.query(Chunk)
          .filter(or_(Chunk.source_id.is_(None), Chunk.source_id.in_(sources)))
          .filter(or_(Chunk.database_id.is_(None), Chunk.database_id.in_(dbs)))
-         .filter(or_(Chunk.scope == "team", and_(Chunk.scope == "user", Chunk.user_id == user_id))))
+         .filter(or_(Chunk.scope == "team", and_(Chunk.scope == "user", Chunk.user_id == user_id),
+                     Chunk.scope.in_(group_scopes() or ["-"]))))     # a group's notes: its members'
     pages = [p.id for p in visible_pages()]                # a Context page: every database of it readable
     q = q.filter(or_(Chunk.kind != "context", *[Chunk.ref.like(f"context:{i}#%") for i in pages]))
     if kinds:
@@ -145,18 +146,79 @@ def item(ref: str) -> dict[str, Any] | None:
             "link": link_of(ref)}
 
 
+PER_PAGE = 2            # pieces of one page among a search's results at most: the room goes to other pages (on 2,300
+                        # documentation pages, the right page among the ten first: 87 out of 100 instead of 86)
+SOURCE_LINE = re.compile(r"^Source: (\S+)")
+EXCERPT_CHARS = 1200    # of a piece given to the agent: the part of it the query's words are in
+
+
+def page_of(ref: str, text: str | None) -> str:
+    """The page a piece is part of: a document's page (its address, the first line of each of its pieces), else the
+    item (an entry, a Context page, a metric...)."""
+    base = (ref or "").split("#", 1)[0]
+    m = SOURCE_LINE.match(text or "") if base.startswith("doc:") else None
+    return f"{base} {m.group(1)}" if m else base
+
+
+def capped(found: list[dict[str, Any]], k: int, per: int = PER_PAGE) -> list[dict[str, Any]]:
+    """The first k pieces, at most `per` of one page."""
+    out: list[dict[str, Any]] = []
+    seen: dict[str, int] = {}
+    for f in found:
+        key = page_of(f.get("ref") or "", f.get("text"))
+        if seen.get(key, 0) >= per:
+            continue
+        seen[key] = seen.get(key, 0) + 1
+        out.append(f)
+        if len(out) >= k:
+            break
+    return out
+
+
+def excerpt(text: str, query: str, size: int = EXCERPT_CHARS) -> str:
+    """The part of a piece (`size` characters) that holds the most of the query's words, from a line or a sentence
+    start; the piece's address (its "Source:" line) kept in front; "…" where it is cut."""
+    from supagent.knowledge.pgstore import words
+
+    text = text or ""
+    if len(text) <= size:
+        return text
+    head = ""
+    m = SOURCE_LINE.match(text)
+    if m:
+        head, text = text[:m.end()] + "\n", text[m.end():].lstrip("\n")
+        size = max(200, size - len(head))
+        if len(text) <= size:
+            return head + text
+    wanted = set(words(query))
+    starts = [0] + [i + 1 for i, ch in enumerate(text) if ch == "\n" or (ch == " " and i and text[i - 1] in ".:;")]
+    found = [(mm.start(), w) for mm in re.finditer(r"[A-Za-z0-9_]+", text) for w in words(mm.group(0)) if w in wanted]
+    best, best_at = -1, 0
+    for at in starts:
+        if at > len(text) - size // 2 and best >= 0:
+            break
+        got = len({w for pos, w in found if at <= pos < at + size})
+        if got > best or (got == best and got > 0):    # the same words from a later start: they open the part
+            best, best_at = got, at
+    part = text[best_at:best_at + size]
+    if best_at + size < len(text):
+        cut = max(part.rfind("\n"), part.rfind(". "))
+        part = part[:cut + 1] if cut > size // 2 else part
+    return head + ("\u2026" if best_at else "") + part.strip() + ("\u2026" if best_at + len(part) < len(text) else "")
+
+
 def search(query: str, k: int | None = None, kinds: tuple[str, ...] | None = None,
            lower: dict[str, int] | None = None, skip: tuple[str, ...] = (), rerank: bool = True) -> list[dict[str, Any]]:
-    """The pieces for a query, best first. `lower`: kinds counted as found that many places lower
-    (default: the Context, CONTEXT_PLACES); `skip`: kinds left out; `rerank`: the reranker orders the first
-    ones again (rerank.url; the router, which must be quick, does without)."""
+    """The pieces for a query, best first, at most PER_PAGE of one page. `lower`: kinds counted as found that many
+    places lower (default: the Context, CONTEXT_PLACES); `skip`: kinds left out; `rerank`: the reranker orders the
+    first ones again (rerank.url; the router, which must be quick, does without)."""
     from supagent.knowledge import rerank as R
 
     k = int(k or settings.get("search.top_k"))
     if not (rerank and R.enabled()):
-        return _search(query, k, kinds, lower, skip)
-    depth = max(k, int(settings.get("rerank.depth") or 40))
-    return R.rerank(query, _search(query, depth, kinds, lower, skip), k)
+        return capped(_search(query, k * 3, kinds, lower, skip), k)
+    depth = max(k * 3, int(settings.get("rerank.depth") or 40))
+    return capped(R.rerank(query, _search(query, depth, kinds, lower, skip), depth), k)
 
 
 def _search(query: str, k: int, kinds: tuple[str, ...] | None, lower: dict[str, int] | None,
@@ -164,16 +226,19 @@ def _search(query: str, k: int, kinds: tuple[str, ...] | None, lower: dict[str, 
     from supagent.knowledge import embeddings as E, pgstore
 
     lower = {"context": CONTEXT_PLACES} if lower is None else lower
+    from supagent.knowledge.spelling import correct
+
+    words_query = correct(query)["query"]          # a misspelled word read as the knowledge spells it (0.9.6)
     if pgstore.active():                          # the knowledge store (0.6): BM25, near spellings, pgvector
         try:
-            return pgstore.search(query, k, kinds=kinds, lower=lower, skip=skip, n=n)
+            return pgstore.search(query, k, kinds=kinds, lower=lower, skip=skip, n=n, words_query=words_query)
         except Exception as ex:  # pylint: disable=broad-except   (the search of 0.5 answers)
             log.warning("supagent search: the store failed, searched without it: %s", str(ex)[:300])
     q = _allowed_query(kinds)
     if skip:
         q = q.filter(Chunk.kind.notin_(list(skip)))
     found: list[tuple[int, int, str]] = []                # (chunk, rank, list)
-    by_words = _lexical(q, _terms(query), max(50, int(n or 50)))
+    by_words = _lexical(q, _terms(words_query), max(50, int(n or 50)))
     found += [(cid, rank, "words") for rank, cid in enumerate(by_words)]
     by_meaning: set[int] = set()
     if E.enabled():
@@ -249,9 +314,9 @@ def knowledge_block(question: str, shown: set[str] | None = None, with_charts: b
     gone = gone_names()
     found = [f for f in found if f["kind"] not in ("recipe", "memory") or not mentions_gone(f["text"], gone)]
     given, kept = set(shown), []
-    for f in found:          # one line per metric or index name, glossary term, entry, document, page
+    for f in found:          # one line per metric or index name, glossary term, entry, page of a document
         key = f["title"] if f["kind"] in OBJECT_KINDS else (f["ref"] if f["kind"] == "glossary"
-                                                            else f["ref"].split("#")[0])
+                                                            else page_of(f["ref"], f.get("text")))
         if key in given:
             continue
         given.add(key)
@@ -280,8 +345,14 @@ def knowledge_block(question: str, shown: set[str] | None = None, with_charts: b
              "team's learned answers and memory, the documents). It is a summary, not an answer: call "
              "describe_data for the fields and their meaning, and run the query for any number; search_knowledge "
              "gives more:"]
+    from supagent.knowledge.spelling import correct, said
+
+    read = correct(question)["changes"]          # (cached: the search above read them)
+    if read:
+        lines[0] += (f"\n(Words of the question no piece of the knowledge holds were searched as the knowledge spells "
+                     f"them: {said(read)}.)")
     for f in found:
-        text = " ".join((f["text"] or "").split())
+        text = " ".join(excerpt(f["text"] or "", question, 450).split())
         about = [t.split(": ", 1)[1] for t in cats.get(f["ref"], []) if not t.startswith("aspect")][:3]
         line = f"- [{f['kind']}] {f['title']}" + (f" ({', '.join(about)})" if about else "") + f": {text[:450]}"
         if sum(len(x) for x in lines) + len(line) > budget:

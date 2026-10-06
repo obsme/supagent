@@ -25,6 +25,7 @@ from typing import Any
 from superset import db
 
 from supagent import settings
+from supagent.knowledge.containers import one_table_each
 from supagent.knowledge.learn_metrics import due
 from supagent.knowledge.store import mark_gone, matches, upsert
 from supagent.knowledge.throttle import Proxy, SourceStopped, Throttle
@@ -163,7 +164,7 @@ def category_pairs(conn: Any, index: str, fields: list[Any], sample_docs: int) -
     """Two fields of one index that feed two categories (categories.fields: APPLICATION and NODE...): which values
     go together in its documents (the profile's sample), the wider category's field first. The categories learn
     from them what is part of what (proposed to an admin, never applied alone)."""
-    from supagent.knowledge.facets import field_rules, rank
+    from supagent.knowledge.facets import field_matches, field_rules, rank
 
     rules = field_rules()
     if not rules:
@@ -172,7 +173,7 @@ def category_pairs(conn: Any, index: str, fields: list[Any], sample_docs: int) -
     for f in fields:
         if f.sql_type != "VARCHAR" or not f.agg_field:
             continue
-        cat = next((c for c, rx in rules if rx.match(f.name)), None)
+        cat = next((c for c, rx in rules if field_matches(rx, f.name)), None)
         if cat is not None:
             cats.append((cat, f))
     out: list[dict[str, Any]] = []
@@ -196,7 +197,8 @@ def category_pairs(conn: Any, index: str, fields: list[Any], sample_docs: int) -
                 for c in (b.get("c") or {}).get("buckets") or []:
                     rows.append([str(b["key"]), str(c["key"]), int(c["doc_count"])])
             if rows:
-                out.append({"parent": [pc, pf.name], "child": [cc, cf.name], "pairs": rows[:5000]})
+                out.append({"parent": [pc, pf.name], "child": [cc, cf.name], "pairs": rows[:5000],
+                            "at": __import__("datetime").datetime.utcnow().isoformat(timespec="seconds")})
     return out
 
 
@@ -299,6 +301,16 @@ def learn_indices(run: Run, source: Source, database: Any, deadline: float, prog
         else:
             objects = {n: n for n in names}
         known = {o.name: o for o in db.session.query(KObject).filter_by(source_id=source.id, kind="index")}
+        said: dict[str, dict[str, Any]] = {}
+        if settings.get("learn.one_table_each"):       # names of the same documents: one table (0.9.5)
+            try:
+                objects, said = one_table_each(conn, objects, families, {n for n, o in known.items() if o.gone_at is None},
+                                               _dataset_tables(database.id))
+            except SourceStopped:
+                raise
+            except Exception as ex:  # pylint: disable=broad-except   (each name a table, as before)
+                log.warning("supagent learn: one table each: %s", ex)
+            out["same_documents"] = sum(len(s.get("names") or []) + len(s.get("parts") or []) for s in said.values())
         out["computed_described"] = describe_computed(source.id)      # (what the connector says of its own columns)
         seen_idx = {("", n) for n in objects}          # the listing is complete: gone indices are known
         seen_fields: set[tuple[str, str]] = set()
@@ -332,9 +344,13 @@ def learn_indices(run: Run, source: Source, database: Any, deadline: float, prog
                     except Exception as ex:  # pylint: disable=broad-except
                         log.info("supagent learn: computed columns of %s: %s", index, ex)
                 if old is None:
-                    upsert(run, source, "index", "", obj_name, {"stats": _family_info(obj_name, families, index)})
+                    upsert(run, source, "index", "", obj_name, {"stats": _said({**_family_info(obj_name, families, index)},
+                                                                               said.get(obj_name))})
                 else:
                     old.last_seen, old.gone_at = dt.datetime.utcnow(), None
+                    st = _part_times(conn, _said(dict(old.stats or {}), said.get(obj_name)), None)
+                    if st != (old.stats or {}):
+                        old.stats = st
                     dataset_time_now(old, source, database.id, (index, obj_name))
                     out["not_due"] += 1
                 db.session.commit()
@@ -353,6 +369,22 @@ def learn_indices(run: Run, source: Source, database: Any, deadline: float, prog
                 continue
             prefer_dataset_time(info, fstats, database.id, (index, obj_name))
             info.update(_family_info(obj_name, families, index))
+            # how much and since when, exactly: the whole family's (its fields are its latest index's); and for any
+            # table, the sample (the first documents of each shard) ends before the latest document (0.9.5: a data
+            # stream or a big index was told to end hours or days before its last document)
+            if info.get("time_field"):
+                try:
+                    span = family_span(conn, obj_name if info.get("family") else index, info["time_field"], meta)
+                except SourceStopped:
+                    raise
+                except Exception as ex:  # pylint: disable=broad-except
+                    log.info("supagent learn: the time range of %s: %s", obj_name, ex)
+                    span = None
+                if span and info.get("family"):
+                    info.update(latest_docs=info.get("docs"), latest_range=info.get("time_range"), **span)
+                elif span:
+                    info.update(**span)
+            info = _part_times(conn, _said(info, said.get(obj_name)), meta)
             upsert(run, source, "index", "", obj_name, {"stats": info})
             out["profiled"] += 1
             for fname, st in fstats.items():
@@ -372,6 +404,60 @@ def learn_indices(run: Run, source: Source, database: Any, deadline: float, prog
     out["families"] = len(families)
     out.update(throttle.stats())
     return out
+
+
+def family_span(conn: Any, pattern: str, time_field: str, meta: Any) -> dict[str, Any] | None:
+    """The documents and the time range of a whole table, exactly: a family (fluentbit-*: one index a day) whose
+    fields are learned through its latest member (0.9.5: the agent was told the latest day's count and hours, as if
+    the family began that morning), a data stream, an alias or an index (the profile's sample stops at the first
+    documents of each shard: its latest document is not the table's)."""
+    f = (getattr(meta, "fields", None) or {}).get(time_field)
+    field = getattr(f, "agg_field", None) or time_field
+    res = conn.transport.search(pattern, {"size": 0, "track_total_hits": True,
+                                          "aggs": {"lo": {"min": {"field": field}}, "hi": {"max": {"field": field}}}})
+    docs = ((res.get("hits") or {}).get("total") or {}).get("value")
+    aggs = res.get("aggregations") or {}
+    lo, hi = (aggs.get("lo") or {}).get("value"), (aggs.get("hi") or {}).get("value")
+    if docs is None or lo is None or hi is None:
+        return None
+    tz = getattr(conn, "tz", None)
+    return {"docs": int(docs), "time_range": [_ms_to_iso(lo, tz), _ms_to_iso(hi, tz)]}
+
+
+CONTAINER_KEYS = ("data_stream", "alias", "names", "parts")
+
+
+def _said(st: dict[str, Any], said: dict[str, Any] | None) -> dict[str, Any]:
+    """A table's statistics with what its container is (a data stream, an alias, its other names, its parts) as
+    learned now: what is no longer so is dropped."""
+    for k in CONTAINER_KEYS:
+        if said and k in said:
+            st[k] = said[k]
+        else:
+            st.pop(k, None)
+    return st
+
+
+def _part_times(conn: Any, st: dict[str, Any], meta: Any) -> dict[str, Any]:
+    """Since when each alias on a part of a table holds documents (a write alias: since the last rollover)."""
+    for part in st.get("parts") or []:
+        if not st.get("time_field"):
+            break
+        try:
+            span = family_span(conn, part["name"], st["time_field"], meta)
+        except SourceStopped:
+            raise
+        except Exception:  # pylint: disable=broad-except
+            span = None
+        if span and span["time_range"][0]:
+            part["from"] = span["time_range"][0]
+    return st
+
+
+def _dataset_tables(database_id: int) -> set[str]:
+    from superset.connectors.sqla.models import SqlaTable
+
+    return {t for (t,) in db.session.query(SqlaTable.table_name).filter(SqlaTable.database_id == database_id)}
 
 
 def _family_info(obj_name: str, families: dict[str, list[str]], index: str) -> dict[str, Any]:

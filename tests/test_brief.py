@@ -33,8 +33,12 @@ def system(world, app):  # noqa: F811
         f[name] = Facet(facet=cat, value=name, status="approved", source="admin", description=about or None)
         db.session.add(f[name])
     db.session.flush()
-    f["Invoicing"].parents = f["Payments"].parents = [f["Billing"].id]
-    f["srv-1"].parents = f["srv-2"].parents = [f["grid-a"].id]
+    from conftest import part_of
+
+    part_of(f["Invoicing"], f["Billing"])
+    part_of(f["Payments"], f["Billing"])
+    part_of(f["srv-1"], f["grid-a"])
+    part_of(f["srv-2"], f["grid-a"])
     f["ledger db"].synonyms = ["LEDGERDB"]
     db.session.commit()
     ids = {k: v.id for k, v in f.items()}

@@ -55,20 +55,22 @@ def _similar(a: str, b: str) -> bool:
 
 
 def add(user_id: int, text: str, scope: str = "user", kind: str = "preference", category: str | None = None,
-        source: str = "manual", message_id: int | None = None, approved_by: str | None = None) -> Memory | None:
+        source: str = "manual", message_id: int | None = None, approved_by: str | None = None,
+        group_id: int | None = None) -> Memory | None:
     """A memory (None when an equivalent one exists). Never a second copy: a person writing again a
     memory that was disabled brings it back (for the team: to approve again); one learned from a chat
     that someone disabled stays disabled (it was refused)."""
     text = (text or "").strip()
     if not text:
         return None
-    scope = "team" if scope in ("team", "everyone") else "user"
+    scope = "team" if scope in ("team", "everyone") else "group" if scope == "group" and group_id else "user"
     q = db.session.query(Memory)
-    q = q.filter(Memory.scope == "team") if scope == "team" else q.filter(Memory.scope == "user",
-                                                                           Memory.user_id == user_id)
+    q = q.filter(Memory.scope == "team") if scope == "team" else \
+        q.filter(Memory.scope == "group", Memory.group_id == group_id) if scope == "group" else \
+        q.filter(Memory.scope == "user", Memory.user_id == user_id)
     same = [m for m in q.limit(5000) if _similar(m.text, text)]
     status = "active"
-    if scope == "team" and settings.get("memory.team_approval") and not approved_by:
+    if scope in ("team", "group") and settings.get("memory.team_approval") and not approved_by:
         status = "proposed"
     if same:
         kept = next((m for m in same if m.status != "disabled"), None)
@@ -81,7 +83,7 @@ def add(user_id: int, text: str, scope: str = "user", kind: str = "preference", 
         return m
     m = Memory(scope=scope, user_id=user_id, kind=kind if kind in ("preference", "rule", "fact") else "preference",
                text=text[:1000], category=(category or None), status=status, source=source, message_id=message_id,
-               approved_by=approved_by)
+               approved_by=approved_by, group_id=group_id if scope == "group" else None)
     db.session.add(m)
     db.session.commit()
     return m
@@ -179,13 +181,19 @@ def asked_back(question: Message) -> tuple[Message, Message] | None:
     return (first, back) if first is not None else None
 
 
-def memories_for(user_id: int | None, limit: int = 15) -> list[Memory]:
-    """The user's personal memories and the team's active ones (for the prompt)."""
+def memories_for(user_id: int | None, limit: int = 15, groups: list[int] | None = None) -> list[Memory]:
+    """The user's personal memories, the team's active ones and those of the user's groups (for the prompt)."""
+    if groups is None:
+        from supagent.security import user_groups
+
+        groups = [x.id for x in user_groups()]
     q = db.session.query(Memory).filter(Memory.status == "active")
     mine = q.filter(Memory.scope == "user", Memory.user_id == user_id).order_by(Memory.id.desc()).limit(limit).all() \
         if user_id is not None else []
     team = q.filter(Memory.scope == "team").order_by(Memory.id.desc()).limit(limit).all()
-    return mine + team
+    group = q.filter(Memory.scope == "group", Memory.group_id.in_(groups or [-1])).order_by(
+        Memory.id.desc()).limit(limit).all()
+    return mine + group + team
 
 
 KIND_ORDER = {"rule": 0, "preference": 1, "fact": 2}
@@ -211,7 +219,7 @@ def prompt_block(user_id: int | None, shown: set[str] | None = None) -> str:
     for m in sorted(items, key=lambda m: KIND_ORDER.get(m.kind, 3)):     # stable: mine, then the team's
         if mentions_gone(m.text, gone):                # about a metric or index that no longer exists
             continue
-        who = "team" if m.scope == "team" else "this user"
+        who = "team" if m.scope == "team" else "this user's team" if m.scope == "group" else "this user"
         text = " ".join((m.text or "").split())
         line = f"- ({who}, {m.kind}) {text[:ENTRY_CHARS]}{'...' if len(text) > ENTRY_CHARS else ''}"
         if used + len(line) > budget:

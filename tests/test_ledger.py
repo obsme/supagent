@@ -211,13 +211,12 @@ def test_the_deeper_step_of_an_investigation_is_asked_for_unless_nothing_is_wron
 
 
 def test_the_plan_comes_with_the_last_calls(ctx, monkeypatch):
-    from supagent.agent import LAST_CALLS
-    from test_agent_loop import agent_with, call, say
+    from test_agent_loop import agent_with, call, last_calls, say
 
     sql = [{"request": {"database_id": 1, "sql": f"SELECT {i} AS n"}} for i in range(19)]
     a, _ran = agent_with(monkeypatch, [call("execute_sql", q) for q in sql] + [say("The cause is in the results above.")] * 3)
     a.ask("Why did the jobs fail?")
-    told = [m for m in a.llm.seen[-1] if m["role"] == "user" and m["content"].startswith(LAST_CALLS)]
+    told = [m for m in a.llm.seen[-1] if last_calls(m)]
     assert told and "Your work plan (kept by the system)" in told[0]["content"] and "[ ] 5. Deeper" in told[0]["content"]
 
 
@@ -302,15 +301,14 @@ def test_a_long_conversation_is_shortened_early_with_its_plan(ctx, monkeypatch):
 def test_the_last_calls_are_said_once_when_plan_turns_move_the_end(ctx, monkeypatch):
     """A plan-only turn at the end gives its turn back: "the last calls" is still said once, not at every turn
     the end moves by one."""
-    from supagent.agent import LAST_CALLS
-    from test_agent_loop import agent_with, call, say
+    from test_agent_loop import agent_with, call, last_calls, say
 
     sql = [{"request": {"database_id": 1, "sql": f"SELECT {i} AS n"}} for i in range(18)]
     wp = [{"tasks": [{"title": f"Step {k}", "status": "in_progress"}]} for k in range(4)]
     a, _ran = agent_with(monkeypatch, [call("execute_sql", q) for q in sql] + [call("work_plan", w) for w in wp]
                          + [say("The cause is in the results above.")] * 3)
     a.ask("Why did the jobs fail?")
-    told = [m for m in a.llm.seen[-1] if m["role"] == "user" and str(m["content"]).startswith(LAST_CALLS)]
+    told = [m for m in a.llm.seen[-1] if last_calls(m)]
     assert len(told) == 1
 
 

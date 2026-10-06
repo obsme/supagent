@@ -17,13 +17,21 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from typing import Any
 
 import click
 from flask.cli import with_appcontext
 
-ROLE = "AI Agent"
+ROLE = "AI Agent"                       # the role of earlier versions: kept as it is (chat and the dictionary read)
+ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE = "AI Admin", "AI Editor", "AI Viewer"
+# a Superset permission that changes something (a Viewer has none of them; Gamma, which it is made from, may create
+# charts and dashboards); favorites are a user's own
+WRITE_LIKE = re.compile(r"write|add|edit|delete|post|put|save|copy|overwrite|import|upload|update|warm|grant|"
+                        r"set_embedded|tag", re.I)
+FAVORITE = re.compile(r"favorite", re.I)
+DATA_ALL = ("all_datasource_access", "all_database_access")
 
 
 @click.group(help="supagent: the AI agent inside Superset")
@@ -36,13 +44,89 @@ def _role_permissions() -> list[tuple[str, str]]:
     from supagent.views import ChatView, KnowledgeView
 
     return [("can_read", ChatView.class_permission_name), ("can_write", ChatView.class_permission_name),
+            ("can_share", ChatView.class_permission_name),
             ("can_read", KnowledgeView.class_permission_name), ("menu_access", MENU_ITEMS["chat"]),
             ("menu_access", SETTINGS_CATEGORY), ("menu_access", MENU_ITEMS["dictionary"])]
 
 
-@supagent.command(help="Create or upgrade the tables, the permissions and the role 'AI Agent'")
+def _agent_permissions(kind: str) -> list[tuple[str, str]]:
+    """supagent's own permissions of a role: viewer (chat, the dictionary read), editor (+ the knowledge read and
+    written), admin (+ deleted, and the settings)."""
+    from supagent import MENU_ITEMS
+    from supagent.views import ADMIN_VIEW
+
+    from supagent.views import ChatView, KnowledgeView
+
+    out = [p for p in _role_permissions() if not (kind == "viewer" and p == ("can_share", ChatView.class_permission_name))]
+    if kind in ("editor", "admin"):                  # (the dictionary's own writes check edit and delete in code)
+        out += [("can_read", ADMIN_VIEW), ("can_edit", ADMIN_VIEW), ("can_write", KnowledgeView.class_permission_name)]
+    if kind == "admin":
+        out += [("can_write", ADMIN_VIEW), ("can_delete", ADMIN_VIEW), ("menu_access", MENU_ITEMS["admin"])]
+    return out
+
+
+def _superset_permissions(kind: str, viewer_data: bool) -> list[Any]:
+    """Superset's permissions of a role, taken from its own roles as they are now: admin = Admin; editor = Alpha and
+    sql_lab without deleting (Superset's can_write on a chart or a dashboard also deletes the ones a user owns: that
+    one stays); viewer = Gamma without any permission that changes something, and the data only with
+    --viewer-data all."""
+    from superset.extensions import security_manager as sm
+
+    def of(name: str) -> list[Any]:
+        role = sm.find_role(name)
+        return list(role.permissions) if role is not None else []
+
+    if kind == "admin":
+        return of("Admin")
+    if kind == "editor":
+        return [p for p in of("Alpha") + of("sql_lab")
+                if "delete" not in p.permission.name.lower()]
+    out = [p for p in of("Gamma") if not WRITE_LIKE.search(p.permission.name) or FAVORITE.search(p.permission.name)]
+    if viewer_data:
+        out += [p for p in (sm.find_permission_view_menu(n, n) for n in DATA_ALL) if p is not None]
+    return out
+
+
+def ensure_roles(viewer_data: bool = False) -> dict[str, list[str]]:
+    """The three roles (0.9.6), created or completed (never a permission taken away: an admin's additions stay), and
+    the knowledge edited and deleted for any role that had supagent's settings. Returns what each role got."""
+    from superset.extensions import db, security_manager as sm
+
+    from supagent.views import ADMIN_VIEW
+
+    added: dict[str, list[str]] = {}
+    for name, kind in ((ADMIN_ROLE, "admin"), (EDITOR_ROLE, "editor"), (VIEWER_ROLE, "viewer")):
+        role = sm.find_role(name) or sm.add_role(name)
+        have = set(role.permissions)
+        new = []
+        for perm, view in _agent_permissions(kind):
+            pvm = sm.find_permission_view_menu(perm, view) or sm.add_permission_view_menu(perm, view)
+            if pvm not in have:
+                new.append(pvm)
+        new += [p for p in _superset_permissions(kind, viewer_data) if p not in have and p not in new]
+        for pvm in new:
+            sm.add_permission_role(role, pvm)
+        added[name] = [f"{p.permission.name} on {p.view_menu.name}" for p in new]
+    # a role that had supagent's settings (can write on AIAgentAdmin) keeps editing and deleting the knowledge
+    writes = sm.find_permission_view_menu("can_write", ADMIN_VIEW)
+    for role in db.session.query(sm.role_model).all():
+        if role.name in (ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE, "Admin") or writes is None or writes not in role.permissions:
+            continue
+        for perm in ("can_read", "can_edit", "can_delete"):
+            pvm = sm.find_permission_view_menu(perm, ADMIN_VIEW) or sm.add_permission_view_menu(perm, ADMIN_VIEW)
+            if pvm not in role.permissions:
+                sm.add_permission_role(role, pvm)
+                added.setdefault(role.name, []).append(f"{perm} on {ADMIN_VIEW}")
+    db.session.commit()
+    return added
+
+
+@supagent.command(help="Create or upgrade the tables, the permissions and the roles AI Admin, AI Editor, AI Viewer")
+@click.option("--viewer-data", type=click.Choice(["none", "all"]), default="none", show_default=True,
+              help="all: the role AI Viewer reads every database and dataset (all_datasource_access); none: give its "
+                   "users their databases' access as Superset does (a role or a group per team)")
 @with_appcontext
-def init() -> None:
+def init(viewer_data: str = "none") -> None:
     from superset.extensions import appbuilder, db, security_manager
 
     from supagent.models import create_or_upgrade
@@ -87,7 +171,14 @@ def init() -> None:
             security_manager.add_permission_role(role, pvm)
             added.append(f"{perm} on {view}")
     db.session.commit()
-    click.echo(f"role {ROLE!r}: " + (", ".join(added) if added else "up to date"))
+    click.echo(f"role {ROLE!r} (earlier versions; kept): " + (", ".join(added) if added else "up to date"))
+    for name, got in ensure_roles(viewer_data == "all").items():
+        click.echo(f"role {name!r}: " + (f"{len(got)} permissions added" if got else "up to date"))
+    click.echo(f"roles: {ADMIN_ROLE} = everything (Superset's Admin and supagent's settings); {EDITOR_ROLE} = charts, "
+               f"dashboards, datasets explored, SQL Lab, the knowledge written, no settings and no deletion (Superset's "
+               f"own write on a chart or a dashboard also deletes the ones the user owns); {VIEWER_ROLE} = read and "
+               f"chat, nothing changed; the data: " + ("every database (--viewer-data all)" if viewer_data == "all"
+                                                     else "none given here (--viewer-data all, or a group per team)"))
     _init_store()
     click.echo("Next: give users the role (superset supagent grant <user>, or Superset's user list), set the LLM "
                "(Settings page or superset supagent settings --set ...), then superset supagent learn.")
@@ -738,15 +829,19 @@ def search(query: str, user: str | None, limit: int) -> None:
             click.echo("        " + " ".join((f["text"] or "").split())[:200])
 
 
-@supagent.command(help=f"Give users the role {ROLE!r} (chat and data dictionary)")
+@supagent.command(help="Give users a role: viewer (read and chat), editor (charts, dashboards, the knowledge), admin "
+                       "(everything), or agent (the role of earlier versions)")
 @click.argument("usernames", nargs=-1, required=True)
+@click.option("--role", "kind", type=click.Choice(["viewer", "editor", "admin", "agent"]), default="viewer",
+              show_default=True)
 @with_appcontext
-def grant(usernames: tuple[str, ...]) -> None:
+def grant(usernames: tuple[str, ...], kind: str = "viewer") -> None:
     from superset.extensions import db, security_manager
 
-    role = security_manager.find_role(ROLE)
+    name = {"viewer": VIEWER_ROLE, "editor": EDITOR_ROLE, "admin": ADMIN_ROLE, "agent": ROLE}[kind]
+    role = security_manager.find_role(name)
     if role is None:
-        raise click.ClickException(f"no role {ROLE!r}: run superset supagent init first")
+        raise click.ClickException(f"no role {name!r}: run superset supagent init first")
     for name in usernames:
         user = security_manager.find_user(username=name)
         if user is None:

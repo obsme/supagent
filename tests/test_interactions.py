@@ -132,3 +132,32 @@ def test_a_text_that_names_one_part_costs_no_call_and_long_texts_are_cut_between
         db.session.query(Doc).delete()
         db.session.query(Classified).delete()
         db.session.commit()
+
+
+def test_an_interaction_whose_sentence_is_gone_is_proposed_for_removal(doc, app):
+    """(0.9.6) The text changed and no longer says it, or the text is gone: its removal is proposed; it stays in
+    use until an AI Admin decides."""
+    from superset.extensions import db
+
+    from supagent.knowledge import interactions as I
+    from supagent.models import Doc, Link
+
+    I.run(Reader(FOUND))
+    x = db.session.query(Link).filter(Link.status == "proposed").one()
+    x.status = "approved"
+    db.session.commit()
+    assert I.stale() == 0                                                  # still said
+    d = db.session.get(Doc, doc)
+    d.content = TEXT.replace("Payments writes its results to the ledger db.", "Payments keeps its results.")
+    db.session.commit()
+    out = I.run(Reader([]))
+    assert out["removal_proposed"] == 1
+    db.session.refresh(x)
+    assert x.status == "approved" and x.proposed_drop.startswith("the sentence it was read from is no longer in "
+                                                                 "Billing at night")
+    x.proposed_drop = None
+    d.enabled = False                                                     # the text itself is gone
+    db.session.commit()
+    assert I.stale() == 1
+    db.session.refresh(x)
+    assert x.proposed_drop == "the text it was read from is gone (Billing at night)"

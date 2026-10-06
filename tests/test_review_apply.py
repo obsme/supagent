@@ -308,40 +308,42 @@ def test_a_value_is_part_of_several_others(app, queue):
         # an application merged into another: what was part of it is part of the other
         r = c.post(f"/supagent/admin/api/facets/{ids['PAYMENTS2']}", json={"merge_into": ids["LEDGER2"]})
         assert r.status_code == 200
-        moved = db.session.get(Facet, comp)
-        db.session.refresh(moved)
-        assert moved.parents == [ids["LEDGER2"]]
+        from conftest import parts_of
+
+        assert parts_of(comp) == [ids["LEDGER2"]]                       # (0.9.6: its part_of link moved, once)
         db.session.query(Tag).filter(Tag.ref == "memory:424242").delete(synchronize_session=False)
         db.session.commit()
 
 
 def test_the_review_shows_what_the_learning_says_values_are_part_of(app, queue):
+    """(0.9.6) What a value is said to be part of is a proposed link: listed with the links to review, approved or
+    rejected as one; a proposed value's come with it."""
     from superset.extensions import db
 
-    from supagent.models import Facet
+    from supagent.knowledge import facets as F
+    from supagent.models import Link
 
     with app.app_context():
         c = _client(app, "admin")
         ids = {v: c.post("/supagent/admin/api/facets", json={"facet": f, "value": v}).get_json()["id"]
                for f, v in (("application", "LEDGER3"), ("component", "engine3"))}
-        engine = db.session.get(Facet, ids["engine3"])
-        engine.suggested = {"parents": [ids["LEDGER3"]]}
-        new = db.session.get(Facet, queue["new"])                       # proposed "Settlements"
-        new.parents = [ids["LEDGER3"]]
-        new.suggested = {"same_as": queue["near"]}
+        assert F.suggest_link(ids["engine3"], ids["LEDGER3"], F.PART_OF, "data", "jobs: APPLICATION LEDGER3 with NODE")
+        assert F.suggest_link(queue["new"], ids["LEDGER3"], F.PART_OF, "llm")     # the proposed "Settlements"
         db.session.commit()
         d = c.get("/supagent/admin/api/review").get_json()
-        rel = next(x for x in d["relations"] if x["id"] == ids["engine3"])
-        assert [p["value"] for p in rel["suggested"]] == ["LEDGER3"] and d["counts"]["relations"] >= 1
+        link = next(x for x in d["links"] if x["a"] == f"facet:{ids['engine3']}")
+        assert link["kind"] == "part_of" and link["parts"] and "LEDGER3 with NODE" in link["evidence"]
         val = next(x for x in d["values"] if x["id"] == queue["new"])
-        assert val["same_as"]["value"] == "Settlement" and [p["value"] for p in val["parents"]] == ["LEDGER3"]
-        assert c.post(f"/supagent/admin/api/facets/{ids['engine3']}", json={"accept_parents": True}).get_json()["parents"] \
-            == [ids["LEDGER3"]]
-        db.session.refresh(engine)
-        assert engine.parents == [ids["LEDGER3"]] and not engine.suggested
-        assert not [x for x in c.get("/supagent/admin/api/review").get_json()["relations"] if x["id"] == ids["engine3"]]
+        assert [p["value"] for p in val["parents"]] == ["LEDGER3"]
+        assert c.post(f"/supagent/admin/api/links/{link['id']}", json={"status": "approved"}).status_code == 200
+        from conftest import parts_of
+
+        assert parts_of(ids["engine3"]) == [ids["LEDGER3"]]
+        assert not [x for x in c.get("/supagent/admin/api/review").get_json()["links"] if x["id"] == link["id"]]
         m = c.get("/supagent/admin/api/facets/map").get_json()["values"]
         assert next(x for x in m if x["value"] == "engine3")["parents"] == [ids["LEDGER3"]]
+        db.session.query(Link).filter(Link.a_ref == f"facet:{queue['new']}").delete(synchronize_session=False)
+        db.session.commit()
 
 
 def test_an_admin_adds_a_category_of_their_own(app, queue):
@@ -374,13 +376,19 @@ def test_a_suggestion_is_changed_before_it_is_approved(app, queue):
         c = _client(app, "admin")
         ids = {v: c.post("/supagent/admin/api/facets", json={"facet": f, "value": v}).get_json()["id"]
                for f, v in (("application", "APP-A4"), ("application", "APP-B4"), ("component", "engine4"))}
-        engine = db.session.get(Facet, ids["engine4"])
-        engine.suggested = {"parents": [ids["APP-A4"], ids["APP-B4"]]}
+        from supagent.knowledge import facets as F
+        from supagent.models import Link
+
+        for app_ in ("APP-A4", "APP-B4"):
+            F.suggest_link(ids["engine4"], ids[app_], F.PART_OF, "data")
         db.session.commit()
-        r = c.post(f"/supagent/admin/api/facets/{ids['engine4']}", json={"accept_parents": [ids["APP-B4"]]})
-        assert r.get_json()["parents"] == [ids["APP-B4"]]
-        db.session.refresh(engine)
-        assert engine.suggested == {"declined": [ids["APP-A4"]]}
+        got = {x.b_ref: x.id for x in db.session.query(Link).filter(Link.a_ref == f"facet:{ids['engine4']}")}
+        c.post(f"/supagent/admin/api/links/{got['facet:' + str(ids['APP-B4'])]}", json={"status": "approved"})
+        c.post(f"/supagent/admin/api/links/{got['facet:' + str(ids['APP-A4'])]}", json={"status": "rejected"})
+        from conftest import parts_of
+
+        assert parts_of(ids["engine4"]) == [ids["APP-B4"]]
+        assert not F.suggest_link(ids["engine4"], ids["APP-A4"], F.PART_OF, "data")   # refused: not proposed again
         tag = db.session.query(Tag).filter(Tag.facet_id == queue["app"]).first()     # an item tagged LEDGER
         r = c.post(f"/supagent/admin/api/tags/{tag.id}", json={"facet_id": ids["APP-B4"]})
         assert r.get_json()["facet_id"] == ids["APP-B4"] and r.get_json()["status"] == "approved"

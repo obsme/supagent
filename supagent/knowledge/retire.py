@@ -82,7 +82,7 @@ def places() -> dict[str, list[dict[str, Any]]]:
     """Where each category read from the data is looked up: {category: [{"kind": "field", "source", "database",
     "index", "name", "time"} | {"kind": "label", "source", "database", "name"}]} (a label once per metrics
     database, whatever the number of metrics that carry it)."""
-    from supagent.knowledge.facets import field_rules
+    from supagent.knowledge.facets import field_matches, field_rules
     from supagent.models import KObject, Source
     from supagent.tools import _catalog
 
@@ -100,7 +100,7 @@ def places() -> dict[str, list[dict[str, Any]]]:
     rows = db.session.query(KObject.kind, KObject.name, KObject.parent, KObject.source_id).filter(
         KObject.kind.in_(("field", "label")), KObject.gone_at.is_(None)).distinct()
     for kind, name, parent, source_id in rows:
-        cats = [cat for cat, rx in rules if rx.match(name or "")]
+        cats = [cat for cat, rx in rules if field_matches(rx, name or "")]
         src = sources.get(source_id)
         if not cats or src is None:
             continue

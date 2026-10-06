@@ -62,7 +62,7 @@ RELATIVE_DAY = {"yesterday": -1, "hier": -1, "today": 0, "aujourd'hui": 0, "aujo
 PERIOD_WORDS = re.compile(
     r"\b(yesterday|today|tonight|hier|aujourd|now|right now|currently|at the moment|maintenant|en ce moment|"
     r"actuellement|last|past|previous|this (?:week|month|morning|year)|since|until|between|during|over the|"
-    r"week|weeks|month|months|day|days|hours?|minutes?|semaine|semaines|mois|jour|jours|heures?|dernier|"
+    r"week|weeks|week-?ends?|month|months|day|days|hours?|minutes?|semaine|semaines|mois|jour|jours|heures?|dernier|"
     r"derni[èe]re|depuis|entre|pendant)\b", re.I)
 PART_OF_DAY = re.compile(
     r"\b\d{1,2}[:h]\d{2}\b|\b\d{1,2}\s*(?:am|pm)\b|\b(night|morning|afternoon|evening|midnight|noon|window|between|"
@@ -173,10 +173,10 @@ def follow_up_text(question: str, earlier: list[str], today: dt.date | None = No
     text = question or ""
     own = _days_in(text, today, anchor_of(earlier, today))
     window = WINDOW.search(text)
-    if (not own and not window) or len(own) > 1 or ranges_named(text, today):
+    if (not own and not window) or len(own) > 1 or day_ranges(text, today):
         return None
     base = next((q for q in reversed(earlier or []) if any(full for *_x, full in _days_in(q or "", today))), None)
-    if base is None or ranges_named(base, today):
+    if base is None or day_ranges(base, today):
         return None
     spans = [(s, e) for s, e, _d, full in _days_in(base, today) if full]
     if len(spans) != 1:
@@ -199,8 +199,69 @@ def _day(day: int, month: str, year: str | None, today: dt.date) -> dt.date | No
         return None
 
 
+# "last weekend", "le week-end dernier": the Saturday and Sunday before today (0.9.5: a model counted Sunday and
+# Monday, 20 and 21 September, as last weekend from Wednesday 23, and no check knew the weekend)
+LAST_WEEKEND = re.compile(r"\b(?:last|past|previous|the last|the past)\s+week-?end\b|\b(?:le\s+)?(?:dernier\s+week-?end|"
+                          r"week-?end\s+(?:dernier|pass[ée]))\b", re.I)
+THIS_WEEKEND = re.compile(r"\bthis\s+week-?end\b|\bce\s+week-?end\b", re.I)
+
+
+def weekend_named(question: str, today: dt.date) -> tuple[dt.datetime, dt.datetime] | None:
+    """The Saturday 00:00 to Monday 00:00 the question names: last weekend (the latest one over before today: on a
+    Saturday or a Sunday, the one of the week before), this weekend (on a Saturday or a Sunday, the current one)."""
+    sat = today - dt.timedelta(days=(today.weekday() - 5) % 7)       # the latest Saturday, today included
+    if LAST_WEEKEND.search(question or ""):
+        start = sat - dt.timedelta(days=7) if today.weekday() >= 5 else sat
+    elif THIS_WEEKEND.search(question or "") and today.weekday() >= 5:
+        start = sat
+    else:
+        return None
+    first = dt.datetime(start.year, start.month, start.day)
+    return first, first + dt.timedelta(days=2)
+
+
+# "this week", "last week", "this month", "last month" (cette semaine, la semaine dernière, ce mois-ci, le mois dernier):
+# calendar weeks from Monday, calendar months (0.9.5: "opened this week" asked on Thursday 24 September was counted
+# from Tuesday 22, called Monday)
+THIS_WEEK = re.compile(r"\bthis\s+week\b(?!-?end)|\bcette\s+semaine\b", re.I)
+LAST_WEEK = re.compile(r"\b(?:last|previous|past)\s+week\b(?!-?end|s)|\bla\s+semaine\s+(?:derni[èe]re|pass[ée]e|pr[ée]c[ée]dente)\b",
+                       re.I)
+THIS_MONTH = re.compile(r"\bthis\s+month\b|\bce\s+mois(?:-ci)?\b", re.I)
+LAST_MONTH = re.compile(r"\b(?:last|previous|past)\s+month\b(?!s)|\ble\s+mois\s+(?:dernier|pass[ée]|pr[ée]c[ée]dent)\b", re.I)
+
+
+def calendar_named(question: str, today: dt.date) -> list[tuple[dt.datetime, dt.datetime]]:
+    """The calendar weeks (from Monday) and months the question names, as [start, end) of whole days (the current one
+    whole: a query of what is past of it, up to today, is not held off)."""
+    out: list[tuple[dt.datetime, dt.datetime]] = []
+    day = lambda d: dt.datetime(d.year, d.month, d.day)  # noqa: E731
+    monday = today - dt.timedelta(days=today.weekday())
+    first = today.replace(day=1)
+    if THIS_WEEK.search(question or ""):
+        out.append((day(monday), day(monday) + dt.timedelta(days=7)))
+    if LAST_WEEK.search(question or ""):
+        out.append((day(monday) - dt.timedelta(days=7), day(monday)))
+    if THIS_MONTH.search(question or ""):
+        nxt = (first + dt.timedelta(days=32)).replace(day=1)
+        out.append((day(first), day(nxt)))
+    if LAST_MONTH.search(question or ""):
+        prev = (first - dt.timedelta(days=1)).replace(day=1)
+        out.append((day(prev), day(first)))
+    return out
+
+
 def ranges_named(question: str, today: dt.date) -> list[tuple[dt.datetime, dt.datetime]]:
-    """The spans of whole days the question names ("the week of 14 to 20 September"): [start, end)."""
+    """The spans of whole days the question names ("the week of 14 to 20 September", "last weekend", "this week",
+    "last month"): [start, end)."""
+    out = []
+    weekend = weekend_named(question, today)
+    if weekend:
+        out.append(weekend)
+    return out + calendar_named(question, today) + day_ranges(question, today)
+
+
+def day_ranges(question: str, today: dt.date) -> list[tuple[dt.datetime, dt.datetime]]:
+    """The spans of whole days the question writes out ("from 14 to 20 September"): [start, end)."""
     out = []
     for m in DAY_RANGE.finditer(question or ""):
         a, b = _day(int(m.group(1)), m.group(3), m.group(4), today), _day(int(m.group(2)), m.group(3), m.group(4), today)

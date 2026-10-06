@@ -43,7 +43,9 @@ def test_a_proposed_value_is_edited_whole_then_approved(world, app):
         again = Facet(facet="component", value="ledger app", status="proposed", source="llm")
         db.session.add_all([orders, pay, gw, new, twin, wait, again])
         db.session.flush()
-        gw.parents = [pay.id]
+        from conftest import part_of
+
+        part_of(gw, pay)
         jobs = db.session.query(KObject).filter_by(kind="index", name="jobs").one()
         db.session.add(Tag(ref=f"object:{jobs.id}", facet_id=twin.id, status="proposed", confidence=0.9))
         db.session.commit()
@@ -75,12 +77,14 @@ def test_a_proposed_value_is_edited_whole_then_approved(world, app):
             assert r["merged_into"] == ids["Ledger"] and r["status"] == "approved"
             assert c.get("/supagent/admin/api/review").get_json()["counts"]["values"] == 0
         with app.app_context():
+            from conftest import parts_of
+
             gw = db.session.get(Facet, ids["Payment gateway"])
-            assert set(gw.parents) == {ids["Payments"], ids["Orders"]}
+            assert set(parts_of(gw)) == {ids["Payments"], ids["Orders"]}     # (0.9.6: links of kind part_of)
             assert db.session.get(Facet, ids["PG"]) is None
             assert db.session.query(Tag).filter_by(facet_id=gw.id).count() == 1          # its item moved along
             led = db.session.get(Facet, ids["Ledger"])
-            assert led.status == "approved" and led.parents == [ids["Payments"]]
+            assert led.status == "approved" and parts_of(led) == [ids["Payments"]]
             b = db.session.get(Facet, ids["billing svc"])
             assert b.synonyms == ["billing svc", "BIL"] and b.description == "Bills the customers."
     finally:
@@ -115,8 +119,9 @@ def test_a_category_of_ones_own_is_renamed_and_removed_with_what_names_it(world,
             jobs = db.session.query(KObject).filter_by(kind="index", name="jobs").one()
             ref = f"object:{jobs.id}"
             db.session.add(Tag(ref=ref, facet_id=s1["id"], status="approved"))
-            wait = db.session.get(Facet, agent["id"])
-            wait.suggested = {"parents": [s2["id"]], "from": {str(s2["id"]): "field NODE of jobs"}}
+            from conftest import part_of
+
+            part_of(agent["id"], s2["id"], status="proposed")            # what the data suggests: waits in To review
             db.session.commit()
             touch()
             db.session.commit()
@@ -151,8 +156,9 @@ def test_a_category_of_ones_own_is_renamed_and_removed_with_what_names_it(world,
             assert db.session.query(Facet).filter(Facet.facet.in_(("host", "server"))).count() == 0
             assert db.session.query(Tag).filter(Tag.facet_id.in_([s1["id"], s2["id"]])).count() == 0
             assert db.session.query(Link).filter(Link.b_ref == f"facet:{s1['id']}").count() == 0
-            left = db.session.get(Facet, agent["id"])
-            assert left.parents == [pay["id"]] and not left.suggested           # the server it was part of is gone
+            from conftest import parts_of
+
+            assert parts_of(agent["id"], ("approved", "proposed")) == [pay["id"]]   # the servers it was part of: gone
             lay = sysmap.layout()
             assert lay["positions"] == {str(pay["id"]): [1.0, 2.0]} and lay["hidden"] == [] and lay["folded"] == {}
     finally:

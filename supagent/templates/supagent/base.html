@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="{{ supagent_static('supagent.css') }}">
 {% if embed %}<base target="_top">{% endif %}
 </head>
-<body data-page="{{ nav.active }}" data-admin="{{ 'yes' if nav.is_admin else 'no' }}"{% if embed %} data-embed="yes"{% endif %}
+<body data-page="{{ nav.active }}" data-admin="{{ 'yes' if nav.is_admin else 'no' }}" data-edit="{{ 'yes' if nav.can_edit else 'no' }}" data-delete="{{ 'yes' if nav.can_delete else 'no' }}" data-share="{{ 'yes' if nav.can_share else 'no' }}"{% if embed %} data-embed="yes"{% endif %}
       data-chat-api="{{ url_for('ChatView.index') }}api/"
       data-dictionary-api="{{ url_for('KnowledgeView.index') }}api/"
       data-admin-api="{{ url_for('AdminView.index') }}api/"

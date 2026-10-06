@@ -60,6 +60,49 @@ LEFT_WHERE_HINT = (" A LEFT JOIN keeps the left rows that have no match; a condi
                    "aggregating query (SUM, COUNT). Do not list keys by hand: a list of the first rows misses keys.")
 
 
+COLUMN_ERROR = re.compile(r'Column \\?"([^"\\]+)\\?" does not exist in \\?"([^"\\]+)\\?"\. Available: ([^\n]+)')
+
+
+def _fold(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def closest_columns(text: str) -> str:
+    """The fields of the table closest to a name it does not have ("Column "STATUS" does not exist in "jobs".
+    Available: ..."): the same letters apart from case and separators, a field that holds the name (or the name it),
+    the fields sharing its words, then the closest spellings. The model read the list and tried the wrong one again
+    (0.9.6: such errors came back two to five times in one answer)."""
+    import difflib
+
+    m = COLUMN_ERROR.search(text or "")
+    if not m:
+        return ""
+    name = m.group(1)
+    fields = [f.strip() for f in m.group(3).split(",") if f.strip() and not f.strip().startswith("...")]
+    fields = [re.sub(r"\s*\(.*$|\.$", "", f) for f in fields]
+    if not fields:
+        return ""
+    key, out = _fold(name), []
+    words = {w for w in re.split(r"[^a-z0-9]+", name.lower()) if len(w) >= 3}
+    for f in fields:                                   # the same letters (status / STATUS / Status_)
+        if _fold(f) == key and f not in out:
+            out.append(f)
+    for f in fields:                                   # one holds the other (status / STATUS_INFO)
+        if key and (key in _fold(f) or _fold(f) in key) and len(_fold(f)) >= 3 and f not in out:
+            out.append(f)
+    for f in fields:                                   # their words (job_status / STATUS_OF_JOB)
+        if words & {w for w in re.split(r"[^a-z0-9]+", f.lower()) if len(w) >= 3} and f not in out:
+            out.append(f)
+    folded = {_fold(f): f for f in fields}
+    for c in difflib.get_close_matches(key, list(folded), n=3, cutoff=0.6):
+        if folded[c] not in out:
+            out.append(folded[c])
+    if not out:
+        return ""
+    return (f' The fields of "{m.group(2)}" closest to "{name}": ' + ", ".join(f'"{f}"' for f in out[:4]) +
+            " (write the one you mean exactly as it is written here).")
+
+
 class ExecuteSqlRequest(BaseModel):
     database_id: int = Field(description="Database id (list_databases)")
     sql: str = Field(description="One SELECT statement")
@@ -93,6 +136,7 @@ def execute_sql(request: ExecuteSqlRequest) -> dict:
                 hint = unknown_tables(database, request.sql) if TABLE_ERROR.search(text) else ""
                 if hint:                               # the real cause: a name that is no index or metric
                     return {"success": False, "error": f"{hint} ({text[:300]})"}
+                text += closest_columns(text)
                 if backend == "osagg" and "WHERE term evaluated" in text:
                     text += WHERE_HINT
                 elif backend == "osagg" and LEFT_WHERE.search(text):

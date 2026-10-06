@@ -56,12 +56,17 @@ def _save(message_id: int, live: tuple[str, ...] = LIVE, **values: Any) -> bool:
     return bool(n)
 
 
-def _steps_for_page(trace: list[dict]) -> list[dict]:
+def _steps_for_page(trace: list[dict], agent: Any = None) -> list[dict]:
     out = []
+    understood = getattr(agent, "understood", None) if agent is not None else None
+    if isinstance(understood, dict) and (understood.get("as") or understood.get("similar") or understood.get("general")):
+        out.append({"tool": "understood", "status": "done", "seconds": 0, "args": understood, "result": ""})
     for t in trace:
         out.append({"tool": t.get("called") or t["tool"], "status": t.get("status"), "seconds": t.get("seconds"),
                     "args": t.get("args"), "result": (t.get("result") or "")[:1500],
-                    **({"ledger": t["ledger"]} if isinstance(t.get("ledger"), dict) else {})})   # the work plan
+                    **({"ledger": t["ledger"]} if isinstance(t.get("ledger"), dict) else {}),   # the work plan
+                    **({"found": t["found"]} if isinstance(t.get("found"), list) else {}),      # a search's items
+                    **({"read": t["read"]} if isinstance(t.get("read"), list) else {})})        # its words read otherwise
     return out
 
 
@@ -390,7 +395,7 @@ def run_answer(message_id: int, taking_over: bool = False) -> bool:
     history: list[dict] = []
 
     def on_step(trace: list[dict]) -> None:
-        if not _save(message_id, steps=_steps_for_page(trace)):
+        if not _save(message_id, steps=_steps_for_page(trace, agent)):
             raise Cancelled("stopped by the user")
 
     def should_stop() -> bool:
@@ -440,7 +445,7 @@ def run_answer(message_id: int, taking_over: bool = False) -> bool:
             if should_stop():
                 raise Cancelled("stopped by the user")
             files = _keep_files(message_id, _files_of(trace))
-            if not _save(message_id, content=answer, status="done", steps=_steps_for_page(trace), files=files,
+            if not _save(message_id, content=answer, status="done", steps=_steps_for_page(trace, agent), files=files,
                          results=_results_of(trace), finished_at=dt.datetime.utcnow()):
                 kept = [f["id"] for f in files if f.get("id")]    # stopped meanwhile: nothing of it stays
                 if kept:

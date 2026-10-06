@@ -15,6 +15,9 @@
   <section class="thread">
     <div id="messages" class="messages" aria-live="polite"></div>
     <form id="ask" class="composer" autocomplete="off">
+      <div class="composer-grip" id="question-grip" role="separator" aria-orientation="horizontal" tabindex="0"
+           aria-controls="question" aria-label="Height of the question box: drag its top edge, or use the arrow keys"
+           title="Drag up or down to resize (double-click: back to the default)"><span aria-hidden="true"></span></div>
       <label for="question" class="visually-hidden">Question</label>
       <textarea id="question" rows="2" maxlength="8000"
                 placeholder="Ask about your data: failed jobs, servers, metrics, what a field means&hellip;  (Enter to send, Shift+Enter for a new line)"></textarea>

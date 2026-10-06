@@ -20,12 +20,23 @@ def route_call(route, confidence="high", second="", scores=None):
         "name": "route_question", "arguments": json.dumps(args)}}]}
 
 
+def read_call(restated="", general=False):
+    return {"role": "assistant", "content": "", "tool_calls": [{"id": "q", "type": "function", "function": {
+        "name": "read_question", "arguments": json.dumps({"restated": restated, "general": general})}}]}
+
+
+class Recording(ScriptedLLM):
+    def chat(self, messages, tools=None, max_tokens=None, tool_choice=None):
+        self.tools = [*getattr(self, "tools", []), [t["function"]["name"] for t in tools or []]]
+        return super().chat(messages, tools, max_tokens, tool_choice)
+
+
 @pytest.fixture()
 def on(ctx, monkeypatch):
     from supagent import settings
 
     real = settings.get
-    conf = {"agent.router": True, "router.min_confidence": "medium"}
+    conf = {"agent.router": True, "router.min_confidence": "medium", "agent.read_question": False}
     monkeypatch.setattr(settings, "get", lambda key: conf[key] if key in conf else real(key))
     yield conf
 
@@ -202,3 +213,137 @@ def test_the_governed_pipeline_sends_chart_and_incident_questions_to_the_classic
     answer, trace = a.ask("Why was the report late on 23 September?", [])
     assert [s["tool"] for s in trace][:1] == ["route"] and "srv-a-1" in answer
     assert a.way.startswith("classic: the router: incident")
+
+
+def test_the_reading_is_a_call_of_its_own_and_the_route_is_asked_as_before(on):
+    """(0.9.6) Asked in the routing call, the reading made the routes worse (0.734 against 0.761 on the router's
+    suite): the route is asked with its instruction and tool alone, the reading with its own, at the same time;
+    both calls are counted in the answer's usage."""
+    from supagent import router
+
+    on["agent.read_question"] = True
+    llm = Recording([route_call("incident"), read_call("Why was the daily report late on 5 October", False)])
+    d = router.decide("Why was the report late yesterday?", llm=llm, shown=[], found=[])
+    assert (d.route, d.restated, d.general) == ("incident", "Why was the daily report late on 5 October", False)
+    assert llm.tools == [["route_question"], ["read_question"]]
+    route_msgs, read_msgs = llm.seen
+    assert route_msgs[0]["content"] == router.ROUTER_SYSTEM and read_msgs[0]["content"] == router.READ_SYSTEM
+    assert route_msgs[1:] == read_msgs[1:]                                  # what both are shown
+    assert "restated" not in json.dumps(router.ROUTE_TOOL) and d.usage["calls"] == 2
+    # a general question: said by the reading
+    d = router.decide("How do I loop over the lines of a file in bash?", shown=[], found=[],
+                      llm=ScriptedLLM([route_call("other"), read_call("A bash loop over the lines of a file", True)]))
+    assert d.general is True
+    # a word of the team's glossary in the question: never general
+    glossary = [{"kind": "glossary", "title": "pool saturation (glossary)"}]
+    d = router.decide("What does pool saturation mean?", shown=[], found=glossary,
+                      llm=ScriptedLLM([route_call("functional"), read_call("What pool saturation means", True)]))
+    assert d.general is False and d.restated == "What pool saturation means"
+    # the reading fails: the route stands, the question as it was asked
+    d = router.decide("Why was the report late yesterday?", shown=[], found=[],
+                      llm=ScriptedLLM([route_call("incident"), RuntimeError("the model is down")]))
+    assert (d.route, d.restated, d.general) == ("incident", "", False)
+    # off: one call
+    on["agent.read_question"] = False
+    llm = Recording([route_call("incident")])
+    d = router.decide("Why was the report late yesterday?", llm=llm, shown=[], found=[])
+    assert llm.tools == [["route_question"]] and d.restated == "" and d.usage["calls"] == 1
+
+
+def test_a_real_client_reads_the_question_on_its_own_client_at_the_same_time(on, monkeypatch):
+    """A real client: the reading runs in a thread on a client of its own (the routing call's time bound is set on
+    the router's client, never on the reader's), and both are waited for."""
+    import threading
+    import types
+
+    from supagent import llm as L, router
+
+    on["agent.read_question"] = True
+    both = threading.Barrier(2, timeout=5)              # each call waits for the other: they run at the same time
+    made = []
+
+    class Client(ScriptedLLM):
+        def __init__(self, cfg=None, replies=()):
+            super().__init__(list(replies) or [read_call("Why was the daily report late on 5 October")])
+            self.cfg = cfg if cfg is not None else types.SimpleNamespace(timeout=300)
+            made.append(self)
+
+        def chat(self, messages, tools=None, max_tokens=None, tool_choice=None):
+            import flask
+
+            both.wait()
+            self.context = (flask.has_app_context(), L._TASK.get())     # pylint: disable=protected-access
+            return super().chat(messages, tools, max_tokens, tool_choice)
+
+    monkeypatch.setattr(L, "LLM", Client)
+    routing = Client(replies=[route_call("incident")])
+    with L.llm_task("answer", message_id=4711):
+        d = router.decide("Why was the report late yesterday?", llm=routing, shown=[], found=[])
+    assert (d.route, d.restated) == ("incident", "Why was the daily report late on 5 October")
+    reader = made[1]
+    assert reader is not routing and reader.cfg is not routing.cfg and routing.cfg.timeout == 300
+    assert d.usage["calls"] == 2
+    # the reader's thread has the app (its call is recorded) and the answer's context (recorded as the answer's)
+    assert reader.context[0] is True and (reader.context[1] or {}).get("message_id") == 4711
+
+
+def test_the_real_client_reads_the_question_and_both_calls_are_recorded(on, ctx):
+    """The real HTTP client against a local server: the route and the reading are asked, each with its own tool,
+    and both calls are recorded as the answer's (supagent_llm_call), the reading's from its own thread."""
+    import http.server
+    import threading
+
+    from superset.extensions import db
+
+    from supagent import llm as L, router
+    from supagent.models import LLMCall
+
+    asked = []
+
+    class Stub(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            tool = body["tools"][0]["function"]["name"]
+            asked.append(tool)
+            msg = route_call("incident") if tool == "route_question" else read_call("Why was the report late on 5 October")
+            out = json.dumps({"choices": [{"message": msg}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(out.encode())
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Stub)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        on["agent.read_question"] = True
+        before = db.session.query(LLMCall).filter(LLMCall.message_id == 4712).count()
+        client = L.LLM(L.LLMConfig(base_url=f"http://127.0.0.1:{server.server_port}/v1", model="stub"))
+        with L.llm_task("answer", message_id=4712):
+            d = router.decide("Why was the report late yesterday?", llm=client, shown=[], found=[])
+        assert (d.route, d.restated, d.usage["calls"]) == ("incident", "Why was the report late on 5 October", 2)
+        assert sorted(asked) == ["read_question", "route_question"]
+        db.session.commit()
+        assert db.session.query(LLMCall).filter(LLMCall.message_id == 4712).count() == before + 2
+    finally:
+        server.shutdown()
+
+
+def test_by_default_the_question_is_not_read_and_nothing_of_a_reading_reaches_the_answer(ctx, monkeypatch):
+    """(0.9.6, measured) The reading misled follow-ups; it is off by default: the router makes its one call with its
+    own prompt, nothing is restated, no question is taken for a general one."""
+    from supagent import router, settings
+    from supagent.agent import Agent
+
+    assert settings.get("agent.read_question") is False                  # the default
+    real = settings.get
+    monkeypatch.setattr(settings, "get", lambda key: True if key == "agent.router" else real(key))
+    llm = Recording([route_call("functional")])
+    d = router.decide("What share of all the orders of that day is that?", llm=llm, shown=[], found=[])
+    assert llm.tools == [["route_question"]] and llm.seen[0][0]["content"] == router.ROUTER_SYSTEM
+    assert (d.restated, d.general) == ("", False) and d.usage["calls"] == 1
+    a = object.__new__(Agent)
+    a.moa = d
+    assert a._general("How do I loop over the files of a folder in bash?", "") is False   # no general path

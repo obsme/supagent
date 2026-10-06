@@ -6,7 +6,7 @@
   "use strict";
   var S = window.supagent, el = S.el, D = S.dictionary;
   var $ = function (id) { return document.getElementById(id); };
-  var admin = S.isAdmin;
+  var admin = S.canEdit, canDelete = S.canDelete;   // an editor writes; deleting is an admin's (0.9.6)
   if (!D) return;
 
   function result(node, r, good) {
@@ -134,21 +134,133 @@
     counts[group] = Math.max(0, (counts[group] || 0) - (n === undefined ? 1 : n));
     var c = $("rg-count-" + group);
     if (c) c.textContent = S.num(counts[group]);
-    var waiting = ["memory", "recipes", "values", "relations", "tags", "links"].reduce(function (s, k) { return s + (counts[k] || 0); }, 0);
+    var waiting = ["memory", "recipes", "values", "removals", "tags", "links"].reduce(function (s, k) { return s + (counts[k] || 0); }, 0);
     setWaiting(waiting);
     summaryLine(waiting);
     saved();
   }
 
+  /* a page's old and new versions, line by line (0.9.6, the user's request): side by side, the old on the left in red
+     where it goes, the new on the right in green where it comes, the words that changed marked; in one column on a
+     narrow screen or on demand; long unchanged stretches folded. rows: the server's diff (knowledge.context). */
+  var DIFF_CONTEXT = 2, DIFF_FOLD = 6;
+  function diffView(rows, labels) {
+    var box = el("div", { class: "diff" });
+    var wide = window.matchMedia ? !window.matchMedia("(max-width: 760px)").matches : true;
+    var mode = wide ? "split" : "unified";
+    var bar = el("div", { class: "diff-bar" });
+    var counts = { add: 0, del: 0, mod: 0 };
+    rows.forEach(function (r) { if (counts[r.op] !== undefined) counts[r.op]++; });
+    bar.appendChild(el("span", { class: "diff-sum" }, [
+      el("span", { class: "diff-n add", text: "+" + (counts.add + counts.mod) }), " ",
+      el("span", { class: "diff-n del", text: "\u2212" + (counts.del + counts.mod) }),
+      " lines" + (counts.mod ? " (" + counts.mod + " changed in place)" : "")]));
+    var toggle = el("button", { type: "button", class: "btn small", text: "", onclick: function () {
+      mode = mode === "split" ? "unified" : "split"; draw(); } });
+    bar.appendChild(toggle);
+    box.appendChild(bar);
+    var holder = el("div", { class: "diff-scroll" });
+    box.appendChild(holder);
+    function parts(list, cls) {
+      return (list || []).map(function (pt) {
+        return pt[0] === "eq" ? document.createTextNode(pt[1]) : el("span", { class: cls, text: pt[1] });
+      });
+    }
+    function cell(r, side) {                  // the text of one side of a row, its changed words marked
+      if (r.op === "mod") return parts(side === "old" ? r.old_parts : r.new_parts, side === "old" ? "w-del" : "w-add");
+      var t = side === "old" ? r.old : r.new;
+      return t === null || t === undefined ? [] : [document.createTextNode(t === "" ? " " : t)];
+    }
+    function shown() {                         // the rows to draw: unchanged runs folded, but around each change
+      var keep = rows.map(function () { return false; });
+      rows.forEach(function (r, i) {
+        if (r.op === "same") return;
+        for (var k = Math.max(0, i - DIFF_CONTEXT); k <= Math.min(rows.length - 1, i + DIFF_CONTEXT); k++) keep[k] = true;
+      });
+      var out = [], i = 0;
+      while (i < rows.length) {
+        if (keep[i] || rows[i].op !== "same") { out.push(rows[i]); i++; continue; }
+        var j = i;
+        while (j < rows.length && !keep[j]) j++;
+        if (j - i < DIFF_FOLD) { for (var k = i; k < j; k++) out.push(rows[k]); }
+        else out.push({ fold: rows.slice(i, j) });
+        i = j;
+      }
+      return out;
+    }
+    function draw() {
+      toggle.textContent = mode === "split" ? "One column" : "Side by side";
+      holder.innerHTML = "";
+      var table = el("table", { class: "diff-table " + mode });
+      if (mode === "split") table.appendChild(el("thead", {}, [el("tr", {}, [
+        el("th", { class: "ln" }), el("th", { text: labels[0] }), el("th", { class: "ln" }), el("th", { text: labels[1] })])]));
+      var body = el("tbody");
+      shown().forEach(function (r) {
+        if (r.fold) {
+          var tr = el("tr", { class: "d-fold" }, [el("td", { colspan: mode === "split" ? "4" : "3" }, [
+            el("button", { type: "button", class: "linkish", text: "\u22ef " + r.fold.length + " unchanged lines", onclick: function () {
+              var frag = document.createDocumentFragment();
+              r.fold.forEach(function (x) { frag.appendChild(line(x)[0]); });
+              tr.replaceWith(frag);
+            } })])]);
+          body.appendChild(tr);
+          return;
+        }
+        line(r).forEach(function (tr) { body.appendChild(tr); });
+      });
+      table.appendChild(body);
+      holder.appendChild(table);
+    }
+    function line(r) {
+      if (mode === "split") {
+        return [el("tr", { class: "d-" + r.op }, [
+          el("td", { class: "ln", text: r.o || "" }),
+          el("td", { class: "code old" + (r.op === "del" || r.op === "mod" ? " gone" : "") }, cell(r, "old")),
+          el("td", { class: "ln", text: r.n || "" }),
+          el("td", { class: "code new" + (r.op === "add" || r.op === "mod" ? " come" : "") }, cell(r, "new"))])];
+      }
+      var out = [];                             // one column: the old line (−) then the new one (+)
+      if (r.op === "same") out.push(el("tr", { class: "d-same" }, [el("td", { class: "ln", text: r.n || "" }),
+        el("td", { class: "sign", text: " " }), el("td", { class: "code" }, cell(r, "new"))]));
+      if (r.op === "del" || r.op === "mod") out.push(el("tr", { class: "d-del" }, [el("td", { class: "ln", text: r.o || "" }),
+        el("td", { class: "sign", text: "\u2212" }), el("td", { class: "code gone" }, cell(r, "old"))]));
+      if (r.op === "add" || r.op === "mod") out.push(el("tr", { class: "d-add" }, [el("td", { class: "ln", text: r.n || "" }),
+        el("td", { class: "sign", text: "+" }), el("td", { class: "code come" }, cell(r, "new"))]));
+      return out;
+    }
+    draw();
+    box._update = function (newRows) { rows = newRows; draw(); };
+    return box;
+  }
+
+  function recipeSummary(r) {              // what the agent (or a person) kept of a Helpful answer
+    if (!(r.title || r.description || (r.how || []).length)) return null;
+    var box = el("div", { class: "recipe-summary" });
+    if (r.title) box.appendChild(el("div", { class: "rs-title", text: r.title }));
+    if (r.description) box.appendChild(el("div", { class: "rs-desc", text: r.description }));
+    if ((r.how || []).length) {
+      box.appendChild(el("div", { class: "ctx-diff-h", text: "Steps" }));
+      box.appendChild(el("ol", { class: "rs-steps" }, r.how.map(function (x) { return el("li", { text: x }); })));
+    }
+    if ((r.tasks || []).length) {
+      box.appendChild(el("div", { class: "ctx-diff-h", text: "Checks each time" }));
+      box.appendChild(el("ul", { class: "rs-tasks" }, r.tasks.map(function (x) { return el("li", { text: x }); })));
+    }
+    box.appendChild(el("div", { class: "muted small", text: r.summary_by && r.summary_by !== "agent" ?
+      "written by " + r.summary_by : "written by the agent from the whole discussion: correct it with Edit" }));
+    return box;
+  }
+
   var GROUPS = [
     ["memory", "Team memory proposed from the chats", "Used for everyone once approved. Correct the wording if needed."],
     ["recipes", "Answers marked Helpful", "Confirmed ones are proposed first for similar questions; rejected ones never. Each keeps its path: the data it used (tables with their fields, metrics with their labels) and its steps; correct it in your words before confirming. An answer that ran no query (a check, a comparison with usual) is kept as its path; an investigation as the path the LLM wrote of it. Once confirmed, the next similar question starts from it."],
-    ["values", "New values proposed for the categories", "Proposed by the LLM from the texts, or read by the learning in the data's category fields. A value is used once approved, with what it is part of; merge it into an existing one when it is the same thing. Nothing is added to the categories without you."],
-    ["relations", "Categories part of others", "What the texts say about known values: a component of two applications, an application of a subject."],
+    ["values", "New values proposed for the categories", "Proposed by the LLM from the texts, or read by the learning in the data's category fields. A value is used once approved, with the links proposed with it; merge it into an existing one when it is the same thing. Nothing is added to the categories without you."],
+    ["removals", "Links proposed for removal", "A link whose removal was proposed (by an editor, or by the learning: what it was read from is gone, the data no longer shows it) stays drawn and followed until you decide. Remove: it goes. Keep: the proposal goes."],
     ["retire", "Parts that look retired", "A value read in the data that its category's fields and labels have not shown for two weeks, or one a text says was retired or decommissioned. Nothing is retired by itself. Retire keeps the value, marked retired: it is no longer used nor drawn, and adding it again by hand brings it back. Keep: the same reason is not proposed again."],
     ["tags", "Categories given to items", "The LLM was not sure enough to give these alone."],
     ["links", "Relations and interactions", "What the LLM found related (explains, about, depends on), and the interactions between parts of the system that your documents state (each with its sentence): approved, they are drawn on the System map and followed by the agent's investigations."],
-    ["routes", "Kinds of work learned from the chats", "Already used as examples by the router; set the right kind, or remove a wrong one."]
+    ["routes", "Kinds of work learned from the chats", "Already used as examples by the router; set the right kind, or remove a wrong one."],
+    ["context", "Context pages written by the agent", "The nightly Context build proposes each change of a page (and the removal of a page whose subject is gone): the page shown stays as it is until you approve. A newer change of the same page replaces the one you did not review yet; what that one said and this one no longer does is listed, so nothing is lost silently. A new page is shown at once and listed here until someone has read it."]
   ];
   var TITLES = {};
   GROUPS.forEach(function (g) { TITLES[g[0]] = g[1]; });
@@ -279,13 +391,16 @@
         }),
         group("recipes", d.recipes || [], function (r) {
           var isPath = r.tool === "investigation" || r.tool === "path";   // the way an answer went: read, not run
-          var q = el("div", { class: "rtext", text: r.question });
+          // what the agent kept of the discussion (0.9.6): a title, a description, the steps, the checks
+          var kept = recipeSummary(r);
+          var q = el("div", { class: kept ? "rtext muted small" : "rtext", text: (kept ? "Question: " : "") + r.question });
           var way = el("details", { class: "query" }, [el("summary", { text: (r.tool === "investigation" ? "Investigation path" : r.tool === "path" ?
             "Path (the checks that answered it)" : (r.tool || "")) + (r.target ? " · " + r.target : "") }), el("pre", { text: r.query || "" })]);
           if (isPath) way.open = true;
           // the path of an answer that keeps a query: the data it used and its steps
           var steps = !isPath && r.path ? el("details", { class: "query recipe-way" }, [el("summary", { text: "Its path: the data it uses, its steps" }), el("pre", { text: r.path })]) : null;
-          return card([q, way, steps],
+          if (kept) way.open = false;                // the summary first; the run itself folded below it
+          return card([kept, q, way, steps].filter(Boolean),
             "used " + S.num(r.uses || 1) + " time" + ((r.uses || 1) > 1 ? "s" : "") + " · " + S.when(r.created_at), [
               act("Confirm", "primary", "recipes", function () { return S.dict("POST", "recipes/" + r.id, { status: "confirmed" }).then(function (x) { return x.error ? x : { done: "confirmed" }; }); }),
               toggleButton("Edit", "p-edit", function () {
@@ -296,9 +411,19 @@
                 var res = el("div", { class: "result", role: "status" });
                 var pathBox = steps ? el("textarea", { rows: "5", class: "recipe-path", spellcheck: "false", "aria-label": "Its path: the data it uses, its steps" }) : null;
                 if (pathBox) pathBox.value = r.path || "";
+                var tt = el("input", { type: "text", maxlength: "120", class: "recipe-title", "aria-label": "Title", placeholder: "Title" });
+                tt.value = r.title || "";
+                var dd = el("textarea", { rows: "2", class: "recipe-desc", "aria-label": "Description", placeholder: "What it answers, when to reuse it" });
+                dd.value = r.description || "";
+                var hw = el("textarea", { rows: "5", class: "recipe-how", "aria-label": "Steps, one per line", placeholder: "The steps, one per line" });
+                hw.value = (r.how || []).join("\n");
+                var tk = el("textarea", { rows: "3", class: "recipe-tasks", "aria-label": "Checks, one per line", placeholder: "The checks to do each time, one per line" });
+                tk.value = (r.tasks || []).join("\n");
                 q.hidden = true; way.hidden = true;
                 if (steps) steps.hidden = true;
-                var panel = el("div", { class: "recipe-edit" }, [qa, code, pathBox, el("div", { class: "actions" }, [
+                if (kept) kept.hidden = true;
+                var panel = el("div", { class: "recipe-edit" }, [el("div", { class: "ctx-diff-h", text: "What to keep (title, description, steps, checks)" }),
+                  tt, dd, hw, tk, el("div", { class: "ctx-diff-h", text: "The question and the way it was answered" }), qa, code, pathBox, el("div", { class: "actions" }, [
                   isPath ? null : el("button", { type: "button", class: "btn small", text: "Check the query", onclick: function () {
                     res.className = "result"; res.textContent = "running it with your permissions…";
                     S.dict("POST", "recipes/" + r.id + "/check", { query: code.value }).then(function (x) {
@@ -308,13 +433,14 @@
                     });
                   } }),
                   act("Save and confirm", "primary", "recipes", function () {
-                    var body = { question: qa.value, query: code.value, status: "confirmed" };
+                    var body = { question: qa.value, query: code.value, status: "confirmed", title: tt.value,
+                                 description: dd.value, how: hw.value, tasks: tk.value };
                     if (pathBox) body.path = pathBox.value;
                     return S.dict("POST", "recipes/" + r.id, body).then(function (x) {
                       return x.error ? x : { done: "corrected and confirmed" };
                     });
                   })]), res]);
-                panel._close = function () { q.hidden = false; way.hidden = false; if (steps) steps.hidden = false; };
+                panel._close = function () { q.hidden = false; way.hidden = false; if (steps) steps.hidden = false; if (kept) kept.hidden = false; };
                 return panel;
               }),
               act("Reject", "", "recipes", function () { return S.dict("POST", "recipes/" + r.id, { status: "rejected" }).then(function (x) { return x.error ? x : { done: "rejected" }; }); })
@@ -327,7 +453,8 @@
             name.firstChild.textContent = v.facet + ": " + v.value;
             desc.textContent = v.description || "";
             desc.hidden = !v.description;
-            parts.textContent = (v.parents || []).length ? "part of: " + partsText(v.parents) : "";
+            parts.textContent = (v.parents || []).length ? "links proposed with it: " + (v.parents || []).map(function (x) {
+              return "\u2192 " + x.value + " (" + (FACET_NAMES[x.facet] || x.facet).toLowerCase() + "): belongs to"; }).join("; ") : "";
             parts.hidden = !(v.parents || []).length;
           };
           paint();
@@ -339,7 +466,7 @@
           var acts = [
             act("Approve", "primary", "values", function () { return S.admin("POST", "facets/" + v.id, { status: "approved" }).then(function (r) { return r.error ? r : { done: "approved" }; }); }),
             /* Edit: everything about the value at once, as in Categories (its category, its name, what it covers,
-               its other names, what it is part of), then approved with it, or saved to decide later */
+               its other names), then approved with it, or saved to decide later; its links once it is approved */
             toggleButton("Edit…", "p-edit", function () {
               var cat = el("select", { "aria-label": "Category" }, Object.keys(FACET_NAMES).map(function (k) {
                 return el("option", { value: k, text: FACET_NAMES[k], selected: k === v.facet ? "selected" : null }); }));
@@ -349,9 +476,8 @@
               ds.value = v.description || "";
               var sy = el("input", { type: "text", "aria-label": "Also called", placeholder: "also called (comma separated)" });
               sy.value = (v.synonyms || []).join(", ");
-              var field = partsField(v.id, v.parents || []);
               var send = function (approve) {
-                var body = { facet: cat.value, value: nm.value, description: ds.value, synonyms: sy.value, parents: field.ids() };
+                var body = { facet: cat.value, value: nm.value, description: ds.value, synonyms: sy.value };
                 if (approve) body.status = "approved";
                 return S.admin("POST", "facets/" + v.id, body);
               };
@@ -365,13 +491,11 @@
                 });
               });
               var saveOnly = act("Save", "", "values", function (c) {
-                    var chosen = field.chosen();
                     return send(false).then(function (r) {
                       if (r.error) return r;
                       if (r.merged_into) return merged(r);
                       v.facet = r.facet; v.value = r.value; v.description = ds.value.trim();
                       v.synonyms = sy.value.split(",").map(function (x) { return x.trim(); }).filter(Boolean);
-                      v.parents = chosen;
                       paint();
                       c.querySelectorAll(".rpanel").forEach(function (x) { x.remove(); });
                       c.querySelectorAll("button[aria-expanded]").forEach(function (b) { b.setAttribute("aria-expanded", "false"); b.classList.remove("on"); });
@@ -386,7 +510,6 @@
                 el("label", { class: "field" }, [el("span", { text: "Name" }), nm]),
                 el("label", { class: "field" }, [el("span", { text: "What it covers" }), ds]),
                 el("label", { class: "field" }, [el("span", { text: "Also called" }), sy]),
-                el("div", { class: "field" }, [el("span", { text: "Part of (type to search, several can be chosen)" }), field.el]),
                 el("div", { class: "actions" }, [saveApprove, saveOnly])]);
             }),
             toggleButton("Merge into…", "p-merge", function () {
@@ -396,7 +519,7 @@
                 sel.innerHTML = "";
                 sel.appendChild(el("option", { value: "", text: "Merge into…" }));
                 (f.facets || []).forEach(function (x) { sel.appendChild(el("option", { value: x.id, text: x.value + " (" + x.items + ")" })); });
-                line.appendChild(act("Merge", "primary", "values", function () {
+                if (canDelete) line.appendChild(act("Merge", "primary", "values", function () {
                   if (!sel.value) return { keep: true };
                   return S.admin("POST", "facets/" + v.id, { merge_into: +sel.value }).then(function (r) {
                     return r.error ? r : { done: "merged into " + sel.options[sel.selectedIndex].text.replace(/ \(\d[\d,]*\)$/, ""), reload: true };
@@ -407,15 +530,7 @@
             }),
             act("Reject", "", "values", function () { return S.admin("POST", "facets/" + v.id, { status: "rejected" }).then(function (r) { return r.error ? r : { done: "rejected" }; }); })
           ];
-          acts.splice(2, 0, toggleButton("Part of…", "p-parts", function () {
-            var field = partsField(v.id, v.parents || []);
-            var go = act("Save and approve", "primary", "values", function () {
-              return S.admin("POST", "facets/" + v.id, { parents: field.ids(), status: "approved" }).then(function (r) { return r.error ? r : { done: "approved with what it is part of" }; });
-            });
-            return el("div", { class: "actions parts-pick" }, [
-              el("span", { class: "muted", text: "Part of (type to search, several can be chosen):" }), field.el, go]);
-          }));
-          if (v.same_as) acts.unshift(act("Merge into " + (elsewhere ? v.same_as.facet + " " : "") + v.same_as.value, "primary", "values", function () {
+          if (v.same_as && canDelete) acts.unshift(act("Merge into " + (elsewhere ? v.same_as.facet + " " : "") + v.same_as.value, "primary", "values", function () {
             // another category: the value moves there, where its name exists (one value, its items together)
             var body = elsewhere ? { facet: v.same_as.facet, value: v.same_as.value } : { merge_into: v.same_as.id };
             return S.admin("POST", "facets/" + v.id, body).then(function (r) {
@@ -425,31 +540,24 @@
           var from = v.source === "data" ? "found in the data" + ((v.origins || []).length ? ": " + v.origins[0] : "") : "proposed by the LLM";
           return card([name, desc, parts, same], S.num(v.items) + " item" + (v.items === 1 ? "" : "s") + " · " + from, acts);
         }, { bulk: foundBulk(d.found || {}) }),
-        group("relations", d.relations || [], function (x) {
-          return card([el("div", { class: "rtext" }, [el("span", { class: "facet-chip", text: x.facet + ": " + x.value }),
-              document.createTextNode(" is part of " + partsText(x.suggested))]),
-            (x.parents || []).length ? el("div", { class: "muted", text: "already part of: " + partsText(x.parents) }) : null,
-            (x.from || []).length ? el("div", { class: "muted", text: "seen in the data: " + x.from.join("; ") }) : null],
-            (x.from || []).length ? "found in the data (values that go together)" : "said by the texts the LLM read", [
-              act("Approve", "primary", "relations", function () { return S.admin("POST", "facets/" + x.id, { accept_parents: true }).then(function (r) { return r.error ? r : { done: "approved" }; }); }),
-              toggleButton("Change…", "p-change", function () {
-                var field = partsField(x.id, x.suggested || []);
-                var go = act("Save and approve", "primary", "relations", function () {
-                  return S.admin("POST", "facets/" + x.id, { accept_parents: field.ids() }).then(function (r) { return r.error ? r : { done: "changed and approved" }; });
-                });
-                return el("div", { class: "actions parts-pick" }, [
-                  el("span", { class: "muted", text: "Part of (type to search, several can be chosen):" }), field.el, go]);
-              }),
-              act("Reject", "", "relations", function () { return S.admin("POST", "facets/" + x.id, { reject_parents: true }).then(function (r) { return r.error ? r : { done: "rejected" }; }); })
-            ]);
-        }, { bulk: (d.relations || []).length > 1 ? bulk("Approve all shown", "relations", d.relations, function (x) { return S.admin("POST", "facets/" + x.id, { accept_parents: true }); }) : null }),
+        group("removals", d.removals || [], function (x) {
+          return card([el("div", { class: "rtext" }, [document.createTextNode(x.a_title + (x.both ? " \u2194 " : " \u2192 ") + x.b_title + ": "),
+                         el("span", { class: "link-kind", text: x.label || String(x.kind || "").replace(/_/g, " ") })]),
+                       x.note ? el("div", { class: "muted", text: "“" + x.note + "”" }) : null,
+                       el("div", { class: "muted", text: "Why: " + (x.why || "?") })],
+            "removal proposed " + S.when(x.at) + (x.source ? " · the link came from " + x.source : ""),
+            S.canDelete ? [
+              act("Remove", "primary", "removals", function () { return S.dict("POST", "map", { removal: { id: x.id, remove: true } }).then(function (r) { return r.error ? r : { done: "removed" }; }); }),
+              act("Keep", "", "removals", function () { return S.dict("POST", "map", { removal: { id: x.id, remove: false } }).then(function (r) { return r.error ? r : { done: "kept" }; }); })
+            ] : [el("span", { class: "muted", text: "an AI Admin decides" })]);
+        }),
         group("retire", d.retire || [], function (x) {
           var why = x.kind === "said" ? "a text says it was retired" : x.kind === "absent" ? "no longer in the data" : "names nothing";
           return card([el("div", { class: "rtext" }, [el("span", { class: "facet-chip", text: x.facet + ": " + x.value })]),
                        el("div", { class: "muted", text: x.why }),
                        x.evidence ? el("div", { class: "muted", text: (x.kind === "said" ? "“" + x.evidence + "”" : "it was read from: " + x.evidence) }) : null],
             why + " · " + (x.source === "data" ? "read from the data" : "put by hand") + (x.at ? " · proposed " + x.at : ""), [
-              act("Retire", "primary", "retire", function () { return S.admin("POST", "facets/" + x.id, { retire: true }).then(function (r) { return r.error ? r : { done: "retired (kept, no longer used)" }; }); }),
+              canDelete && act("Retire", "primary", "retire", function () { return S.admin("POST", "facets/" + x.id, { retire: true }).then(function (r) { return r.error ? r : { done: "retired (kept, no longer used)" }; }); }),
               act("Keep", "", "retire", function () { return S.admin("POST", "facets/" + x.id, { retire: false }).then(function (r) { return r.error ? r : { done: "kept: not proposed again for this reason" }; }); })
             ]);
         }),
@@ -488,13 +596,13 @@
           var longIn = el("textarea", { rows: "2", maxlength: "2000", "aria-label": "Long explanation",
                                         placeholder: "What an investigation checks on the other part, and what a problem there does here" });
           longIn.value = x.detail || "";
-          return card([el("div", { class: "rtext" }, [document.createTextNode(x.a_title + " "), el("span", { class: "link-kind", text: String(x.kind || "").replace(/_/g, " ") }),
-                                                    document.createTextNode(" " + x.b_title)]),
+          return card([el("div", { class: "rtext" }, [document.createTextNode(x.a_title + (x.both ? " \u2194 " : " \u2192 ") + x.b_title + ": "),
+                                                    el("span", { class: "link-kind", text: x.parts ? x.label : String(x.kind || "").replace(/_/g, " ") })]),
                        x.parts ? el("label", { class: "link-explain" }, [el("span", { class: "muted", text: "Short: " }), shortIn]) :
                          (x.note ? el("div", { class: "muted", text: "“" + x.note + "”" }) : null),
                        x.parts ? el("details", { class: "link-explain" }, [el("summary", { text: "In full: what to do when following it" }), longIn]) : null,
                        x.evidence ? el("div", { class: "muted small-note", text: "Said in: " + x.evidence }) : null],
-            (x.parts ? "an interaction for the System map" : x.a + " → " + x.b) + (x.confidence !== null && x.confidence !== undefined ? " · confidence " + Math.round(x.confidence * 100) + "%" : ""), [
+            (x.parts ? "a link of the System map" : x.a + " → " + x.b) + (x.confidence !== null && x.confidence !== undefined ? " · confidence " + Math.round(x.confidence * 100) + "%" : ""), [
               act("Approve", "primary", "links", function () {
                 var body = { status: "approved" };
                 if (x.parts && (shortIn.value !== (x.note || "") || longIn.value !== (x.detail || ""))) { body.note = shortIn.value; body.detail = longIn.value; }
@@ -511,7 +619,66 @@
               act("Set", "primary", "routes", function () { return S.admin("POST", "routes/" + r.id, { route: sel.value }).then(function (x) { return x.error ? x : { done: sel.value === r.route ? "kept: " + r.route : "set to " + sel.value }; }); }),
               act("Not an example", "", "routes", function () { return S.admin("POST", "routes/" + r.id, { remove: true }).then(function (x) { return x.error ? x : { done: "removed" }; }); })
             ]);
-        }, { fold: 10 })
+        }, { fold: 10 }),
+        group("context", d.context || [], function (pg) {
+          // a Context page: its change as statements added and dropped, what an earlier proposal said that this one does not
+          var main = [el("div", { class: "rtext" }, [document.createTextNode(pg.title + " "),
+            el("span", { class: "facet-chip", text: pg.section + " \u00b7 " + (pg.what === "remove" ? "removal proposed" :
+              pg.what === "new" ? "new page" : "change proposed") })])];
+          function list(title, items, cls) {
+            if (!items || !items.length) return;
+            main.push(el("div", { class: "ctx-diff-h", text: title + " (" + items.length + ")" }));
+            main.push(el("ul", { class: "ctx-diff " + cls }, items.slice(0, 12).map(function (x) { return el("li", { text: x }); })));
+          }
+          var dv = diffView(pg.diff || [], pg.what === "new" ? ["", "The new page"] :
+            pg.what === "remove" ? ["The page shown (its removal is proposed)", ""] : ["The page shown now", "The page proposed"]);
+          if (pg.what === "change") {
+            main.push(dv);
+            if (pg.replaced) list("Said by the earlier proposal it replaces, not by this one", pg.left_out, "left");
+            var short = el("details", { class: "ctx-full" }, [el("summary", { text: "In short: the statements added and dropped" })]);
+            var keep = main;
+            main = [];
+            list("Added", pg.added, "add");
+            list("No longer said (obsolete in the page shown)", pg.obsolete, "drop");
+            main.forEach(function (x) { short.appendChild(x); });
+            main = keep;
+            main.push(short);
+          } else if (pg.what === "remove") {
+            main.push(el("div", { class: "rtext muted", text: "Its subject is no longer found (a database or an application gone)." }));
+            main.push(dv);
+          } else {
+            main.push(dv);
+          }
+          var acts = [];
+          if (pg.what !== "remove" || canDelete) acts.push(act(pg.what === "remove" ? "Remove" : pg.what === "new" ? "Read: fine" : "Approve",
+            "primary", "context", function () {
+              return S.admin("POST", "context/" + pg.id + "/review", { action: "approve" }).then(function (r) {
+                return r.error ? r : { done: pg.what === "remove" ? "removed" : "approved" }; });
+            }));
+          if (pg.what !== "new") acts.push(act(pg.what === "remove" ? "Keep it" : "Keep the page as it is", "", "context", function () {
+            return S.admin("POST", "context/" + pg.id + "/review", { action: "reject" }).then(function (r) {
+              return r.error ? r : { done: "kept as it is" }; });
+          }));
+          // edit the proposed page (or a new one) before approving it, as the other cards: your text is shown (0.9.6)
+          if (pg.what !== "remove") acts.push(toggleButton("Edit", "p-edit", function () {
+            var ta = el("textarea", { class: "context-edit ctx-edit", rows: "16", "aria-label": "The page, as it will be shown" });
+            ta.value = pg.what === "change" ? pg.proposed : pg.content;
+            return el("div", { class: "ctx-editor" }, [
+              el("div", { class: "ctx-diff-h", text: "Edit the page (Markdown); Save and approve shows your text. The agent proposes " +
+                "again only when its sources change, and lists what of your text its proposal would drop." }),
+              ta, el("div", { class: "actions" }, [el("button", { type: "button", class: "btn small", text: "Show the changes",
+                onclick: function () {
+                  S.admin("POST", "context/" + pg.id + "/diff", { content: ta.value }).then(function (r) {
+                    if (!r.error && dv._update) { dv._update(r.diff || []); dv.scrollIntoView({ behavior: "smooth", block: "nearest" }); }
+                  });
+                } }), act("Save and approve", "primary", "context", function () {
+                return S.admin("POST", "context/" + pg.id + "/review", { action: "approve", content: ta.value }).then(function (r) {
+                  return r.error ? r : { done: r.edited ? "approved as you edited it" : "approved" }; });
+              })])]);
+          }));
+          return card(main, "version " + pg.version + (pg.proposed_at ? " \u00b7 proposed " + S.when(pg.proposed_at) : "") +
+            (pg.replaced ? " \u00b7 replaces " + pg.replaced + " earlier proposal" + (pg.replaced > 1 ? "s" : "") : ""), acts);
+        })
       ];
       parts.forEach(function (p) { if (p) box.appendChild(p); });
     });
@@ -614,7 +781,7 @@
     $("e-enabled").checked = e ? e.enabled : true;
     $("e-content").value = e ? (e.content || "") : "";
     $("e-result").textContent = ""; $("e-result").className = "result";
-    $("e-delete").hidden = !e;
+    $("e-delete").hidden = !e || !canDelete;
     $("e-history-box").hidden = !e; $("e-history").innerHTML = ""; $("e-history-box").open = false;
     $("e-evidence").hidden = !(e && e.origin);
     $("e-evidence").textContent = e && e.origin ? evidenceText(e) : "";
@@ -667,7 +834,7 @@
         cat.current = r.entry;
         res.textContent = "saved (v" + r.entry.version + ")" + (r.applied && r.applied.curated ? ", applied to " + r.applied.curated + " objects" : "");
         res.className = "result good";
-        $("entry-title-h").textContent = r.entry.title; $("e-delete").hidden = false; $("e-history-box").hidden = false;
+        $("entry-title-h").textContent = r.entry.title; $("e-delete").hidden = !canDelete; $("e-history-box").hidden = false;
         saved();
         catLoad(false);
       });
@@ -731,7 +898,7 @@
               el("button", { type: "button", class: "btn small", text: "Cancel", onclick: memRender })]));
             ta.focus();
           } }));
-          acts.appendChild(sureButton("Delete", function () { S.chat("DELETE", "memory/" + m.id).then(function (r) { if (!r.error) saved(); memLoad(); }); },
+          if (canDelete) acts.appendChild(sureButton("Delete", function () { S.chat("DELETE", "memory/" + m.id).then(function (r) { if (!r.error) saved(); memLoad(); }); },
             "Delete this team memory?", "It is gone for good and the agent no longer uses it. Disable keeps it without using it."));
         }
       }
@@ -864,7 +1031,7 @@
         } }));
         acts.appendChild(el("button", { type: "button", class: "linkish", text: "Edit", title: "Category, pages, how it is read, its sign-in",
           onclick: function () { docEditor(x, row); } }));
-        acts.appendChild(sureButton("Delete", function () { S.admin("DELETE", "docs/" + x.id).then(function (r) { if (!r.error) saved(); docsLoad(); }); },
+        if (canDelete) acts.appendChild(sureButton("Delete", function () { S.admin("DELETE", "docs/" + x.id).then(function (r) { if (!r.error) saved(); docsLoad(); }); },
           "Delete “" + (x.title || x.url || "this document") + "”?",
           (x.pages && x.pages.length > 1 ? "Its " + x.pages.length + " pages leave" : "It leaves") + " the agent's search" +
           (x.kind === "url" ? (x.auth && x.auth.type ? ", and its saved sign-in is deleted" : "") + "; the site can be added again." :
@@ -943,8 +1110,7 @@
         var valueCell = el("td", {}, [el("div", { class: "facet-value", text: f.value }),
           f.description ? el("div", { class: "muted", text: f.description }) : null,
           (f.synonyms || []).length ? el("div", { class: "muted", text: "also: " + f.synonyms.join(", ") }) : null,
-          (f.parents || []).length ? el("div", { class: "muted facet-parents", text: "part of: " + f.parents.map(function (x) {
-            return (FACET_NAMES[x.facet] || x.facet).toLowerCase() + " " + x.value; }).join(", ") }) : null,
+
           (f.origins || []).length ? el("div", { class: "muted facet-origins", text: "from: " + f.origins.slice(-3).join("; ") +
             (f.origins.length > 3 ? " (+" + (f.origins.length - 3) + ")" : "") }) : null]);
         var acts = el("td", { class: "row-actions" });
@@ -959,12 +1125,9 @@
             return el("option", { value: k, text: FACET_NAMES[k], selected: k === f.facet ? "selected" : null });
           })) : null;
           var msg = el("span", { class: "result", role: "status" });
-          // what it is part of: values of the categories, several at once (a component of two applications)
-          var field = cat ? partsField(f.id, f.parents || []) : null;
           var save = el("button", { type: "button", class: "btn small primary", text: "Save", onclick: function () {
             var body = { value: v.value, description: ds.value, synonyms: sy.value };
             if (cat) body.facet = cat.value;
-            if (field) body.parents = field.ids();
             S.admin("POST", "facets/" + f.id, body).then(function (r) {
               if (r.error) { result(msg, r, ""); return; }
               saved();
@@ -974,22 +1137,28 @@
           } });
           valueCell.innerHTML = "";
           valueCell.appendChild(el("div", { class: "facet-edit" }, [v, cat, ds, sy,
-            field ? el("div", { class: "field" }, [el("span", { text: "Part of (type to search, several can be chosen)" }), field.el]) : null,
             el("div", { class: "actions" }, [save,
               el("button", { type: "button", class: "btn small", text: "Cancel", onclick: facetsLoad }), msg])]));
           v.focus();
         } }));
+        if (f.status === "approved") acts.appendChild(el("button", { type: "button", class: "linkish", text: "Links…",   // (0.9.6)
+          "aria-expanded": "false", onclick: function (ev) {
+            var open = valueCell.querySelector(".links-box");
+            if (open) { open.remove(); ev.target.setAttribute("aria-expanded", "false"); return; }
+            ev.target.setAttribute("aria-expanded", "true");
+            valueCell.appendChild(S.linksBox({ id: f.id, value: f.value }, { onchange: function () { saved(); } }));
+          } }));
         var same = all.filter(function (x) { return x.facet === f.facet && x.id !== f.id && x.status === "approved"; });
         if (same.length) {
           acts.appendChild(el("button", { type: "button", class: "linkish", text: "Merge…", onclick: function () {
             if (acts.querySelector("select")) return;
             var sel = el("select", { "aria-label": "Merge into" }, [el("option", { value: "", text: "into…" })].concat(
               same.map(function (x) { return el("option", { value: x.id, text: x.value }); })));
-            acts.appendChild(sel);
+            if (canDelete) acts.appendChild(sel);
             sel.addEventListener("change", function () { if (sel.value) post({ merge_into: +sel.value }); });
           } }));
         }
-        if (f.source !== "seed") acts.appendChild(sureButton(f.status === "approved" ? "Retire" : "Reject", function () { post({ status: "rejected" }); },
+        if (canDelete || f.status !== "approved") if (f.source !== "seed") acts.appendChild(sureButton(f.status === "approved" ? "Retire" : "Reject", function () { post({ status: "rejected" }); },
           (f.status === "approved" ? "Retire " : "Reject ") + "\u201c" + f.value + "\u201d?",
           (f.items ? "Its " + S.num(f.items) + " item" + (f.items === 1 ? "" : "s") + " lose this " + f.facet + ". " : "") +
           "It is not proposed again; adding it by hand brings it back."));
@@ -1049,12 +1218,12 @@
         var goes = [];
         if (n) goes.push(S.num(n) + " value" + (n === 1 ? "" : "s"));
         if (c.tags) goes.push(S.num(c.tags) + " link" + (c.tags === 1 ? "" : "s") + " to items");
-        if (c.parts) goes.push(S.num(c.parts) + " “part of”");
-        if (c.interactions) goes.push(S.num(c.interactions) + " interaction" + (c.interactions === 1 ? "" : "s") + " of the map");
-        acts.appendChild(sureButton("Remove", function () {
+        var nl = (c.parts || 0) + (c.interactions || 0);           // (0.9.6: one kind of relation, the link)
+        if (nl) goes.push(S.num(nl) + " link" + (nl === 1 ? "" : "s") + " of the map");
+        if (canDelete) acts.appendChild(sureButton("Remove", function () {
           return S.admin("POST", "facets/categories", { name: c.name, remove: true }).then(function (r) {
             result($("cat-own-result"), r, "removed: " + FACET_NAMES[c.name] + (r.removed && r.removed.values ? " with its " + S.num(r.removed.values) + " value" + (r.removed.values === 1 ? "" : "s") : ""));
-            if (!r.error) { saved(); loadCategories(); if (newParts) newParts.clear(); facetsLoad(); }
+            if (!r.error) { saved(); loadCategories(); facetsLoad(); }
           });
         }, "Remove the category “" + FACET_NAMES[c.name] + "”?",
            (goes.length ? "These go with it: " + goes.join(", ") + ". " : "It has no value: only the category goes. ") + "This cannot be undone.",
@@ -1100,47 +1269,14 @@
       });
     });
   }
-  function partsText(list) {
-    return (list || []).map(function (x) { return (FACET_NAMES[x.facet] || x.facet).toLowerCase() + " " + x.value; }).join(", ");
-  }
-  /* the approved values, by category, as options (what a value may be part of) */
-  /* What a value is part of: several values chosen in a box where one types (the server looks the words up in
-     the names and the other names of every value, the wider categories first; nothing typed: the first ones, with
-     how many more). The list is never loaded whole: a category read from the data has thousands of values.
-     `current`: the parts it has now ([{id, facet, value}]). */
-  var PARTS_LISTED = 60;
-  function partsField(skipId, current) {
-    var pick = S.picker({
-      chosen: (current || []).map(function (x) { return { id: x.id, label: x.value, group: plural(x.facet), data: x }; }),
-      placeholder: "Part of: type to search, choose several", label: "Part of (several can be chosen)",
-      load: function (words) {
-        return S.admin("GET", "facets?status=approved&brief=1&limit=" + PARTS_LISTED + (words ? "&q=" + encodeURIComponent(words) : "")).then(function (d) {
-          var rows = (d.facets || []).filter(function (x) { return x.id !== skipId; });
-          return { items: rows.map(function (x) { return { id: x.id, label: x.value, group: plural(x.facet), data: x }; }),
-                   more: Math.max(0, (d.total || 0) - (d.facets || []).length) };
-        });
-      } });
-    return {
-      el: pick.el,
-      ids: function () { return pick.ids().map(function (i) { return +i; }); },
-      chosen: function () { return pick.chosen().map(function (c) { return c.data || { id: +c.id, value: c.label }; }); },
-      clear: function () { pick.set([]); }
-    };
-  }
-
-  var newParts = null;                       // what the value being added is part of
-  if (admin && $("fac-new-parents")) {
-    newParts = partsField(null, []);
-    $("fac-new-parents").appendChild(newParts.el);
-  }
+  // (0.9.6) a value's links are added once it exists: Links… on its line
   if (admin) {
     $("fac-add").addEventListener("click", function () {
       var res = $("fac-result"), btn = $("fac-add");
       if (!$("fac-new-value").value.trim()) { res.textContent = "write the value first"; res.className = "result bad"; return; }
       btn.disabled = true;
       S.admin("POST", "facets", { facet: $("fac-new-facet").value, value: $("fac-new-value").value,
-                                  description: $("fac-new-desc").value, synonyms: $("fac-new-syn").value,
-                                  parents: newParts ? newParts.ids() : [] }).then(function (r) {
+                                  description: $("fac-new-desc").value, synonyms: $("fac-new-syn").value }).then(function (r) {
         btn.disabled = false;
         result(res, r, "added: used at once");
         if (!r.error) {
@@ -1148,7 +1284,6 @@
           saved();
           loadCategories();                                   // the categories' counts follow
           facetsLoad();
-          if (newParts) newParts.clear();
         }
       });
     });
@@ -1178,7 +1313,7 @@
           if (!n.entry_id) acts.appendChild(el("button", { type: "button", class: "linkish", text: "Make a catalog entry",
             onclick: function () { post("/promote", {}); } }));
         }
-        if (n.can_change) acts.appendChild(sureButton("Delete", function () {
+        if (n.can_change && (n.mine || canDelete)) acts.appendChild(sureButton("Delete", function () {
           S.chat("DELETE", "notes/" + n.id).then(function () { saved(); notesLoad(); });
         }, "Delete the note \u201c" + (n.title || "Note") + "\u201d?", "It cannot be restored" +
            (n.entry_id ? " (its catalog guide stays)." : ".")));

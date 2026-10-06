@@ -117,6 +117,40 @@ def kind_from_name(name: str) -> str:
     return "gauge"
 
 
+LEVEL_SUFFIXES = ("_bytes", "_seconds", "_ratio", "_percent", "_percentage", "_celsius", "_info", "_timestamp", "_time",
+                  "_size", "_ms", "_milliseconds", "_temperature", "_volts", "_watts", "_up", "_status", "_state")
+
+
+def probes_type(name: str, kind: str) -> bool:
+    """Whether the samples are asked what the type is (no metadata: a gauge or a summary by its name only)."""
+    return kind == "summary" or (kind == "gauge" and not name.lower().endswith(LEVEL_SUFFIXES))
+
+
+def family_part(name: str, names: set[str]) -> bool:
+    """A part of a histogram or summary family: a _count, _sum or _bucket whose siblings are there (a lone
+    pg_stat_activity_count is not: 0.9.5, the name itself was taken for its sibling and its type never asked)."""
+    base = re.sub(r"_(count|sum|bucket)$", "", name)
+    return base != name and any(base + s in names for s in ("_bucket", "_sum", "_count") if base + s != name)
+
+
+def data_says(name: str, kind: str, changes: float | None, resets: float | None) -> dict[str, Any] | None:
+    """What a metric's samples over the profile's window say of its type, when no metadata says it (0.9.5): its
+    changes and its decreases (resets), asked with its statistics (no request more). A count without "_total" in
+    its name (nginx_ingress_controller_requests, ifHCInOctets, pg_stat_database_xact_commit) was told a gauge, its
+    value (a running total since a restart) read as the number asked; a "_count" that is a level
+    (pg_stat_activity_count: the connections now) was told a summary, its rate read as a number of connections.
+    {"increases_only": changes} when it never decreased (at least 10 changes, no reset): it counts;
+    {"goes_down": decreases, "changes": n} when a "_count" or "_sum" decreased at least a tenth of its changes:
+    a level. None when the samples do not tell."""
+    if not probes_type(name, kind) or changes is None or resets is None or changes < 10:
+        return None
+    if kind == "gauge" and resets == 0:
+        return {"increases_only": int(changes)}
+    if kind == "summary" and resets >= 0.1 * changes:
+        return {"goes_down": int(resets), "changes": int(changes)}
+    return None
+
+
 def _vector(conn: Any, expr: str, t_ms: int) -> list[Any]:
     try:
         return conn.client.query(expr, t_ms, timeout=int(settings.get("learn.request_timeout")))
@@ -134,8 +168,9 @@ def _value(series: Any) -> float | None:
     return None if v != v else round(float(v), 6)       # NaN -> None
 
 
-def _stat_query(sel: str, kind: str, name: str, w: str) -> str:
-    """One query returning several statistics, one series each (label "stat")."""
+def _stat_query(sel: str, kind: str, name: str, w: str, probe: bool = False) -> str:
+    """One query returning several statistics, one series each (label "stat"); `probe`: its changes and decreases
+    too (data_says)."""
     if name.endswith("_bucket"):
         parts = {f"p{int(q * 100)}": f"histogram_quantile({q}, sum by (le) (rate({sel}[{w}])))" for q in (0.5, 0.95)}
     elif kind in ("counter", "histogram", "summary"):
@@ -143,6 +178,8 @@ def _stat_query(sel: str, kind: str, name: str, w: str) -> str:
     else:
         parts = {"min": f"min(min_over_time({sel}[{w}]))", "max": f"max(max_over_time({sel}[{w}]))",
                  "avg": f"avg(avg_over_time({sel}[{w}]))"}
+    if probe:
+        parts.update(changes=f"sum(changes({sel}[{w}]))", resets=f"sum(resets({sel}[{w}]))")
     return " or ".join(f'label_replace({q}, "stat", "{k}", "", "")' for k, q in parts.items())
 
 
@@ -183,9 +220,10 @@ def _last_sample(conn: Any, sel: str, start: int, end: int, resolution_ms: int =
 
 
 def profile_metric(conn: Any, name: str, meta: Any, kind: str, hours: int, old: dict[str, Any],
-                   live: int | None = None, history: bool = True) -> dict[str, Any]:
+                   live: int | None = None, history: bool = True, probe: bool = False) -> dict[str, Any]:
     """`live`: its series with a sample now, when already counted (batch_counts); `history`:
-    measure the depth of the history now if due (else the learner does it with the time left)."""
+    measure the depth of the history now if due (else the learner does it with the time left); `probe`: its
+    changes and decreases asked too (stats "changes", "resets": data_says)."""
     sel = '{__name__="%s"}' % name
     now = conn.now_ms()
     stats: dict[str, Any] = {"profiled_at": dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
@@ -224,7 +262,7 @@ def profile_metric(conn: Any, name: str, meta: Any, kind: str, hours: int, old: 
     if series and series <= int(settings.get("learn.stats_max_series")):
         w = f"{hours}h" if series <= BIG_METRIC else "1h"
         stats["window"] = w
-        for s in _vector(conn, _stat_query(sel, kind, name, w), end):
+        for s in _vector(conn, _stat_query(sel, kind, name, w, probe), end):
             stat = (getattr(s, "labels", None) or {}).get("stat")
             if stat:
                 stats[stat] = _value(s)
@@ -232,8 +270,13 @@ def profile_metric(conn: Any, name: str, meta: Any, kind: str, hours: int, old: 
     return stats
 
 
+PAIRS: dict[str, list[dict[str, Any]]] = {}      # the category pairs of the last series sampled per metric
+
+
 def label_sample(conn: Any, name: str, end_ms: int) -> tuple[dict[str, dict[str, Any]], bool]:
-    """Labels and their values from one sample of the metric's series; (labels, complete)."""
+    """Labels and their values from one sample of the metric's series; (labels, complete). The values of two
+    category labels seen in the same series (a server with its component, a tenant with its servers: 0.9.6) are kept
+    for the metric's stats (PAIRS)."""
     limit = int(settings.get("learn.series_sample"))
     sel = '{__name__="%s"}' % name
     try:
@@ -243,6 +286,15 @@ def label_sample(conn: Any, name: str, end_ms: int) -> tuple[dict[str, dict[str,
     except Exception as ex:  # pylint: disable=broad-except
         return {"__error__": {"error": str(ex)[:200]}}, False
     complete = len(series) < limit
+    try:
+        from supagent.knowledge.datalinks import label_pairs
+
+        pairs = label_pairs(series)
+        at = dt.datetime.utcfromtimestamp(end_ms / 1000).isoformat(timespec="seconds")
+        PAIRS[name] = [{**p, "at": at} for p in pairs]
+    except Exception:  # pylint: disable=broad-except   (the labels without their pairs)
+        log.warning("supagent learn: category pairs of %s not read", name, exc_info=True)
+        PAIRS.pop(name, None)
     return _label_stats(series, complete), complete
 
 
@@ -322,8 +374,19 @@ def batch_labels(conn: Any, counts: dict[str, int], end_ms: int) -> dict[str, tu
         for s in series:
             labels = s if isinstance(s, dict) else getattr(s, "labels", {}) or {}
             by_name.setdefault(labels.get("__name__", ""), []).append(labels)
+        at = dt.datetime.utcfromtimestamp(end_ms / 1000).isoformat(timespec="seconds")
         for n in g:
             out[n] = (_label_stats(by_name.get(n, []), True), True)
+            try:                                       # what its labels' values say goes together (0.9.6)
+                from supagent.knowledge.datalinks import label_pairs
+
+                pairs = label_pairs(by_name.get(n, []))
+                if pairs:
+                    PAIRS[n] = [{**p, "at": at} for p in pairs]
+                else:
+                    PAIRS.pop(n, None)
+            except Exception:  # pylint: disable=broad-except
+                log.warning("supagent learn: category pairs of %s not read", n, exc_info=True)
     return out
 
 
@@ -472,6 +535,7 @@ def learn_metrics(run: Run, source: Source, database: Any, deadline: float, prog
             seen_labels.update((metric, lb.name) for lb in db.session.query(KObject).filter_by(
                 source_id=source.id, kind="label", parent=metric))
 
+        name_set = set(names)
         for name in names:
             seen_metrics.add(("", name))
             old = known.get(name)
@@ -501,9 +565,22 @@ def learn_metrics(run: Run, source: Source, database: Any, deadline: float, prog
                     facts["metric_type"] = kind
                 if name not in prepared:
                     prepare(name)
+                # no metadata, a gauge or a lone "_count"/"_sum" by its name: its samples asked for its type too
+                probe = not md.get("type") and probes_type(name, kind) and not family_part(name, name_set)
                 stats = profile_metric(conn, name, None, kind, hours, (old.stats or {}) if old is not None else {},
-                                       live=counted.get(name), history=False)
+                                       live=counted.get(name), history=False, probe=probe)
                 end_ms = stats.pop("_end_ms", conn.now_ms())
+                changes, resets = stats.pop("changes", None), stats.pop("resets", None)
+                if probe and "note" not in stats:
+                    said = data_says(name, kind, changes, resets)      # no metadata: the samples say (0.9.5)
+                    if said:
+                        if said.get("goes_down"):                    # a level, whatever its name says
+                            facts["metric_type"] = kind = "gauge"
+                            stats = {**profile_metric(conn, name, None, kind, hours, (old.stats or {}) if old is not
+                                                      None else {}, live=counted.get(name), history=False), "data_says": said}
+                            end_ms = stats.pop("_end_ms", end_ms)
+                        else:
+                            stats["data_says"] = said
                 if "note" in stats:
                     labels = {}
                 elif name in sampled and counted.get(name) and end_ms >= conn.now_ms() - 600_000:
@@ -513,6 +590,8 @@ def learn_metrics(run: Run, source: Source, database: Any, deadline: float, prog
                 if "quantile" in labels and not name.endswith(FAMILY_SUFFIXES):
                     facts["metric_type"] = kind = "summary"
                 stats["labels"] = sorted(k for k in labels if not k.startswith("__error"))
+                if PAIRS.get(name):                       # what its labels' values say goes together (0.9.6)
+                    stats["category_pairs"] = PAIRS.pop(name)
                 obj = upsert(run, source, "metric", "", name, {**facts, "stats": stats})
                 out["profiled"] += 1
                 if out["profiled"] % SYNC_EVERY == 0:      # a long first pass: searchable as it goes

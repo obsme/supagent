@@ -39,7 +39,7 @@
       else if (attrs[k] !== null && attrs[k] !== undefined && attrs[k] !== false) e.setAttribute(k, attrs[k]);
     });
     (children || []).forEach(function (c) {
-      if (c === null || c === undefined) return;
+      if (c === null || c === undefined || c === false) return;     // (a control the role may not use: false)
       e.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
     });
     return e;
@@ -63,6 +63,121 @@
     if (v === null || v === undefined || v === "") return "";
     if (typeof v === "number") return v.toLocaleString(undefined, { maximumFractionDigits: 4 });
     return String(v);
+  }
+
+  /* The links of a part of the System map (0.9.6, the user's request: one type of relation, the link): each with
+     what it is (its description), what it does (what to do when following it), its direction from this part (→ it
+     goes to the other, ← it comes from it, ↔ both ways); several with one other part. An editor adds one (the other
+     part, chosen in a box where one types), corrects it, turns it around, proposes to remove it; an AI Admin
+     removes it. `part`: {id, value}; `opts.onchange`: after a change (the map draws again). */
+  var GLYPH = { out: "\u2192", "in": "\u2190", both: "\u2194" };
+  function linksBox(part, opts) {
+    opts = opts || {};
+    var S = window.supagent, box = el("div", { class: "links-box" }), list = el("ul", { class: "links-list" });
+    var state = el("div", { class: "muted", text: "Loading the links…" });
+    box.appendChild(state);
+    box.appendChild(list);
+    var changed = function () { load(); if (opts.onchange) opts.onchange(); };
+    function dirOf(x) { return x.both ? "both" : x.out ? "out" : "in"; }
+    function form(x, done) {                                  // what it is, what it does, which way
+      var other = x ? null : picker({ single: true, placeholder: "The other part: type to search", label: "The other part",
+        load: function (words) {
+          return api(document.body.dataset.adminApi, "GET", "facets?status=approved&brief=1&limit=60" +
+                     (words ? "&q=" + encodeURIComponent(words) : "")).then(function (d) {
+            var rows = (d.facets || []).filter(function (f) { return f.id !== part.id; });
+            return { items: rows.map(function (f) { return { id: f.id, label: f.value, group: f.facet, data: f }; }),
+                     more: Math.max(0, (d.total || 0) - (d.facets || []).length) };
+          });
+        } });
+      var desc = el("input", { type: "text", maxlength: "500", "aria-label": "What the link is",
+                               placeholder: "What the link is, in a few words (runs on, sends the payment files to…)" });
+      desc.value = x ? x.note : "";
+      var work = el("textarea", { rows: "3", maxlength: "2000", "aria-label": "What the link does",
+                                  placeholder: "What it does, what to check on the other part when following it (optional)" });
+      work.value = x ? x.detail : "";
+      var otherName = x ? x.other.value : "the other part";
+      var dir = el("select", { "aria-label": "Direction" }, [
+        el("option", { value: "out", text: part.value + " \u2192 " + otherName }),
+        el("option", { value: "in", text: otherName + " \u2192 " + part.value }),
+        el("option", { value: "both", text: "both ways \u2194" })]);
+      dir.value = x ? dirOf(x) : "out";
+      var res = el("span", { class: "result", role: "status" });
+      var save = el("button", { type: "button", class: "btn small primary", text: x ? "Save" : "Add the link", onclick: function () {
+        var to = x ? x.other.id : (other.ids()[0] ? +other.ids()[0] : null);
+        if (!to) { res.textContent = "choose the other part"; res.className = "result bad"; return; }
+        if (!x && !desc.value.trim()) { res.textContent = "say what the link is"; res.className = "result bad"; return; }
+        var body = { note: desc.value, detail: work.value, both: dir.value === "both" };
+        if (x) {
+          body.id = x.id; body.a = x.a; body.b = x.b;
+          body.reverse = (dir.value === "out" && !x.out) || (dir.value === "in" && x.out);
+        } else if (dir.value === "in") { body.a = to; body.b = part.id; }
+        else { body.a = part.id; body.b = to; }
+        save.disabled = true;
+        S.dict("POST", "map", { interaction: body }).then(function (r) {
+          save.disabled = false;
+          if (r.error) { res.textContent = r.error; res.className = "result bad"; return; }
+          if (done) done();
+          changed();
+        });
+      } });
+      return el("div", { class: "link-form" }, [other ? other.el : null, desc, work,
+        el("div", { class: "actions" }, [dir, save, el("button", { type: "button", class: "btn small", text: "Cancel",
+          onclick: function () { if (done) done(); } }), res])]);
+    }
+    function load() {
+      S.dict("GET", "map/links?id=" + part.id).then(function (d) {
+        list.innerHTML = "";
+        if (d.error) { state.textContent = d.error; return; }
+        var links = d.links || [];
+        state.textContent = links.length ? "" : "No link yet.";
+        state.hidden = !links.length ? false : true;
+        links.forEach(function (x) {
+          var li = el("li", { class: "link-item" + (x.status === "proposed" ? " proposed" : "") });
+          var line = el("div", { class: "link-line" }, [
+            el("span", { class: "link-dir", title: x.both ? "both ways" : x.out ? "from this part to the other" : "from the other part to this one",
+                         text: GLYPH[dirOf(x)] }),
+            el("strong", { text: " " + x.other.value }), el("span", { class: "muted", text: " (" + x.other.facet + ")" }),
+            el("span", { text: ": " + x.label }),
+            x.status === "proposed" ? el("span", { class: "badge", text: "proposed" }) : null,
+            x.drop ? el("span", { class: "badge warn", text: "removal proposed", title: x.drop }) : null]);
+          li.appendChild(line);
+          if (x.detail) li.appendChild(el("div", { class: "muted link-work", text: x.detail }));
+          var acts = el("div", { class: "actions" });
+          if (d.can_edit) acts.appendChild(el("button", { type: "button", class: "linkish", text: "Edit", onclick: function () {
+            if (li.querySelector(".link-form")) return;
+            li.appendChild(form(x, function () { var f = li.querySelector(".link-form"); if (f) f.remove(); }));
+          } }));
+          if (d.can_delete) acts.appendChild(sureButton("Remove", function () {
+            S.dict("POST", "map", { remove_interaction: x.id }).then(function (r) { if (!r.error) changed(); });
+          }, { cls: "linkish", ask: "Remove the link to " + x.other.value + "?", yes: "Remove" }));
+          else if (d.can_edit && !x.drop) acts.appendChild(el("button", { type: "button", class: "linkish", text: "Propose its removal",
+            onclick: function () {
+              S.dict("POST", "map", { propose_removal: { id: x.id, why: "proposed from the Categories page" } }).then(function (r) {
+                if (!r.error) changed(); });
+            } }));
+          if (acts.childNodes.length) li.appendChild(acts);
+          list.appendChild(li);
+        });
+        var adder = box.querySelector(".link-add");
+        if (d.can_edit && !adder) {
+          var holder = el("div", { class: "link-add" });
+          holder.appendChild(el("button", { type: "button", class: "btn small", text: "+ Add a link", onclick: function () {
+            holder.innerHTML = "";
+            holder.appendChild(form(null, function () { holder.innerHTML = ""; holder.appendChild(addBtn); }));
+          } }));
+          var addBtn = holder.firstChild;
+          box.appendChild(holder);
+        }
+      });
+    }
+    load();
+    return box;
+  }
+
+  // the words of a search read otherwise (0.9.6): " · 'refunnd' read as 'refund'", or nothing
+  function readAs(changes) {
+    if (!changes || !changes.length) return "";
+    return " · " + changes.map(function (c) { return "'" + c.typed + "' read as '" + c.read + "'"; }).join(", ");
   }
 
   function bytes(n) {
@@ -210,7 +325,7 @@
   function picker(opts) {
     opts = opts || {};
     var id = "pick-" + (++pickN), chosen = (opts.chosen || []).slice(), items = [], more = 0, active = -1, open = false,
-      seq = 0, timer = null, busy = false;
+      seq = 0, timer = null, busy = false, shownFor = null;
     var chips = el("span", { class: "pick-chips" });
     var input = el("input", { type: "text", class: "pick-input", role: "combobox", "aria-expanded": "false",
       "aria-autocomplete": "list", "aria-controls": id, "aria-label": opts.label || opts.placeholder || "Choose",
@@ -275,11 +390,13 @@
       if (input.value) { input.value = ""; search(); }
     }
     function search() {
-      var mine = ++seq;
+      var mine = ++seq, words = input.value.trim();
       busy = true;
-      Promise.resolve(opts.load ? opts.load(input.value.trim()) : []).then(function (r) {
+      if (words !== shownFor) { items = []; more = 0; active = -1; paintList(); }   // (0.9.6) no stale option to click
+      Promise.resolve(opts.load ? opts.load(words) : []).then(function (r) {
         if (mine !== seq) return;                         // a later typing answers
         busy = false;
+        shownFor = words;
         items = (r && r.items) || (Array.isArray(r) ? r : []);
         more = (r && r.more) || 0;
         active = items.length && input.value.trim() ? 0 : -1;
@@ -342,14 +459,39 @@
              close: close };
   }
 
+  /* Tables of an answer fit the chat: each in its own box that scrolls sideways when wider than the answer (its
+     columns are never squeezed letter by letter), numbers kept on one line and aligned right, the first column
+     kept in view while scrolling. Run on HTML made from Markdown, after it is shown. */
+  var NUMBER = /^[-+\u2212(]?[\d\s\u00a0\u202f.,'\u2019]*\d[\d\s\u00a0\u202f.,'\u2019]*\s?[)%]?$/;
+  var EMPTY = /^(?:[-\u2013\u2014]|n\/a|null)?$/i;
+  function fitTables(root) {
+    if (!root || !root.querySelectorAll) return;
+    Array.prototype.forEach.call(root.querySelectorAll("table"), function (t) {
+      if (!(t.parentNode.classList && t.parentNode.classList.contains("tbl"))) {
+        var box = document.createElement("div");
+        box.className = "tbl";
+        t.parentNode.insertBefore(box, t);
+        box.appendChild(t);
+      }
+      Array.prototype.forEach.call(t.querySelectorAll("td, th"), function (c) {
+        var x = (c.textContent || "").trim();
+        if (NUMBER.test(x) || (c.tagName === "TD" && EMPTY.test(x))) c.classList.add("num");
+      });
+    });
+  }
+
   var body = document.body.dataset;
   window.supagent = {
     chat: function (m, p, b) { return api(body.chatApi, m, p, b); },
     dict: function (m, p, b) { return api(body.dictionaryApi, m, p, b); },
     admin: function (m, p, b) { return api(body.adminApi, m, p, b); },
-    isAdmin: body.admin === "yes",
+    isAdmin: body.admin === "yes",                 // the settings (AI Admin)
+    canEdit: body.edit === "yes",                  // the knowledge written (AI Editor and AI Admin)
+    canDelete: body.delete === "yes",              // the knowledge deleted (AI Admin)
+    canShare: body.share === "yes",                // notes and memories for everyone or a group (not AI Viewer)
     esc: esc, el: el, when: when, whenFull: whenFull, num: num, bytes: bytes, sourceBadge: sourceBadge, pager: pager,
-    pop: pop, unpop: unpop, info: info, wireInfos: wireInfos, confirm: confirm, sureButton: sureButton, picker: picker
+    pop: pop, unpop: unpop, info: info, wireInfos: wireInfos, confirm: confirm, sureButton: sureButton, picker: picker,
+    fitTables: fitTables, readAs: readAs, linksBox: linksBox
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", function () { wireInfos(); });
   else wireInfos();

@@ -533,6 +533,29 @@ def value_places(question: str, databases: list[Any] | None = None) -> dict[str,
     return out
 
 
+# a question back that offers to keep or to drop what the question before said ("the late ones delivered that day,
+# or all of them?", "that desk, or every desk?"): the other option's words
+KEEP_OR_ALL = re.compile(r"\b(all|any|every|regardless|whether|either|both|including|or not|combined|overall|in total|"
+                         r"or on time|tous|toutes|ensemble|quel que soit|ou non)\b", re.I)
+FOLLOW_STOP = {"the", "a", "an", "of", "on", "in", "at", "to", "for", "by", "and", "or", "was", "were", "is", "are", "how",
+               "many", "much", "what", "which", "who", "when", "did", "do", "does", "with", "that", "this", "those",
+               "these", "from", "it", "its", "their", "them", "they", "me", "my", "we", "our", "you", "your", "be",
+               "been", "le", "la", "les", "des", "du", "de", "et", "ou", "combien", "quel", "quelle", "quels", "quelles"}
+
+
+def keep_or_drop(before: str, answer: str) -> list[str] | None:
+    """A follow-up answered with a question back that offers the conditions of the question before (its words) or
+    all of the rows (all, regardless, both...): the words of the question before that the question back repeats, or
+    None. A follow-up keeps what the question before said unless it says otherwise ("I meant the ones delivered that
+    day" after "how many shipments were late?": the late ones), so there is nothing to choose."""
+    tail = (answer or "")[-600:]
+    if not before or not KEEP_OR_ALL.search(tail):
+        return None
+    said = [w for w in dict.fromkeys(re.findall(r"[^\W\d_][\w-]{2,}", before.lower())) if w not in FOLLOW_STOP]
+    shared = [w for w in said if re.search(rf"\b{re.escape(w)}\b", tail, re.I)]
+    return shared or None
+
+
 SOURCE_ASK = re.compile(r"\bwhich (?:of these |one of these |)(?:sources?|index(?:es)?|indices|data(?:sets?)?|tables?)\b|"
                         r"\bquelle?s? (?:source|index|donn[ée]es|table)", re.I)
 

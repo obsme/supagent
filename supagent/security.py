@@ -100,3 +100,20 @@ def visible_databases() -> set[int]:
     from superset.models.core import Database
 
     return {d.id for d in db.session.query(Database) if can_use_database(d)}
+
+
+def user_groups(user: Any = None) -> list[Any]:
+    """The Superset groups (teams) of a user (FAB 5: users belong to groups; a group carries roles), [] when the
+    Superset has no groups. 0.9.6: notes and team memory may be for one group."""
+    from flask import g
+
+    u = user if user is not None else getattr(g, "user", None)
+    try:
+        return list(getattr(u, "groups", None) or [])
+    except Exception:  # pylint: disable=broad-except
+        return []
+
+
+def group_scopes(user: Any = None) -> list[str]:
+    """The search scopes of the user's groups ("g<id>": what a group's note is indexed with)."""
+    return [f"g{gr.id}" for gr in user_groups(user) if getattr(gr, "id", None) is not None]

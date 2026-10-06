@@ -1,11 +1,11 @@
 /* supagent Data dictionary: the System map (0.8). The architecture of the system as the categories describe it: one
    column per category (subjects, applications, components, the deployment's own), a box per part with what it does
-   (its description, else a sentence of the documents that name it) and its items, a grey line from a part to what
-   it is part of, the interactions an admin drew as arrows. A category folds into one box and opens again with a
+   (its description, else a sentence of the documents that name it) and its items, the links between parts as
+   arrows (0.9.6: one kind of relation, each with what it is, what it does, its way). A category folds into one box and opens again with a
    click on its name (a big one starts folded); each viewer chooses the categories shown (the legend, or the cross
    in a category's name: kept in the browser); the map can take the whole screen. Admins: Edit to move the boxes
-   and the categories (drag a category's name), put categories in a group drawn around them (display only), draw an
-   interaction (a box, then another), write what a part is, hide a part.
+   and the categories (drag a category's name), put categories in a group drawn around them (display only), add a
+   link (a box, then another), write what a part is, hide a part.
    Exports: SVG, PNG, PDF. Drawn in SVG by hand: Superset's pages allow no external script. */
 (function () {
   "use strict";
@@ -16,13 +16,17 @@
   var FOLD_AT = 18, FOLD_ALWAYS = 60;   // a category read from the data with more parts than 18 is folded into one
                                         // box (servers...), any category with more than 60
   var BOX_W = 224, GAP = 14, COL_GAP = 96, PAD = 28, HEAD_H = 40, LINE = 16;
+  var GROUP_AT = 40, PAGE = 60;         // (0.9.6) an open category of more parts than 40 shows them by what they
+                                        // belong to (servers by their application), each group folded until opened;
+                                        // a group or a column shows its first 60 parts, the others behind one box
   /* What this viewer sees: `cats` the categories chosen (none: every category; kept in the browser), `parts` the
      parts chosen (none: every part of those categories; each chosen part comes with what it is part of, what it
      is made of and what it interacts with). Both are chosen in the box above the map; the legend and the cross
      in a category's name change `cats` too. */
   var st = { data: null, edit: false, open: {}, sel: null, from: null, view: { x: 0, y: 0, k: 1 },
              boxes: {}, saveTimer: null, fitted: false, seq: 0, sig: "", fresh: null, freshTimer: null, autoAt: 0, note: "", freshAt: -1, freshCats: [], inputAt: Date.now(),
-             cols: {}, groups: [], cats: readCats(), parts: [], full: false, pick: null };
+             cols: {}, groups: [], cats: readCats(), parts: [], full: false, pick: null,
+             owners: {}, openGroups: {}, more: {} };
   var CATS_KEY = "supagent.map.categories";      // the categories this viewer chose (this browser only)
   var GROUP_PAD = 12, GROUP_HEAD = 22, PICK_PARTS = 80;
   function readCats() {
@@ -97,7 +101,7 @@
      and every 20 seconds while it is looked at (quietly: drawn again only when something changed, never while an
      admin edits it). While it is read the page says so; what a reading brought (a new part, a new "part of") is
      outlined for a moment and said next to the title. */
-  function signature(d) { return JSON.stringify([d.values, d.links, d.categories, d.proposed, d.proposed_interactions, d.missing, d.layout && [d.layout.positions, d.layout.hidden, d.layout.folded, d.layout.columns, d.layout.groups]]); }
+  function signature(d) { return JSON.stringify([d.values, d.links, d.categories, d.proposed, d.proposed_interactions, d.removals, d.missing, d.layout && [d.layout.positions, d.layout.hidden, d.layout.folded, d.layout.columns, d.layout.groups]]); }
   function setState(text, cls) {
     var box = $("map-state");
     if (!box) return;
@@ -105,18 +109,16 @@
     box.className = "map-state" + (cls ? " " + cls : "");
   }
   function changes(before, after) {                           // what a reading brought
-    var had = {}, pairs = {}, now = {}, out = { ids: [], pairs: [], gone: 0, cats: [] };
+    var had = {}, links = {}, now = {}, out = { ids: [], pairs: [], gone: 0, cats: [] };
     var cats = before.categories.map(function (c) { return c.name; });
     after.categories.forEach(function (c) { if (cats.indexOf(c.name) < 0) out.cats.push(c.name); });
-    before.values.forEach(function (v) {
-      had[v.id] = true;
-      (v.parents || []).forEach(function (p) { pairs[p + ">" + v.id] = true; });
-    });
+    before.values.forEach(function (v) { had[v.id] = true; });
+    (before.links || []).forEach(function (x) { links[x.id] = true; });
     after.values.forEach(function (v) {
       now[v.id] = true;
       if (!had[v.id]) out.ids.push(v.id);
-      (v.parents || []).forEach(function (p) { if (!pairs[p + ">" + v.id]) out.pairs.push(p + ">" + v.id); });
     });
+    (after.links || []).forEach(function (x) { if (!links[x.id]) out.pairs.push("L" + x.id); });   // a new link
     before.values.forEach(function (v) { if (!now[v.id]) out.gone++; });
     return out;
   }
@@ -133,7 +135,7 @@
       var parts = [];
       if (what.cats.length) parts.push(what.cats.length === 1 ? "new category “" + catLabel(what.cats[0], 1) + "”" : what.cats.length + " new categories");
       if (what.ids.length) parts.push(what.ids.length === 1 ? "new part “" + st.byId[what.ids[0]].value + "”" : what.ids.length + " new parts");
-      if (what.pairs.length) parts.push(what.pairs.length + " new “part of”");
+      if (what.pairs.length) parts.push(what.pairs.length === 1 ? "a new link" : what.pairs.length + " new links");
       if (what.gone) parts.push(what.gone + " part" + (what.gone > 1 ? "s" : "") + " removed");
       st.note = "Updated: " + parts.join(", ");
       clearTimeout(st.freshTimer);
@@ -194,6 +196,11 @@
       d.values.forEach(function (v) { st.byId[v.id] = v; });
       st.kids = {};
       d.values.forEach(function (v) { (v.parents || []).forEach(function (p) { (st.kids[p] = st.kids[p] || []).push(v.id); }); });
+      st.owners = {};                                         // what a part belongs to: is part of, runs on (groups)
+      d.links.forEach(function (x) {
+        if ((x.kind === "part_of" || x.kind === "runs_on") && st.byId[x.a] && st.byId[x.b])
+          (st.owners[x.a] = st.owners[x.a] || []).push(x.b);
+      });
       var lay = d.layout || {};
       st.positions = lay.positions || {};
       st.hidden = lay.hidden || [];
@@ -394,7 +401,8 @@
         cols[c].forEach(function (v) { nodes[v.id] = { alias: "cat:" + c }; });
         return;
       }
-      cols[c].forEach(function (v) {
+      var grouped = !st.parts.length && cols[c].length > GROUP_AT ? groupsOf(c, cols[c], rankOf) : null;
+      var place = function (v) {
         var title = wrap(v.value, titleFont, BOX_W - 24, 2);
         var about = v.description ? wrap(v.description, textFont, BOX_W - 24, 3) :
           v.hint ? wrap("“" + v.hint.text + "”", "italic " + textFont, BOX_W - 24, 3) : [];
@@ -404,6 +412,34 @@
         nodes[v.id] = { id: v.id, v: v, cat: c, x: p ? p[0] + shift[c] : x, y: p ? p[1] : y, w: BOX_W, h: h, title: title, about: about,
                         items: items, hintFrom: v.hint && !v.description ? v.hint.from : null, moved: !!p };
         y += h + GAP;
+      };
+      var paged = function (list, scope) {                    // the first PAGE, the others behind one box
+        var shown = st.more[scope] || list.length <= PAGE + 5 ? list : list.slice(0, PAGE);
+        shown.forEach(place);
+        if (shown.length < list.length) {
+          var id = "more:" + scope, rest = list.slice(shown.length);
+          nodes[id] = { id: id, more: scope, cat: c, x: x, y: y, w: BOX_W, h: 40, title: ["Show the " + S.num(rest.length) + " others"],
+                        lines: [], members: rest.map(function (v) { return v.id; }) };
+          rest.forEach(function (v) { nodes[v.id] = { alias: id }; });
+          y += 40 + GAP;
+        }
+      };
+      if (!grouped) { paged(cols[c], c); return; }
+      grouped.keys.forEach(function (key) {                    // a group: folded until opened
+        var list = grouped.by[key], gid = "grp:" + c + ":" + key, open = !!st.openGroups[gid];
+        var owner = key === "none" ? null : st.byId[key];
+        var noun = catLabel(c, list.length).toLowerCase();
+        if (list.length > 1 && !/s$/.test(noun)) noun += "s";
+        var name = (owner ? owner.value : "linked to no " + catLabel(grouped.cat, 1).toLowerCase()) + " · " + S.num(list.length) +
+          " " + noun;
+        var lines = open ? [] : wrap(list.slice(0, 5).map(function (v) { return v.value; }).join(", ") + (list.length > 5 ? "…" : ""),
+                                     textFont, BOX_W - 24, 2);
+        var gh = open ? 34 : 36 + lines.length * LINE;
+        nodes[gid] = { id: gid, group: gid, owner: owner ? owner.id : null, open: open, cat: c, x: x, y: y, w: BOX_W, h: gh,
+                       title: [(open ? "\u25be " : "\u25b8 ") + name], lines: lines, members: list.map(function (v) { return v.id; }) };
+        y += gh + GAP;
+        if (open) paged(list, gid);
+        else list.forEach(function (v) { nodes[v.id] = { alias: gid }; });
       });
     });
     /* the groups an admin made (display only): a frame around the columns of their categories that are shown */
@@ -424,6 +460,42 @@
                     h: y1 - y0 + GROUP_HEAD + GROUP_PAD });
     });
     return { nodes: nodes, heads: heads, folded: folded, frames: frames, shift: shift };
+  }
+  /* The groups of a big open category: its parts by what they belong to (is part of, runs on) in the category most
+     of them belong to (servers by their application, disks by their server); none when that makes groups of one or
+     two (then the column is only paged). Groups in the order of what they belong to on the map. */
+  function groupsOf(c, members, rankOf) {
+    var count = {};
+    members.forEach(function (v) {
+      var seen = {};
+      (st.owners[v.id] || []).forEach(function (o) {
+        var oc = st.byId[o] && st.byId[o].facet;
+        if (oc && oc !== c && !seen[oc]) { seen[oc] = true; count[oc] = (count[oc] || 0) + 1; }
+      });
+    });
+    var split = function (cat) {                              // the parts by what they belong to in `cat`
+      var by = {}, keys = [];
+      members.forEach(function (v) {
+        var o = (st.owners[v.id] || []).filter(function (x) { return st.byId[x] && st.byId[x].facet === cat; })[0];
+        var key = o === undefined ? "none" : String(o);
+        if (!by[key]) { by[key] = []; keys.push(key); }
+        by[key].push(v);
+      });
+      return { by: by, keys: keys };
+    };
+    var best = null, got = null;                              // most of them belong there; the fewest groups
+    Object.keys(count).filter(function (k) { return count[k] * 2 >= members.length; }).forEach(function (k) {
+      var g = split(k);
+      if (!got || g.keys.length < got.keys.length) { best = k; got = g; }
+    });
+    if (!got || got.keys.length * 2 > members.length) return null;     // groups of one or two: no clearer
+    var by = got.by, keys = got.keys;
+    keys.sort(function (a, b) {
+      if (a === "none" || b === "none") return a === "none" ? 1 : -1;
+      var ra = rankOf[a] !== undefined ? rankOf[a] % 10000 : 1e9, rb = rankOf[b] !== undefined ? rankOf[b] % 10000 : 1e9;
+      return ra - rb || st.byId[a].value.localeCompare(st.byId[b].value);
+    });
+    return { cat: best, by: by, keys: keys };
   }
   function bary(v, rankOf) {
     var ps = (v.parents || []).filter(function (p) { return rankOf[p] !== undefined; });
@@ -476,41 +548,31 @@
     });
     L.heads.forEach(function (h) { gHeads.appendChild(headView(h, C)); });
     var drawn = {};
-    st.data.values.forEach(function (v) {                      // what each part is part of
-      if (!ids[v.id]) return;
-      (v.parents || []).forEach(function (p) {
-        if (!ids[p]) return;
-        var a = real(L.nodes, p), b = real(L.nodes, v.id);
-        if (!a || !b || a === b) return;
-        var key = a.id + ">" + b.id, isNew = !!(st.fresh && st.fresh.pairs[p + ">" + v.id]);
-        if (drawn[key]) { drawn[key].n++; drawn[key].fresh = drawn[key].fresh || isNew; return; }
-        drawn[key] = { a: a, b: b, n: 1, ids: [p, v.id], fresh: isNew };
-      });
-    });
-    Object.keys(drawn).forEach(function (k) {
-      var e = drawn[k], path = curve(e.a, e.b);
-      var line = svg("path", { d: path, fill: "none", stroke: C.axis, "stroke-width": e.n > 1 ? "2.5" : "1.5",
-                               class: "map-edge" + (e.fresh ? " map-edge-new" : ""), "data-a": String(e.a.id),
-                               "data-b": String(e.b.id) });
-      line.appendChild(svg("title", {}, [document.createTextNode((e.b.v ? e.b.v.value : e.b.title[0]) + " is part of " +
-        (e.a.v ? e.a.v.value : e.a.title[0]) + (e.n > 1 ? " (" + e.n + " parts)" : ""))]));
-      gEdges.appendChild(line);
-    });
-    st.data.links.forEach(function (x) {                       // the interactions an admin drew
+    st.data.links.forEach(function (x) {                       // the links: one line between two boxes
       if (!ids[x.a] || !ids[x.b]) return;
       var a = real(L.nodes, x.a), b = real(L.nodes, x.b);
       if (!a || !b || a === b) return;
+      var key = a.id + ">" + b.id, isNew = !!(st.fresh && st.fresh.pairs["L" + x.id]);
+      if (drawn[key]) { drawn[key].links.push(x); drawn[key].fresh = drawn[key].fresh || isNew; return; }
+      drawn[key] = { a: a, b: b, links: [x], fresh: isNew };
+    });
+    Object.keys(drawn).forEach(function (k) {
+      var e = drawn[k], x = e.links[0], a = e.a, b = e.b, n = e.links.length;
+      var both = e.links.every(function (y) { return y.both; }), drop = e.links.every(function (y) { return y.drop; });
       var path = curve(a, b, true);
-      // no text on the graph: the arrow, and a wider invisible line to click; a click shows what it is (its short
-      // explanation) and, folded, what to do when following it
-      var g = svg("g", { class: "map-link", "data-a": String(a.id), "data-b": String(b.id), "data-link": String(x.id),
-                         tabindex: "0", role: "button",
-                         "aria-label": (a.v ? a.v.value : "") + " " + x.label + " " + (b.v ? b.v.value : "") + ": details" });
-      g.appendChild(svg("path", { d: path.d, fill: "none", stroke: "transparent", "stroke-width": "12", class: "map-link-hit",
-                                  "pointer-events": "stroke" }));
-      g.appendChild(svg("path", { d: path.d, fill: "none", stroke: C.accent, "stroke-width": "2", "marker-end": "url(#map-arrow)" }));
-      g.appendChild(svg("title", {}, [document.createTextNode((a.v ? a.v.value : "") + " " + x.label + " " + (b.v ? b.v.value : ""))]));
-      var open = function (ev) { if (ev) { ev.stopPropagation(); ev.preventDefault(); } linkPanel(x); };
+      var named = (a.v ? a.v.value : a.title[0]) + (both ? " \u2194 " : " \u2192 ") + (b.v ? b.v.value : b.title[0]) +
+        (n > 1 ? " (" + n + " links)" : ": " + x.label);
+      // no text on the graph: the line, and a wider invisible one to click; a click shows what it is and what it does
+      var g = svg("g", { class: "map-link" + (e.fresh ? " map-edge-new" : "") + (drop ? " map-drop" : ""),
+                         "data-a": String(a.id), "data-b": String(b.id), "data-link": String(x.id), tabindex: "0",
+                         role: "button", "aria-label": named + ": details" });
+      g.appendChild(svg("path", { d: path.d, fill: "none", stroke: "transparent", "stroke-width": "12",
+                                  class: "map-link-hit", "pointer-events": "stroke" }));
+      g.appendChild(svg("path", { d: path.d, fill: "none", stroke: C.accent, "stroke-width": n > 1 ? "2.2" : "1.4",
+                                  class: "map-link-line", "marker-end": "url(#map-arrow)",
+                                  "marker-start": both ? "url(#map-arrow)" : null, "stroke-dasharray": drop ? "5 4" : null }));
+      g.appendChild(svg("title", {}, [document.createTextNode(named + (drop ? " (its removal is proposed)" : ""))]));
+      var open = function (ev) { if (ev) { ev.stopPropagation(); ev.preventDefault(); } linkPanel(x, e.links); };
       g.addEventListener("click", open);
       g.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") open(ev); });
       gLinks.appendChild(g);
@@ -630,12 +692,16 @@
     return g;
   }
   function nodeView(n, C) {
-    var catIdx = st.data.categories.map(function (k) { return k.name; }).indexOf(n.fold || n.v.facet);
+    var catIdx = st.data.categories.map(function (k) { return k.name; }).indexOf(n.fold || n.cat || (n.v && n.v.facet));
     var color = C.series[(catIdx < 0 ? 0 : catIdx) % 8];
-    var isNew = !!st.fresh && (n.fold ? n.members.some(function (i) { return st.fresh.ids[i]; }) : !!st.fresh.ids[n.id]);
-    var g = svg("g", { class: "map-node" + (n.fold ? " map-fold" : "") + (n.v && n.v.gone ? " map-gone" : "") + (isNew ? " map-new" : ""),
+    var box = !!(n.fold || n.group || n.more);                // a box of several parts: opened by a click
+    var isNew = !!st.fresh && (box ? (n.members || []).some(function (i) { return st.fresh.ids[i]; }) : !!st.fresh.ids[n.id]);
+    var g = svg("g", { class: "map-node" + (box ? " map-fold" : "") + (n.group ? " map-group-box" + (n.open ? " open" : "") : "") +
+                         (n.more ? " map-more" : "") + (n.v && n.v.gone ? " map-gone" : "") + (isNew ? " map-new" : ""),
                        transform: "translate(" + n.x + "," + n.y + ")", "data-id": String(n.id), "data-cat": n.cat, tabindex: "0",
-                       role: "button", "aria-label": n.fold ? n.title[0] + ": open" : n.v.value });
+                       role: "button", "aria-expanded": n.group ? String(!!n.open) : null,
+                       "aria-label": n.group ? n.title[0].slice(2) + (n.open ? ": close" : ": open") : n.more ? n.title[0] :
+                         n.fold ? n.title[0] + ": open" : n.v.value });
     g.appendChild(svg("rect", { width: n.w, height: n.h, rx: 8, fill: C.panel, stroke: n.v && n.v.gone ? C.warn : C.line,
                                 "stroke-width": "1.2", "stroke-dasharray": n.v && n.v.gone ? "5 4" : null }));
     g.appendChild(svg("rect", { width: 5, height: n.h, rx: 2.5, fill: color }));
@@ -646,12 +712,13 @@
       g.appendChild(t);
       y += 17;
     });
-    if (n.fold) {
-      n.lines.forEach(function (line) {
+    if (box) {
+      (n.lines || []).forEach(function (line) {
         var t = svg("text", { x: 14, y: y + 2, fill: C.ink2, "font-family": C.font, "font-size": "12" });
         t.textContent = line; g.appendChild(t); y += LINE;
       });
-      g.appendChild(svg("title", {}, [document.createTextNode("Open: every one (a click here, or on the category's name)")]));
+      g.appendChild(svg("title", {}, [document.createTextNode(n.group ? (n.open ? "Close the group" : "Open the group: its " +
+        (n.members || []).length + " parts") : n.more ? "Show them all" : "Open: every one (a click here, or on the category's name)")]));
     } else {
       if (n.about.length) y += 4;
       n.about.forEach(function (line) {
@@ -672,11 +739,13 @@
       ev.stopPropagation();
       if (g._dragged) { g._dragged = false; return; }
       if (n.fold) { st.open[n.fold] = true; draw(); return; }
+      if (n.group) { st.openGroups[n.group] = !n.open; draw(); return; }
+      if (n.more) { st.more[n.more] = true; draw(); return; }
       if (st.from && st.from !== n.id) { connectTo(n.id); return; }
       select(n.id);
     });
     g.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); g.dispatchEvent(new MouseEvent("click")); } });
-    if (st.edit && !n.fold) dragBox(g, n);
+    if (st.edit && !box) dragBox(g, n);
     return g;
   }
   function legend(C) {
@@ -695,9 +764,8 @@
     if (hiddenCats.length) box.appendChild(el("button", { type: "button", class: "chip", id: "map-all-cats",
       text: "Show the " + (hiddenCats.length > 1 ? hiddenCats.length + " hidden categories" : "hidden category"),
       onclick: function () { st.cats = []; saveCats(); syncPick(); draw(); fit(true); } }));
-    box.appendChild(el("span", { class: "map-key" }, [el("i", { class: "line" }), document.createTextNode("is part of")]));
-    if (st.data.links.length) box.appendChild(el("span", { class: "map-key" }, [el("i", { class: "arrow" }),
-      document.createTextNode("interaction")]));
+    if (st.data.links.length) box.appendChild(el("span", { class: "map-key", title: "A link: what it is and what it does on a click; " +
+      "an arrow at both ends when it goes both ways" }, [el("i", { class: "arrow" }), document.createTextNode("link")]));
     if (st.data.values.some(function (v) { return v.gone; })) box.appendChild(el("span", { class: "map-key" }, [
       el("i", { class: "gone" }), document.createTextNode("its items are gone")]));
     if (st.edit && st.data.is_admin) box.appendChild(el("button", { type: "button", class: "chip", id: "map-groups",
@@ -712,7 +780,11 @@
       onclick: function () { D.show("review"); } }));
     if (st.data.proposed_interactions) box.appendChild(el("button", { type: "button", class: "chip",
       title: "Interactions your documents state, read by the LLM: each is drawn once approved",
-      text: S.num(st.data.proposed_interactions) + " proposed interaction" + (st.data.proposed_interactions > 1 ? "s wait" : " waits") + " in To review",
+      text: S.num(st.data.proposed_interactions) + " proposed link" + (st.data.proposed_interactions > 1 ? "s wait" : " waits") + " in To review",
+      onclick: function () { D.show("review"); } }));
+    if (st.data.removals) box.appendChild(el("button", { type: "button", class: "chip",
+      title: "Links whose removal is proposed: they stay drawn (dashed) until an AI Admin decides",
+      text: S.num(st.data.removals) + " link" + (st.data.removals > 1 ? "s" : "") + " proposed for removal",
       onclick: function () { D.show("review"); } }));
     if ((st.data.missing || []).length) box.appendChild(el("button", { type: "button", class: "chip", id: "map-missing",
       title: "What an investigation follows and does not find yet: parts not in the data, parts with no interaction, joins, usual values",
@@ -869,34 +941,12 @@
     else if (v.hint) box.appendChild(el("p", {}, [el("em", { text: "“" + v.hint.text + "”" }),
       el("span", { class: "muted", text: " (from " + v.hint.from + ")" })]));
     else box.appendChild(el("p", { class: "muted", text: "No description yet." }));
-    var parts = (v.parents || []).map(function (p) { return st.byId[p]; }).filter(Boolean);
-    var kids = (st.kids[v.id] || []).map(function (k) { return st.byId[k]; }).filter(Boolean);
-    var list = function (title, vals) {
-      if (!vals.length) return null;
-      return el("div", { class: "map-rel" }, [el("strong", { text: title + " " }), el("span", {}, vals.slice(0, 40).map(function (x, i) {
-        return el("button", { type: "button", class: "linkish", text: x.value + (i < Math.min(vals.length, 40) - 1 ? "," : ""),
-          onclick: function () { focusOn(x.id); } }); }).concat(vals.length > 40 ? [document.createTextNode(" … (" + vals.length + ")")] : []))]);
-    };
-    [list("Part of:", parts), list("Made of:", kids)].forEach(function (x) { if (x) box.appendChild(x); });   // (none: no line)
     var kinds = Object.keys(v.kinds || {}).map(function (k) { return S.num(v.kinds[k]) + " " + k; });
     box.appendChild(el("div", { class: "muted", text: v.gone ? "Its items are gone (the data or texts it was about no longer exist)." :
       v.items ? S.num(v.items) + " item" + (v.items > 1 ? "s" : "") + " about it: " + kinds.join(", ") : "No item about it yet." }));
     if ((v.origins || []).length) box.appendChild(el("div", { class: "muted small-note", text: "From: " + v.origins.join("; ") }));
-    var mine = st.data.links.filter(function (x) { return x.a === v.id || x.b === v.id; });
-    if (mine.length) {
-      var ul = el("ul", { class: "map-links" });
-      mine.forEach(function (x) {
-        var other = st.byId[x.a === v.id ? x.b : x.a];
-        var text = x.a === v.id ? x.label + " " + (other ? other.value : "?") : (other ? other.value : "?") + " " + x.label + " it";
-        ul.appendChild(el("li", {}, [el("button", { type: "button", class: "linkish", text: text,
-                                                    onclick: function () { linkPanel(x); } }),
-          x.note ? el("span", { class: "muted", text: ": " + x.note }) : null,
-          admin ? S.sureButton("×", function () {
-            S.dict("POST", "map", { remove_interaction: x.id }).then(function (r) { if (!r.error) load(); });
-          }, { cls: "linkish", aria: "Remove this interaction", ask: "Remove “" + text + "”?", yes: "Remove" }) : null]));
-      });
-      box.appendChild(el("div", { class: "map-rel" }, [el("strong", { text: "Interactions" }), ul]));
-    }
+    box.appendChild(el("div", { class: "map-rel" }, [el("strong", { text: "Links" }),
+      S.linksBox({ id: v.id, value: v.value }, { onchange: function () { load(true); } })]));
     box.appendChild(el("div", { class: "actions" }, [
       el("button", { type: "button", class: "btn small", text: "What touches it", onclick: function () { focusOn(v.id); } }),
       el("a", { class: "btn small", href: "#search", text: "Its knowledge", onclick: function (ev) {
@@ -914,13 +964,13 @@
       if (!v.description && v.hint) acts.push(el("button", { type: "button", class: "btn small", text: "Use the sentence found",
         onclick: function () { ta.value = v.hint.text.replace(/…$/, ""); ta.focus(); } }));
       acts.push(res);
-      box.appendChild(el("details", { class: "map-edit", open: st.edit ? "open" : null }, [el("summary", { text: "Edit (admins)" }),
+      box.appendChild(el("details", { class: "map-edit", open: st.edit ? "open" : null }, [el("summary", { text: "Edit" }),
         ta, el("div", { class: "actions" }, acts),
         el("div", { class: "actions" }, [
-          el("button", { type: "button", class: "btn small", text: "Draw an interaction from here", onclick: function () {
+          el("button", { type: "button", class: "btn small", text: "Add a link from here", onclick: function () {
             st.from = v.id;
             $("map-canvas").classList.add("connecting");
-            res.className = "result"; res.textContent = "now click the part it interacts with (Escape: cancel)";
+            res.className = "result"; res.textContent = "now click the part it is linked to (Escape: cancel)";
           } }),
           el("button", { type: "button", class: "btn small", text: "Hide from the map", onclick: function () {
             if (st.hidden.indexOf(v.id) < 0) st.hidden.push(v.id);
@@ -929,13 +979,13 @@
     }
     if (!quiet) box.scrollTop = 0;
   }
-  /* An interaction clicked on the map: what it is (its short explanation), what to do when following it (the long
-     one, folded), where it was said; admins correct both, or remove it. */
-  function linkPanel(x) {
-    var a = st.byId[x.a], b = st.byId[x.b], admin = st.data.is_admin;
+  /* A link clicked on the map: what it is (its description), what it does (what to do when following it), its way
+     (an arrow, or both ways), where it was read; an editor corrects it, turns it around, proposes to remove it; an
+     AI Admin removes it or answers a proposed removal. `all`: the links drawn as this line (two folded boxes). */
+  function linkPanel(x, all) {
+    var a = st.byId[x.a], b = st.byId[x.b], admin = st.data.is_admin, canDrop = !!st.data.can_delete;
     if (!a || !b) return;
     st.sel = null;
-    st.svg.querySelectorAll(".map-node, .map-edge, .map-link").forEach(function (n) { n.classList.remove("dim", "on"); });
     st.svg.querySelectorAll(".map-node, .map-edge, .map-link").forEach(function (n) {
       var mine = n.classList.contains("map-link") ? n.dataset.link === String(x.id) :
         n.classList.contains("map-node") ? (n.dataset.id === String(x.a) || n.dataset.id === String(x.b)) : false;
@@ -946,38 +996,69 @@
     box.innerHTML = "";
     box.hidden = false;
     box.appendChild(el("button", { type: "button", class: "close", "aria-label": "Close", text: "×", onclick: unselect }));
-    box.appendChild(el("div", { class: "muted", text: "Interaction" }));
+    box.appendChild(el("div", { class: "muted", text: "Link" }));
     box.appendChild(el("h3", {}, [el("button", { type: "button", class: "linkish", text: a.value, onclick: function () { select(a.id); } }),
-      document.createTextNode(" " + x.label + " "),
+      document.createTextNode(x.both ? " \u2194 " : " \u2192 "),
       el("button", { type: "button", class: "linkish", text: b.value, onclick: function () { select(b.id); } })]));
-    box.appendChild(x.note ? el("p", { class: "map-link-short", text: x.note }) :
-      el("p", { class: "muted", text: "Not explained yet (the next classification writes it, or an admin below)." }));
-    if (x.detail) box.appendChild(el("details", { class: "map-link-long" }, [el("summary", { text: "What to do when following it" }),
+    box.appendChild(el("p", { class: "map-link-short", text: x.label }));
+    if (x.detail) box.appendChild(el("details", { class: "map-link-long", open: "open" }, [el("summary", { text: "What it does" }),
       el("p", { text: x.detail })]));
+    else box.appendChild(el("p", { class: "muted", text: "What it does: not written yet (the next classification writes it, or an editor below)." }));
     var who = x.explained_by === "llm" ? "Explained by the AI" : x.explained_by ? "Explained by " + x.explained_by : "";
-    var from = x.source === "admin" ? "drawn by an admin" : x.source === "llm" ? "read in a text, approved" : x.source ? "from " + x.source : "";
+    var from = x.source === "admin" ? "drawn by a person" : x.source === "llm" ? "read in a text, approved" :
+      x.source === "data" ? "read in the data" : x.source ? "from " + x.source : "";
     if (who || from) box.appendChild(el("div", { class: "muted small-note", text: [who, from].filter(Boolean).join(" · ") }));
     if (x.evidence) box.appendChild(el("div", { class: "muted small-note", text: "Said in: " + x.evidence }));
+    if ((all || []).length > 1) box.appendChild(el("div", { class: "map-rel" }, [el("strong", { text: all.length + " links on this line" }),
+      el("ul", { class: "map-links" }, all.map(function (y) {
+        var ya = st.byId[y.a], yb = st.byId[y.b];
+        return el("li", {}, [el("button", { type: "button", class: "linkish", text: (ya ? ya.value : "?") + (y.both ? " \u2194 " : " \u2192 ") +
+          (yb ? yb.value : "?") + ": " + y.label, onclick: function () { linkPanel(y, all); } })]);
+      }))]));
+    if (x.drop) {
+      var note = el("div", { class: "map-drop-note" }, [el("strong", { text: "Its removal is proposed: " }),
+                                                         document.createTextNode(x.drop)]);
+      if (canDrop) note.appendChild(el("div", { class: "actions" }, [
+        el("button", { type: "button", class: "btn small primary", text: "Remove it", onclick: function () {
+          S.dict("POST", "map", { removal: { id: x.id, remove: true } }).then(function (r) { if (!r.error) { unselect(); load(); } });
+        } }),
+        el("button", { type: "button", class: "btn small", text: "Keep it", onclick: function () {
+          S.dict("POST", "map", { removal: { id: x.id, remove: false } }).then(function (r) { if (!r.error) load(); });
+        } })]));
+      box.appendChild(note);
+    }
     if (!admin) return;
-    var shortIn = el("input", { type: "text", maxlength: "500", value: x.note || "", "aria-label": "Short explanation",
-                                placeholder: "In a few words: what it waits for, reads, sends, uses" });
-    var longIn = el("textarea", { rows: "4", maxlength: "2000", "aria-label": "Long explanation",
-                                  placeholder: "What to do when following it: what to check on the other part, what a problem there does here" });
+    var shortIn = el("input", { type: "text", maxlength: "500", value: x.note || "", "aria-label": "What the link is",
+                                placeholder: "What the link is, in a few words (" + x.label + ")" });
+    var longIn = el("textarea", { rows: "4", maxlength: "2000", "aria-label": "What the link does",
+                                  placeholder: "What it does: what to check on the other part, what a problem there does here" });
     longIn.value = x.detail || "";
+    var dir = el("select", { "aria-label": "Direction" }, [el("option", { value: "ab", text: a.value + " \u2192 " + b.value }),
+      el("option", { value: "ba", text: b.value + " \u2192 " + a.value }), el("option", { value: "both", text: "both ways \u2194" })]);
+    dir.value = x.both ? "both" : "ab";
     var res = el("span", { class: "result" });
-    box.appendChild(el("details", { class: "map-edit", open: st.edit ? "open" : null }, [el("summary", { text: "Edit (admins)" }),
-      shortIn, longIn,
+    var shortWhy = el("input", { type: "text", maxlength: "500", "aria-label": "Why remove it",
+                                 placeholder: "Why remove it (what changed): for the AI Admin who decides" });
+    box.appendChild(el("details", { class: "map-edit", open: st.edit ? "open" : null }, [el("summary", { text: "Edit" }),
+      shortIn, longIn, dir,
       el("div", { class: "actions" }, [
         el("button", { type: "button", class: "btn small primary", text: "Save", onclick: function () {
-          S.dict("POST", "map", { interaction: { id: x.id, a: x.a, b: x.b, kind: x.kind, note: shortIn.value, detail: longIn.value } }).then(function (r) {
+          S.dict("POST", "map", { interaction: { id: x.id, a: x.a, b: x.b, note: shortIn.value, detail: longIn.value,
+                                                 both: dir.value === "both", reverse: dir.value === "ba" } }).then(function (r) {
             res.textContent = r.error || "saved"; res.className = "result " + (r.error ? "bad" : "good");
             if (!r.error) { if (D.saved) D.saved(); load(); }
           });
         } }),
-        S.sureButton("Remove", function () {
+        canDrop ? S.sureButton("Remove", function () {
           S.dict("POST", "map", { remove_interaction: x.id }).then(function (r) { if (!r.error) { unselect(); load(); } });
-        }, { cls: "btn small", aria: "Remove this interaction", ask: "Remove “" + a.value + " " + x.label + " " + b.value + "”?", yes: "Remove" }),
-        res])]));
+        }, { cls: "btn small", aria: "Remove this link", ask: "Remove the link " + a.value + " \u2192 " + b.value + "?", yes: "Remove" }) :
+        (x.drop ? null : el("button", { type: "button", class: "btn small", text: "Propose its removal", onclick: function () {
+          S.dict("POST", "map", { propose_removal: { id: x.id, why: shortWhy.value.trim() } }).then(function (r) {
+            res.textContent = r.error || "proposed: an AI Admin decides"; res.className = "result " + (r.error ? "bad" : "good");
+            if (!r.error) load();
+          });
+        } })),
+        res]), canDrop || x.drop ? null : shortWhy]));
   }
   function focusOn(id) {
     st.parts = [+id];
@@ -998,28 +1079,29 @@
     var box = $("map-side");
     box.hidden = false;
     box.innerHTML = "";
-    var kind = el("select", { "aria-label": "Kind of interaction" }, Object.keys(st.data.interactions).map(function (k) {
-      return el("option", { value: k, text: st.data.interactions[k] }); }));
-    var note = el("input", { type: "text", maxlength: "500", placeholder: "In a few words: what it waits for, reads, sends, uses",
-                             "aria-label": "Short explanation" });
-    var detail = el("textarea", { rows: "3", maxlength: "2000", "aria-label": "Long explanation",
-                                  placeholder: "What to do when following it (optional): what to check on the other part, what a problem there does here" });
+    var note = el("input", { type: "text", maxlength: "500", "aria-label": "What the link is",
+                             placeholder: "What the link is, in a few words (runs on, sends the payment files to…)" });
+    var detail = el("textarea", { rows: "3", maxlength: "2000", "aria-label": "What the link does",
+                                  placeholder: "What it does (optional): what to check on the other part, what a problem there does here" });
+    var dir = el("select", { "aria-label": "Direction" }, [el("option", { value: "ab", text: a.value + " \u2192 " + b.value }),
+      el("option", { value: "both", text: "both ways \u2194" })]);
     var res = el("span", { class: "result" });
     box.appendChild(el("button", { type: "button", class: "close", "aria-label": "Close", text: "×", onclick: unselect }));
-    box.appendChild(el("h3", { text: "A new interaction" }));
-    box.appendChild(el("p", {}, [el("strong", { text: a.value }), document.createTextNode(" "), kind,
-      document.createTextNode(" "), el("strong", { text: b.value })]));
+    box.appendChild(el("h3", { text: "A new link" }));
+    box.appendChild(el("p", {}, [el("strong", { text: a.value }), document.createTextNode(" \u2192 "), el("strong", { text: b.value })]));
     box.appendChild(note);
     box.appendChild(detail);
+    box.appendChild(dir);
     box.appendChild(el("div", { class: "actions" }, [el("button", { type: "button", class: "btn small primary", text: "Save", onclick: function () {
-      S.dict("POST", "map", { interaction: { a: a.id, b: b.id, kind: kind.value, note: note.value, detail: detail.value } }).then(function (r) {
+      if (!note.value.trim()) { res.textContent = "say what the link is"; res.className = "result bad"; return; }
+      S.dict("POST", "map", { interaction: { a: a.id, b: b.id, note: note.value, detail: detail.value, both: dir.value === "both" } }).then(function (r) {
         if (r.error) { res.textContent = r.error; res.className = "result bad"; return; }
         if (D.saved) D.saved();
         st.sel = a.id;
         load();
       });
     } }), el("button", { type: "button", class: "btn small", text: "Cancel", onclick: unselect }), res]));
-    kind.focus();
+    note.focus();
   }
 
   // ------------------------------------------------------------------ moving, panning, zooming
@@ -1264,7 +1346,7 @@
     if (!document.fullscreenElement && st.full) setFull(false);       // Escape, or the browser's own way out
     else if (st.svg) setTimeout(function () { fit(true); }, 80);
   });
-  if (!S.isAdmin) $("map-edit").hidden = true;
+  if (!S.canEdit) $("map-edit").hidden = true;
   wire();
   D.register("map", load);
   setInterval(auto, AUTO_MS);

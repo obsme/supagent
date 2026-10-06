@@ -7,6 +7,50 @@
   var box = document.getElementById("messages");
   var form = document.getElementById("ask");
   var input = document.getElementById("question");
+
+  /* the question box's height: dragged from its top edge (up: taller), the arrow keys on the edge, double-click for
+     the default; kept in this browser */
+  (function () {
+    var grip = document.getElementById("question-grip"), KEY = "supagent-question-height", MIN = 44;
+    if (!grip || !input) return;
+    function max() { return Math.max(MIN, Math.round(window.innerHeight * 0.7)); }
+    function set(h, keep) {
+      var v = Math.min(Math.max(Math.round(h), MIN), max());
+      input.style.height = v + "px";
+      grip.setAttribute("aria-valuenow", String(v));
+      if (keep) { try { window.localStorage.setItem(KEY, String(v)); } catch (e) { /* private mode */ } }
+    }
+    try { var saved = parseInt(window.localStorage.getItem(KEY) || "", 10); if (saved) set(saved, false); } catch (e) { /* none */ }
+    grip.setAttribute("aria-valuemin", String(MIN));
+    grip.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      var y0 = e.clientY, h0 = input.getBoundingClientRect().height;
+      grip.classList.add("dragging");
+      grip.setPointerCapture(e.pointerId);
+      function move(ev) { set(h0 + (y0 - ev.clientY), false); }
+      function up(ev) {
+        grip.classList.remove("dragging");
+        grip.removeEventListener("pointermove", move);
+        grip.removeEventListener("pointerup", up);
+        grip.removeEventListener("pointercancel", up);
+        set(input.getBoundingClientRect().height, true);
+      }
+      grip.addEventListener("pointermove", move);
+      grip.addEventListener("pointerup", up);
+      grip.addEventListener("pointercancel", up);
+    });
+    grip.addEventListener("keydown", function (e) {
+      var h = input.getBoundingClientRect().height;
+      if (e.key === "ArrowUp") { e.preventDefault(); set(h + 24, true); }
+      else if (e.key === "ArrowDown") { e.preventDefault(); set(h - 24, true); }
+    });
+    grip.addEventListener("dblclick", function () {
+      input.style.height = "";
+      grip.removeAttribute("aria-valuenow");
+      try { window.localStorage.removeItem(KEY); } catch (e) { /* none */ }
+    });
+  })();
   var send = document.getElementById("send");
   var current = null;          // conversation id
   var running = null;          // id of the answer being computed
@@ -152,7 +196,8 @@
 
   // ---------------------------------------------------------------- one answer
   function stepsView(steps, key) {
-    if (!steps || !steps.length) return null;
+    steps = (steps || []).filter(function (s) { return s.tool !== "understood"; });
+    if (!steps.length) return null;
     var d = el("details", { class: "steps" });
     if (key !== undefined && openSteps[key]) d.open = true;
     if (key !== undefined) d.addEventListener("toggle", function () { openSteps[key] = d.open; });
@@ -164,11 +209,40 @@
           document.createTextNode(s.status === "running" ? "  running…" :
             (s.seconds !== undefined && s.seconds !== null ? "  " + s.seconds + " s" : "") + (s.status === "error" ? "  failed" : ""))])
       ]);
+      if (s.tool === "search_knowledge" && s.found) {      // what the search found, readable (0.9.6)
+        var q = s.args && (s.args.query || (s.args.request && s.args.request.query));
+        if (q) st.appendChild(el("div", { class: "found-q", text: "Searched for: " + q + S.readAs(s.read) }));
+        if (!s.found.length) st.appendChild(el("div", { class: "found-none", text: "Nothing found." }));
+        else st.appendChild(el("ul", { class: "found" }, s.found.map(function (f) {
+          return el("li", {}, [el("span", { class: "badge", text: f.kind || "item" }), " " + f.title]);
+        })));
+        d.appendChild(st);
+        return;
+      }
       if (s.args && Object.keys(s.args).length) st.appendChild(el("pre", { text: JSON.stringify(s.args, null, 2) }));
       if (s.result) st.appendChild(el("pre", { text: s.result }));
       d.appendChild(st);
     });
     return d;
+  }
+
+  // how the question was understood (0.9.6): the router's reading in the team's names, the earlier requests like it
+  // (and how they were answered), or a general question answered without the platform's data
+  function understoodView(steps) {
+    var u = null;
+    (steps || []).forEach(function (s) { if (s.tool === "understood" && s.args) u = s.args; });
+    if (!u || !(u.as || u.general || (u.similar && u.similar.length))) return null;
+    var box = el("div", { class: "understood" });
+    if (u.general) box.appendChild(el("div", { text: "A general question: answered without this platform's data." }));
+    if (u.as) box.appendChild(el("div", {}, [el("span", { class: "lbl", text: "Understood as: " }), u.as]));
+    if (u.similar && u.similar.length) {
+      box.appendChild(el("div", { class: "lbl", text: "Similar earlier requests (their way was reused):" }));
+      box.appendChild(el("ul", {}, u.similar.map(function (r) {
+        var how = [r.status, r.uses ? "used " + r.uses + (r.uses === 1 ? " time" : " times") : null].filter(Boolean).join(", ");
+        return el("li", { text: r.question + (how ? " (" + how + ")" : "") });
+      })));
+    }
+    return box;
   }
 
   // the work plan of a big request (0.9.2): the tasks the agent keeps, their state and what each found
@@ -434,6 +508,8 @@
       var label = el("span", { class: "what", text: what + elapsed(m) });
       label.dataset.base = what;
       bubble.appendChild(el("div", { class: "working" }, [el("span", { class: "dots", "aria-hidden": "true" }, [el("i"), el("i"), el("i")]), label]));
+      var uv = understoodView(steps);
+      if (uv) bubble.appendChild(uv);
       var pv = planView(steps, true);
       if (pv) bubble.appendChild(pv);
       var sv = stepsView(steps, m.id);
@@ -441,6 +517,7 @@
       return;
     }
     var answer = el("div", { class: "answer", html: m.html || S.esc(m.content) });
+    S.fitTables(answer);
     codeCopyButtons(answer);
     bubble.appendChild(answer);
     var rv = resultsView(m);
@@ -461,6 +538,8 @@
       meta.appendChild(el("span", { class: "stamp", text: "Answered " + S.whenFull(m.finished_at) + (secs >= 0 ? " \u00b7 " + secs + " s" : "") }));
     }
     bubble.appendChild(meta);
+    var uv2 = understoodView(m.steps);
+    if (uv2) bubble.insertBefore(uv2, bubble.firstChild);
     var pv2 = planView(m.steps, false);
     if (pv2) bubble.appendChild(pv2);
     var sv2 = stepsView(m.steps, m.id);
@@ -591,13 +670,15 @@
     });
   }
   document.getElementById("open-memory").addEventListener("click", function () {
+    forWhom("memory-scope", "For the team (after an admin's approval)");
     document.getElementById("memory-drawer").hidden = false;
     loadMemory();
   });
   document.getElementById("memory-close").addEventListener("click", function () { document.getElementById("memory-drawer").hidden = true; });
   document.getElementById("memory-save").addEventListener("click", function () {
     var res = document.getElementById("memory-result"), text = document.getElementById("memory-text");
-    S.chat("POST", "memory", { text: text.value, scope: document.getElementById("memory-scope").value }).then(function (r) {
+    var who = scopeOf(document.getElementById("memory-scope").value);
+    S.chat("POST", "memory", { text: text.value, scope: who.scope, group_id: who.group_id }).then(function (r) {
       if (r.error) { res.textContent = r.error; res.className = "result bad"; return; }
       res.textContent = r.memory.status === "proposed" ? "saved: waiting for an admin's approval" : "remembered";
       res.className = "result good";
@@ -614,7 +695,7 @@
   function noteItem(n, admin) {
     var body = el("div", { class: "note-body" + ((n.text || "").length > 280 ? " folded" : ""), text: n.text || "" });
     body.addEventListener("click", function () { body.classList.remove("folded"); });
-    var meta = [n.author, n.day, n.scope === "user" ? "for you only" : "team"];
+    var meta = [n.author, n.day, n.scope === "user" ? "for you only" : n.scope === "group" ? "group " + (n.group || "") : "team"];
     if ((n.tags || []).length) meta.push("#" + n.tags.join(" #"));
     if (n.pinned) meta.push("pinned");
     if (n.entry_id) meta.push("made a catalog entry");
@@ -683,7 +764,30 @@
       }
     });
   }
+  /* who a note or a memory may be for (0.9.6): yourself; everyone and your groups (teams) when your role shares */
+  var sharing = null;
+  function forWhom(selectId, teamLabel) {
+    var sel = document.getElementById(selectId);
+    function fill(d) {
+      var keep = sel.value;
+      sel.innerHTML = "";
+      if (d.can_share) sel.appendChild(el("option", { value: "team", text: teamLabel }));
+      (d.can_share ? d.groups || [] : []).forEach(function (g) {
+        sel.appendChild(el("option", { value: "group:" + g.id, text: "For the group " + g.name }));
+      });
+      sel.appendChild(el("option", { value: "user", text: "For me only" }));
+      if (keep && Array.prototype.some.call(sel.options, function (o) { return o.value === keep; })) sel.value = keep;
+    }
+    if (!sharing && !S.canShare) sharing = { can_share: false, groups: [] };   // for yourself only: nothing to ask
+    if (sharing) { fill(sharing); return; }
+    // (refused: the role does not share, an AI Viewer: for yourself only)
+    S.chat("GET", "sharing").then(function (d) { sharing = d.error ? { can_share: false, groups: [] } : d; fill(sharing); });
+  }
+  function scopeOf(value) {        // "group:12" -> {scope: "group", group_id: 12}
+    return value && value.indexOf("group:") === 0 ? { scope: "group", group_id: +value.slice(6) } : { scope: value };
+  }
   function openNotes() {
+    forWhom("note-scope", "For the team");
     document.getElementById("notes-drawer").hidden = false;
     loadNotes(true);
     document.getElementById("note-text").focus();
@@ -691,10 +795,12 @@
   function saveNote() {
     var res = document.getElementById("note-result"), text = document.getElementById("note-text");
     var fields = ["note-title", "note-tags", "note-day"].map(function (id) { return document.getElementById(id); });
+    var who = scopeOf(document.getElementById("note-scope").value);
     S.chat("POST", "notes", { text: text.value, title: fields[0].value, tags: fields[1].value, meeting_on: fields[2].value || null,
-                              scope: document.getElementById("note-scope").value }).then(function (r) {
+                              scope: who.scope, group_id: who.group_id }).then(function (r) {
       if (r.error) { res.textContent = r.error; res.className = "result bad"; return; }
-      res.textContent = r.note.scope === "team" ? "saved for the team" : "saved for you";
+      res.textContent = r.note.scope === "team" ? "saved for the team" : r.note.scope === "group" ?
+        "saved for the group " + (r.note.group || "") : "saved for you";
       res.className = "result good";
       text.value = "";
       fields.forEach(function (f) { f.value = ""; });

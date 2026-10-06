@@ -165,7 +165,11 @@ def _map_world():
     hidden = Facet(facet="component", value="Metrics exporter", status="approved", source="admin")
     db.session.add_all([orders, pay, gw, hidden])
     db.session.flush()
-    pay.parents, gw.parents, hidden.parents = [orders.id], [pay.id], [pay.id]
+    from conftest import part_of
+
+    part_of(pay, orders)
+    part_of(gw, pay)
+    part_of(hidden, pay)
     jobs = db.session.query(KObject).filter_by(kind="index", name="jobs").one()
     cpu = db.session.query(KObject).filter_by(kind="metric", name="node_cpu_seconds_total").one()
     db.session.add_all([Tag(ref=f"object:{jobs.id}", facet_id=gw.id, status="approved"),
@@ -192,7 +196,7 @@ def test_the_system_map(world, app):
                                                                             "b": ids["Metrics exporter"],
                                                                             "kind": "sends_to", "note": "latency"}})
             link = r.get_json()["interaction"]
-            assert link["label"] == "sends data to"
+            assert link["label"] == "latency" and link["kind"] == "sends_to"     # (0.9.6: a link says what it is)
             assert c.post("/supagent/dictionary/api/map", json={"interaction": {
                 "a": ids["Orders"], "b": ids["Orders"], "kind": "calls"}}).status_code == 400
             assert c.post("/supagent/dictionary/api/map", json={"interaction": {

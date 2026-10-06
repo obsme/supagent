@@ -225,13 +225,19 @@ def test_the_learning_says_what_new_and_known_values_are_part_of(world):
         "known_value_parents": [{"value": "posting engine", "part_of": ["LEDGER"]},
                                 {"value": "unknown thing", "part_of": ["LEDGER"]}]}
     F.apply(args, batch, {})
+    from conftest import parts_of
+
     jvm = db.session.query(Facet).filter(Facet.value == "jvm").one()
-    assert jvm.status == "proposed" and set(jvm.parents) == {known[v].id for v in
-                                                              ("LEDGER", "PAYMENTS", "posting engine", "risk grid")}
+    assert jvm.status == "proposed" and set(parts_of(jvm, ("proposed",))) == {known[v].id for v in
+                                                                             ("LEDGER", "PAYMENTS", "posting engine", "risk grid")}
     dup = db.session.query(Facet).filter(Facet.value == "Settlements").one()
     assert dup.suggested == {"same_as": known["Settlement"].id}
     engine = db.session.get(Facet, known["posting engine"].id)
-    assert engine.parents is None and engine.suggested == {"parents": [known["LEDGER"].id]}   # an admin decides
+    assert parts_of(engine) == [] and parts_of(engine, ("proposed",)) == [known["LEDGER"].id]   # an admin decides
+    from supagent.knowledge.facets import approve_parts
+
+    assert approve_parts(jvm.id, "admin") == 4                               # approved with the value
+    assert set(parts_of(jvm)) == {known[v].id for v in ("LEDGER", "PAYMENTS", "posting engine", "risk grid")}
 
 
 def test_the_system_map_counts_the_items_that_exist_now(world):
@@ -244,7 +250,9 @@ def test_the_system_map_counts_the_items_that_exist_now(world):
     app_ = F._ensure("application", "LEDGER", "approved", "admin")
     comp = F._ensure("component", "posting engine", "approved", "admin")
     db.session.flush()
-    comp.parents = [app_.id]
+    from conftest import part_of
+
+    part_of(comp, app_)
     metric = db.session.query(KObject).filter(KObject.kind == "metric").first()
     db.session.add_all([Tag(ref=f"object:{metric.id}", facet_id=comp.id, confidence=0.9, source="admin", status="approved"),
                         Tag(ref=f"entry:{world['entry']}", facet_id=comp.id, confidence=0.9, source="admin", status="approved")])
@@ -309,9 +317,13 @@ def test_own_categories_read_from_the_fields_and_related_by_the_data(world, monk
     # 0.9: what the learning reads in the data waits for an admin, like what the LLM proposes
     assert srv1.status == "proposed" and srv1.source == "data" and n["proposed"] >= 5
     assert srv1.origins == [f"field NODE of ops-jobs ({src.database_name})"]
-    names = {db.session.get(Facet, i).value for i in srv1.suggested["parents"]}
-    assert names == {"LEDGER", "PAYMENTS"} and srv1.parents is None          # proposed, never applied alone
-    assert "LEDGER with NODE srv-01 in 40 documents" in " ".join(srv1.suggested["from"].values())
+    from conftest import parts_of
+    from supagent.models import Link
+
+    names = {db.session.get(Facet, i).value for i in parts_of(srv1, ("proposed",))}
+    assert names == {"LEDGER", "PAYMENTS"} and parts_of(srv1) == []        # proposed links, never applied alone
+    said = " ".join(x.evidence or "" for x in db.session.query(Link).filter(Link.a_ref == f"facet:{srv1.id}"))
+    assert "LEDGER with NODE srv-01 in 40 documents" in said
     again = F.seed()
     assert again["proposed"] == 0 and db.session.get(Facet, srv1.id).status == "proposed"    # nothing new: nothing said
     conf["categories.review_all"] = False                                   # as before 0.9: used at once
@@ -386,3 +398,26 @@ def test_a_proposed_interaction_waits_whatever_its_confidence(world, sure_used_a
     db.session.commit()
     assert F.settle()["links"] == 1                                      # the relation between two items: used
     assert db.session.query(Link).filter(Link.kind == "depends_on").one().status == "proposed"
+
+
+def test_dotted_fields_of_log_and_trace_layouts_are_read_by_the_categories(world, monkeypatch):
+    """A platform's logs and spans name their service in dotted fields (ECS service.name, OpenTelemetry
+    resource.service.name, Kubernetes kubernetes.labels.app and app.kubernetes.io/name, Jaeger process.serviceName,
+    peer.service as Jaeger stores tags as fields): the category patterns read them by the part that says what they
+    hold, so their values become the platform's applications. A field that only ends in a name (host.name, log
+    file paths, routes) is left alone."""
+    import re
+
+    from supagent.knowledge.facets import field_keys, field_matches
+
+    rx = re.compile(r"^(application|app|app_name|service|service_name|system|platform)$", re.I)
+    read = ["kubernetes.labels.app", "resource.service.name", "service.name", "process.serviceName", "service_name",
+            "APPLICATION", "kubernetes.labels.app_kubernetes_io/name", "kubernetes.labels.app.kubernetes.io/name",
+            "tag.peer@service"]
+    left = ["host.name", "kubernetes.host", "kubernetes.container_name", "log.file.path", "event.dataset",
+            "attributes.http.route", "@timestamp", "process.tag.hostname"]
+    assert [n for n in read if not field_matches(rx, n)] == []
+    assert [n for n in left if field_matches(rx, n)] == []
+    assert field_keys("resource.service.name") == ("resource.service.name", "name", "service")
+    assert field_keys("process.serviceName") == ("process.serviceName", "serviceName", "service_name")
+    assert field_keys("NODE") == ("NODE",)

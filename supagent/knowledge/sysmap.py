@@ -1,8 +1,9 @@
 """The system map (0.8): the architecture of the system as the categories describe it, for the Data dictionary's
 System map. Every approved value of the categories (subjects, applications, components, the deployment's own:
-servers, environments...), what it is part of, the items about it that exist now, a short explanation (its
-description, else the sentence of a document, a guide or a Context page that names it), and the interactions an
-admin drew between values (depends on, sends data to, calls...: links between "facet:<id>" refs). The boxes' places
+servers, environments...), the items about it that exist now, a short explanation (its description, else the
+sentence of a document, a guide or a Context page that names it), and the links between values (0.9.6: "part of" is
+one of them, with depends on, sends data to, calls, runs on...: links between "facet:<id>" refs, each with a short
+explanation and what to do when following it, read from either end, several between two parts). The boxes' places
 an admin moved are kept (Meta "system_map").
 
 Who sees what: admins everything; another user the values that have an item they may see (an index or a metric of a
@@ -20,8 +21,26 @@ from typing import Any
 
 from superset import db
 
-INTERACTIONS = {"depends_on": "depends on", "sends_to": "sends data to", "reads_from": "reads from", "calls": "calls",
-                "runs_on": "runs on", "triggers": "triggers", "monitors": "monitors", "about": "relates to"}
+INTERACTIONS = {"part_of": "is part of", "depends_on": "depends on", "sends_to": "sends data to",
+                "reads_from": "reads from", "calls": "calls", "runs_on": "runs on", "triggers": "triggers",
+                "monitors": "monitors", "about": "relates to"}
+# 0.9.6 (the user's request): one type of relation between two parts, the link: what it is (its description), what
+# it does (what to do when following it), its direction or both ways, several between two parts. A link drawn by a
+# person is "link:<its description's hash>"; what the learning reads keeps the nature it read (runs on, depends on,
+# part of...) for the agent and the investigations, and is shown as a link described by it.
+LINK = "link"
+NATURE = {"part_of": "belongs to", "depends_on": "depends on", "sends_to": "sends data to", "reads_from": "reads from",
+          "calls": "calls", "runs_on": "runs on", "triggers": "triggers", "monitors": "monitors",
+          "about": "is linked to"}
+
+
+def generic(kind: str | None) -> bool:
+    return kind == LINK or str(kind or "").startswith(LINK + ":")
+
+
+def described(note: str | None, kind: str | None) -> str:
+    """What a link is, in words: its description, else what the learning read it as."""
+    return (note or "").strip() or NATURE.get(kind or "", "is linked to")
 LAYOUT_KEY = "system_map"
 HINT_KINDS = ("doc", "guide", "context")
 HINT_CHARS = 220
@@ -265,44 +284,125 @@ def interactions() -> list[dict[str, Any]]:
     for x in rows:
         a, b = x.a_ref.split(":", 1)[1], x.b_ref.split(":", 1)[1]
         if a.isdigit() and b.isdigit():
-            out.append({"id": x.id, "a": int(a), "b": int(b), "kind": x.kind, "label": INTERACTIONS.get(x.kind, x.kind),
-                        "note": x.note or "", "detail": x.detail or "", "evidence": x.evidence or "",
-                        "explained_by": x.explained_by or "", "status": x.status, "source": x.source})
+            out.append({"id": x.id, "a": int(a), "b": int(b), "kind": x.kind, "label": described(x.note, x.kind),
+                        "both": bool(x.both_ways), "note": x.note or "", "detail": x.detail or "",
+                        "evidence": x.evidence or "", "explained_by": x.explained_by or "", "status": x.status,
+                        "source": x.source, "drop": x.proposed_drop or ""})
     return out
 
 
-def save_interaction(a: int, b: int, kind: str, note: str, by: str, link_id: int | None = None,
-                     detail: str | None = None) -> dict[str, Any]:
-    """An admin draws (or changes) an interaction between two values: approved at once, with its short
-    explanation (`note`) and its long one (`detail`: what to do when following it); explanations an admin
-    writes are never written over by the LLM."""
+def propose_removal(link_id: int, why: str, by: str) -> dict[str, Any]:
+    """Removing a link proposed (by a person who may not remove it, or by the learning: what it was read from is
+    gone): it stays in use until someone who may remove links decides."""
+    import datetime as dt
+
+    from supagent.models import Link
+
+    x = db.session.get(Link, link_id)
+    if x is None or not (x.a_ref.startswith("facet:") and x.b_ref.startswith("facet:")):
+        raise ValueError("no such link between two parts")
+    x.proposed_drop = (" ".join(str(why or "").split())[:500] or f"proposed by {by}")
+    x.proposed_drop_at = dt.datetime.utcnow()
+    db.session.commit()
+    return {"id": x.id, "drop": x.proposed_drop}
+
+
+def decide_removal(link_id: int, remove: bool, by: str) -> bool:
+    """The answer to a proposed removal: the link removed, or kept (and the proposal gone)."""
+    from supagent.models import Link
+
+    x = db.session.get(Link, link_id)
+    if x is None:
+        return False
+    if remove:
+        db.session.delete(x)
+    else:
+        x.proposed_drop, x.proposed_drop_at, x.reviewed_by = None, None, by
+    db.session.commit()
+    return True
+
+
+def save_interaction(a: int, b: int, kind: str | None, note: str, by: str, link_id: int | None = None,
+                     detail: str | None = None, both_ways: bool | None = None,
+                     reverse: bool = False) -> dict[str, Any]:
+    """A person draws (or changes) a link between two values: approved at once, with what it is (`note`, its
+    description: required for a new one) and what it does (`detail`: what to do when following it), from a to b or
+    both ways (`both_ways`; `reverse`: from b to a now); several between two parts. What a person writes is never
+    written over by the LLM. `kind`: one of INTERACTIONS (the API of 0.9.5), else a link of its own."""
+    import hashlib
+
     from supagent.models import Facet, Link
 
-    if kind not in INTERACTIONS:
+    if kind and kind not in INTERACTIONS and not generic(kind):
         raise ValueError("kind: " + ", ".join(INTERACTIONS))
     if a == b:
-        raise ValueError("an interaction links two different parts")
+        raise ValueError("a link joins two different parts")
     fa, fb = db.session.get(Facet, int(a)), db.session.get(Facet, int(b))
     if fa is None or fb is None or fa.status != "approved" or fb.status != "approved":
         raise ValueError("both parts must be approved values of the categories")
+    short = (note or "").strip()[:500] or None
     x = db.session.get(Link, link_id) if link_id else None
     if x is None:
+        if not kind:
+            if not short:
+                raise ValueError("say what the link is (its description)")
+            kind = f"{LINK}:" + hashlib.sha1(" ".join(short.lower().split()).encode()).hexdigest()[:8]
         x = (db.session.query(Link).filter(Link.a_ref == f"facet:{a}", Link.b_ref == f"facet:{b}", Link.kind == kind)
              .first())
     if x is None:
         x = Link(a_ref=f"facet:{a}", b_ref=f"facet:{b}", kind=kind)
         db.session.add(x)
-    x.a_ref, x.b_ref, x.kind = f"facet:{a}", f"facet:{b}", kind
-    short = (note or "").strip()[:500] or None
+    if reverse:
+        a, b = b, a
+        twin = (db.session.query(Link).filter(Link.a_ref == f"facet:{a}", Link.b_ref == f"facet:{b}",
+                                              Link.kind == x.kind, Link.id != x.id).first())
+        if twin is not None:
+            raise ValueError("that link exists already the other way")
+    x.a_ref, x.b_ref = f"facet:{a}", f"facet:{b}"
     long_ = (detail or "").strip()[:2000] or None if detail is not None else x.detail
-    if short != x.note or long_ != x.detail:          # written by the admin from now on
+    if link_id and note is None:
+        short = x.note
+    if generic(x.kind) and x.id is not None and short and short != x.note:   # its kind follows its description
+        new_kind = f"{LINK}:" + hashlib.sha1(" ".join(short.lower().split()).encode()).hexdigest()[:8]
+        if db.session.query(Link.id).filter(Link.a_ref == x.a_ref, Link.b_ref == x.b_ref, Link.kind == new_kind,
+                                            Link.id != x.id).first() is not None:
+            raise ValueError("a link with this description joins these parts already")
+        x.kind = new_kind
+    if short != x.note or long_ != x.detail:          # written by a person from now on
         x.explained_by = by if (short or long_) else None
     x.note, x.detail = short, long_
+    if both_ways is not None:
+        x.both_ways = bool(both_ways)
     x.status, x.reviewed_by, x.confidence = "approved", by, 1.0
     x.source = x.source if x.source in ("llm", "data") and link_id else "admin"
     db.session.commit()
-    return {"id": x.id, "a": a, "b": b, "kind": kind, "label": INTERACTIONS[kind], "note": x.note or "",
-            "detail": x.detail or "", "evidence": x.evidence or "", "explained_by": x.explained_by or ""}
+    return {"id": x.id, "a": a, "b": b, "kind": x.kind, "label": described(x.note, x.kind), "both": bool(x.both_ways),
+            "note": x.note or "", "detail": x.detail or "", "evidence": x.evidence or "",
+            "explained_by": x.explained_by or ""}
+
+
+def links_of_value(fid: int) -> list[dict[str, Any]]:
+    """The links of one value, both ways, with the other part's name and category (the Categories page)."""
+    from sqlalchemy import or_
+
+    from supagent.models import Facet, Link
+
+    me = f"facet:{fid}"
+    rows = (db.session.query(Link).filter(or_(Link.a_ref == me, Link.b_ref == me),
+                                          Link.status.in_(("approved", "proposed"))).order_by(Link.id).all())
+    ids = {int(r.split(":", 1)[1]) for x in rows for r in (x.a_ref, x.b_ref) if r.split(":", 1)[1].isdigit()}
+    names = {f.id: f for f in db.session.query(Facet).filter(Facet.id.in_(list(ids) or [-1]))}
+    out = []
+    for x in rows:
+        a, b = (int(r.split(":", 1)[1]) if r.split(":", 1)[1].isdigit() else -1 for r in (x.a_ref, x.b_ref))
+        if a not in names or b not in names:
+            continue
+        other = names[b if a == fid else a]
+        out.append({"id": x.id, "a": a, "b": b, "other": {"id": other.id, "value": other.value, "facet": other.facet},
+                    "out": a == fid, "both": bool(x.both_ways), "label": described(x.note, x.kind), "note": x.note or "",
+                    "detail": x.detail or "", "status": x.status, "source": x.source, "drop": x.proposed_drop or "",
+                    "evidence": x.evidence or ""})
+    return out
 
 
 def delete_interaction(link_id: int) -> bool:
@@ -389,5 +489,6 @@ def map_data(admin: bool) -> dict[str, Any]:
     return {"categories": [{"name": c, "count": counts.get(c, 0), "builtin": c in ("subject", "application", "component"),
                             "about": said.get(c, ""), "fields": read.get(c, "")}
                            for c in order if counts.get(c) or admin],
-            "values": values, "links": links, "layout": layout(), "interactions": INTERACTIONS, "is_admin": admin,
+            "values": values, "links": links, "layout": layout(),
+            "removals": sum(1 for x in links if x["drop"]) if admin else 0, "is_admin": admin,
             "proposed": proposed, "proposed_interactions": waiting, "missing": missing}

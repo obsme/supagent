@@ -69,6 +69,35 @@ def field_rules() -> list[tuple[str, Any]]:
     return out
 
 
+K8S_APP_LABEL = re.compile(r"app[._]kubernetes[._]io[/._]name$", re.I)
+
+
+def field_keys(name: str) -> tuple[str, ...]:
+    """The names a field (or a metric label) is matched by in categories.fields: itself, and for the dotted fields of
+    log and trace layouts (ECS, OpenTelemetry, Kubernetes, Jaeger) the part that says what it holds: its last segment
+    (kubernetes.labels.app -> app; Kubernetes' app.kubernetes.io/name -> app), the object a ".name" field names (service.name, resource.service.name -> service;
+    k8s.pod.name -> pod) and a camelCase segment in snake_case (process.serviceName -> service_name)."""
+    name = name or ""
+    out = [name]
+    segs = [x for x in re.split(r"[.@/]", name) if x]
+    if len(segs) >= 2:
+        out.append(segs[-1])
+        if segs[-1].lower() == "name":
+            out.append(segs[-2])
+    last = out[-1]
+    snake = re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", last).lower()
+    if snake != last.lower():
+        out.append(snake)
+    if K8S_APP_LABEL.search(name):                         # app.kubernetes.io/name, as shippers spell it
+        out.append("app")
+    return tuple(dict.fromkeys(out))
+
+
+def field_matches(rx: Any, name: str) -> bool:
+    """A field or label name read by a category's pattern (field_keys)."""
+    return any(rx.match(k) for k in field_keys(name))
+
+
 ABOUT_CHARS = 300
 ABOUT_BUILTIN = {"subject": "the business or technical subjects the knowledge is about",
                  "application": "the applications, systems and services",
@@ -195,14 +224,7 @@ def merge_value(f: Any, to: Any) -> None:
     to.synonyms = sorted(names)
     if not to.description and f.description:
         to.description = f.description
-    # what f was part of, `to` is now; what was part of f is part of `to`
-    to.parents = [p for p in dict.fromkeys(list(to.parents or []) + list(f.parents or [])) if p not in (f.id, to.id)] or None
-    from supagent.models import Facet
-
-    for other in db.session.query(Facet).filter(Facet.id.notin_([f.id, to.id])):
-        if other.parents and f.id in other.parents:
-            other.parents = [p for p in dict.fromkeys(to.id if p == f.id else p for p in other.parents)
-                             if p != other.id] or None
+    move_links(f.id, to.id)                           # its links (part of, depends on...) are the other's now
     db.session.delete(f)
 
 
@@ -259,24 +281,36 @@ def seed() -> dict[str, int]:
     n["values_read"], n["fields_read"] = 0, 0
     found_values, read = data_values()
     n["fields_read"] = read
+    from supagent.knowledge.datalinks import qualified
+
+    named_after = qualified()                         # a disk alone names nothing: made with its server (datalinks)
+    found_values = {k: v for k, v in found_values.items() if k[0] not in named_after}
     if found_values:
         cats = sorted({cat for cat, _low in found_values})
-        have = {(f.facet, " ".join(f.value.lower().split())): f
-                for f in db.session.query(Facet).filter(Facet.facet.in_(cats))}
+        have: dict[tuple[str, str], Any] = {}
+        for f in db.session.query(Facet).filter(Facet.facet.in_(cats)):
+            have[(f.facet, " ".join(f.value.lower().split()))] = f
+            for syn in f.synonyms or []:              # a name merged into a value is that value (0.9.5): the next
+                have.setdefault((f.facet, " ".join(str(syn).lower().split())), f)   # run must not bring it back
+        seen: dict[int, tuple[Any, list[str]]] = {}
         for (cat, low), slot in found_values.items():
             n["values_read"] += 1
             n[cat] = n.get(cat, 0) + 1
             f = have.get((cat, low))
             if f is None:
-                db.session.add(Facet(facet=cat, value=slot["value"], status=found, source="data", origins=slot["origins"]))
+                f = Facet(facet=cat, value=slot["value"], status=found, source="data", origins=slot["origins"])
+                db.session.add(f)
+                have[(cat, low)] = f
                 n["proposed"] += found == "proposed"
                 continue
             if f.status == "rejected":
                 continue                              # retired by an admin: left as it is
             if f.status == "proposed" and found == "approved":
                 f.status, f.source = "approved", "data"
+            seen.setdefault(id(f), (f, []))[1].extend(slot["origins"])     # (its names' origins together)
+        for f, origins in seen.values():
             other = [o for o in (f.origins or []) if not str(o).startswith(("field ", "label "))]
-            now = (other + slot["origins"])[:ORIGINS]
+            now = (other + list(dict.fromkeys(origins)))[:ORIGINS]
             if now != list(f.origins or []):          # where it is in the data today
                 f.origins = now
     n["relations"] = relations_from_data()
@@ -306,7 +340,7 @@ def data_values() -> tuple[dict[tuple[str, str], dict[str, Any]], int]:
     kinds = ("field", "label")
     wanted: dict[str, list[str]] = {}
     for (name,) in db.session.query(KObject.name).filter(KObject.kind.in_(kinds), KObject.gone_at.is_(None)).distinct():
-        cats = [cat for cat, rx in rules if rx.match(name or "")]
+        cats = [cat for cat, rx in rules if field_matches(rx, name or "")]
         if cats:
             wanted[name] = cats
     if not wanted:
@@ -349,34 +383,13 @@ def data_values() -> tuple[dict[tuple[str, str], dict[str, Any]], int]:
 
 
 def relations_from_data() -> int:
-    """Two category fields of one index (APPLICATION and NODE...): the values that go together in its documents
-    (the profile's sample) are proposed as one part of the other, the wider category above (an application above
-    its servers), to approve in To review; never applied without an admin."""
-    from supagent import settings
-    from supagent.models import Facet, KObject
+    """Two category fields of one index, two category labels of one metric's series (0.9.6): the values seen
+    together are linked (datalinks.py: a metric's linked at once, an index's proposed to an admin in To review).
+    Counted: the links made or proposed."""
+    from supagent.knowledge.datalinks import apply
 
-    least = int(settings.get("categories.relation_min_docs") or 5)
-    values: dict[tuple[str, str], Any] = {}
-    for f in db.session.query(Facet).filter(Facet.status != "rejected", Facet.facet.in_(list(editable()))):
-        values.setdefault((f.facet, f.value.lower()), f)
-    n = 0
-    for idx in db.session.query(KObject).filter(KObject.kind == "index", KObject.gone_at.is_(None)):
-        for grp in (idx.stats or {}).get("category_pairs") or []:
-            (pcat, pfield), (ccat, cfield) = grp.get("parent") or ("", ""), grp.get("child") or ("", "")
-            for pv, cv, docs in (grp.get("pairs") or [])[:5000]:
-                if docs < least:
-                    continue
-                parent, child = values.get((pcat, str(pv).lower())), values.get((ccat, str(cv).lower()))
-                if parent is None or child is None or parent.id == child.id or parent.id in (child.parents or []):
-                    continue
-                sug = dict(child.suggested or {})
-                if parent.id in (sug.get("parents") or []) or parent.id in (sug.get("declined") or []):
-                    continue
-                sug["parents"] = list(sug.get("parents") or []) + [parent.id]
-                sug.setdefault("from", {})[str(parent.id)] = f"{idx.name}: {pfield} {pv} with {cfield} {cv} in {docs} documents"
-                child.suggested = sug
-                n += 1
-    return n
+    got = apply()
+    return got["proposed"] + got["linked"]
 
 
 def vocabulary(with_proposed: bool = True) -> dict[str, list[dict[str, Any]]]:
@@ -616,9 +629,9 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
                 n["proposed"] += 1
                 if not f.origins:
                     f.origins = ["proposed by the LLM from the texts it read"]
-                parents = [p.id for p in (known(x, f.id) for x in (nv.get("part_of") or [])[:6]) if p is not None]
-                if parents:                           # shown with the value in the review, approved with it
-                    f.parents = list(dict.fromkeys(list(f.parents or []) + parents))
+                for p in (known(x, f.id) for x in (nv.get("part_of") or [])[:6]):
+                    if p is not None:                 # shown with the value in the review, approved with it
+                        suggest_link(f.id, p.id, PART_OF, "llm", "the LLM, from the texts it read")
                 same = known(nv.get("same_as"), f.id) if nv.get("same_as") else None
                 if same is not None and same.facet == f.facet:
                     f.suggested = {**(f.suggested or {}), "same_as": same.id}     # one click: merge
@@ -626,17 +639,10 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
         f = known(kv.get("value"))
         if f is None:
             continue
-        have = set(f.parents or [])
-        new = [p.id for p in (known(x, f.id) for x in (kv.get("part_of") or [])[:6])
-               if p is not None and p.id not in have]
-        if not new:
-            continue
-        if f.status == "proposed":                    # waiting anyway: with the value
-            f.parents = list(dict.fromkeys(list(f.parents or []) + new))
-        else:
-            old = (f.suggested or {}).get("parents") or []
-            f.suggested = {**(f.suggested or {}), "parents": list(dict.fromkeys(list(old) + new))}
-            n["relations"] = n.get("relations", 0) + 1
+        for p in (known(x, f.id) for x in (kv.get("part_of") or [])[:6]):
+            if p is not None and suggest_link(f.id, p.id, PART_OF, "llm", "the LLM, from the texts it read") \
+                    and f.status != "proposed":
+                n["relations"] = n.get("relations", 0) + 1
     by_ref = {it["ref"]: it for it in batch}
     for row in args.get("items") or []:
         ref = str(row.get("ref") or "").strip("[] ")
@@ -815,14 +821,119 @@ def classify(llm: Any, seconds: float = 900.0, limit: int = 400, steps: Any = No
 
 
 # --------------------------------------------------------------------------------------------- #
+# the links between values (0.9.6: "part of" is one of them)
+# --------------------------------------------------------------------------------------------- #
+PART_OF = "part_of"
+FACET_REF = re.compile(r"^facet:(\d+)$")
+
+
+def _fid(ref: str | None) -> int | None:
+    m = FACET_REF.match(ref or "")
+    return int(m.group(1)) if m else None
+
+
+def part_of_map(statuses: tuple[str, ...] = ("approved",)) -> dict[int, list[int]]:
+    """{value id: [the values it is part of]}: the links of kind part_of between two values (a component of two
+    applications: two links), in the order they were made."""
+    from supagent.models import Link
+
+    out: dict[int, list[int]] = {}
+    rows = (db.session.query(Link.a_ref, Link.b_ref).filter(Link.kind == PART_OF, Link.status.in_(list(statuses)),
+                                                            Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%"))
+            .order_by(Link.id))
+    for a_ref, b_ref in rows:
+        a, b = _fid(a_ref), _fid(b_ref)
+        if a and b and a != b and b not in out.get(a, []):
+            out.setdefault(a, []).append(b)
+    return out
+
+
+def suggest_link(a: int, b: int, kind: str, source: str, evidence: str | None = None,
+                 confidence: float | None = None) -> bool:
+    """A link between two values proposed (to approve in To review): False when one of any status exists already
+    (approved, proposed, or rejected: a link an admin refused is not proposed again)."""
+    from supagent.models import Link
+
+    if a == b:
+        return False
+    if db.session.query(Link.id).filter(Link.a_ref == f"facet:{a}", Link.b_ref == f"facet:{b}",
+                                        Link.kind == kind).first() is not None:
+        return False
+    db.session.add(Link(a_ref=f"facet:{a}", b_ref=f"facet:{b}", kind=kind, status="proposed", source=source,
+                        confidence=confidence, evidence=(evidence or "")[:2000] or None))
+    db.session.flush()
+    return True
+
+
+def move_links(old: int, new: int) -> int:
+    """The links of value `old` given to value `new` (a merge): each once, none from a value to itself. Counted."""
+    from sqlalchemy import or_
+
+    from supagent.models import Link
+
+    n = 0
+    rows = db.session.query(Link).filter(or_(Link.a_ref == f"facet:{old}", Link.b_ref == f"facet:{old}")).all()
+    for x in rows:
+        a = f"facet:{new}" if x.a_ref == f"facet:{old}" else x.a_ref
+        b = f"facet:{new}" if x.b_ref == f"facet:{old}" else x.b_ref
+        twin = db.session.query(Link).filter(Link.a_ref == a, Link.b_ref == b, Link.kind == x.kind,
+                                             Link.id != x.id).first()
+        if a == b or twin is not None:
+            if twin is not None and x.status == "approved" and twin.status != "approved":
+                twin.status, twin.note, twin.detail = "approved", twin.note or x.note, twin.detail or x.detail
+            db.session.delete(x)
+        else:
+            x.a_ref, x.b_ref = a, b
+            n += 1
+    db.session.flush()
+    return n
+
+
+def set_parts(fid: int, wanted: Any, by: str) -> list[int]:
+    """The values `fid` is part of, as a person chose them (ids): an approved part_of link to each (one proposed
+    is approved), the other approved ones of `fid` removed. The ids kept."""
+    from supagent.models import Link
+
+    ids = clean_parents(fid, wanted)
+    have = {x.b_ref: x for x in db.session.query(Link).filter(Link.a_ref == f"facet:{fid}", Link.kind == PART_OF)}
+    for i in ids:
+        x = have.get(f"facet:{i}")
+        if x is None:
+            x = Link(a_ref=f"facet:{fid}", b_ref=f"facet:{i}", kind=PART_OF, source="admin")
+            db.session.add(x)
+        x.status, x.reviewed_by, x.confidence = "approved", by, 1.0
+    for ref, x in have.items():
+        if _fid(ref) not in ids and x.status == "approved":
+            db.session.delete(x)
+    db.session.flush()
+    return ids
+
+
+def approve_parts(fid: int, by: str) -> int:
+    """A proposed value approved: what it was proposed to be part of (to values in use) comes with it."""
+    from supagent.models import Facet, Link
+
+    n = 0
+    for x in db.session.query(Link).filter(Link.a_ref == f"facet:{fid}", Link.kind == PART_OF,
+                                           Link.status == "proposed"):
+        other = db.session.get(Facet, _fid(x.b_ref) or -1)
+        if other is not None and other.status == "approved":
+            x.status, x.reviewed_by = "approved", by
+            n += 1
+    return n
+
+
+# --------------------------------------------------------------------------------------------- #
 # reading them
 # --------------------------------------------------------------------------------------------- #
 _CACHE: dict[str, Any] = {"at": 0.0, "stamp": None, "tags": {}}
 
 
-def lineage(fid: int, values: dict[int, Any], depth: int = 4) -> list[int]:
-    """The value and every approved value it is part of (its parents, theirs... `depth` levels up), each once,
-    cycles ignored."""
+def lineage(fid: int, values: dict[int, Any], parents: dict[int, list[int]] | None = None,
+            depth: int = 4) -> list[int]:
+    """The value and every approved value it is part of (its part_of links, theirs... `depth` levels up), each
+    once, cycles ignored."""
+    parents = part_of_map() if parents is None else parents
     out: list[int] = []
     level = [fid]
     for _ in range(depth + 1):
@@ -832,7 +943,7 @@ def lineage(fid: int, values: dict[int, Any], depth: int = 4) -> list[int]:
             if v is None or i in out:
                 continue
             out.append(i)
-            nxt += [int(x) for x in (v.parents or []) if str(x).isdigit()]
+            nxt += parents.get(i, [])
         if not nxt:
             break
         level = nxt
@@ -851,9 +962,10 @@ def _approved() -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     try:
         values = {f.id: f for f in db.session.query(Facet).filter(Facet.status == "approved")}
+        parents = part_of_map()
         rows = db.session.query(Tag.ref, Tag.facet_id).filter(Tag.status == "approved")
         for ref, fid in rows:
-            for i in lineage(fid, values):
+            for i in lineage(fid, values, parents):
                 out.setdefault(ref, []).append(f"{values[i].facet}: {values[i].value}")
     except Exception:  # pylint: disable=broad-except   (tables not created yet)
         db.session.rollback()
@@ -881,23 +993,21 @@ def categories_info() -> list[dict[str, Any]]:
     info = {c: {"name": c, "builtin": c in BUILTIN, "fields": fields.get(c) or "", "about": said.get(c, ""),
                 "values": 0, "tags": 0, "parts": 0, "interactions": 0} for c in editable()}
     cat_of: dict[int, str] = {}
-    rows = db.session.query(Facet.id, Facet.facet, Facet.status, Facet.parents).filter(Facet.facet.in_(list(info))).all()
-    for fid, cat, _status, _parents in rows:
+    rows = db.session.query(Facet.id, Facet.facet, Facet.status).filter(Facet.facet.in_(list(info))).all()
+    for fid, cat, status in rows:
         cat_of[fid] = cat
-    for fid, cat, status, parents in rows:
         if status != "rejected":
             info[cat]["values"] += 1
-        for p in parents or []:
-            info[cat]["parts"] += 1
-            if p in cat_of and cat_of[p] != cat:
-                info[cat_of[p]]["parts"] += 1                 # named as what a value of another category is part of
     for cat, n in db.session.query(Facet.facet, func.count(Tag.id)).join(Tag, Tag.facet_id == Facet.id).filter(
             Facet.facet.in_(list(info))).group_by(Facet.facet):
         info[cat]["tags"] = int(n)
-    for a, b in db.session.query(Link.a_ref, Link.b_ref).filter(Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%")):
-        cats = {cat_of.get(int(r.split(":", 1)[1])) for r in (a, b) if r.split(":", 1)[1].isdigit()}
+    for a, b, kind, status in db.session.query(Link.a_ref, Link.b_ref, Link.kind, Link.status).filter(
+            Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%")):
+        if kind == PART_OF and status != "approved":
+            continue                                   # a proposed "part of" waits in To review: not one yet
+        cats = {cat_of.get(_fid(r) or -1) for r in (a, b)}
         for cat in cats - {None}:
-            info[cat]["interactions"] += 1
+            info[cat]["parts" if kind == PART_OF else "interactions"] += 1
     return list(info.values())
 
 
@@ -990,30 +1100,15 @@ def remove_category(name: str, by: str) -> dict[str, int]:
         for part in _chunks(ids):
             out["tags"] += db.session.query(Tag).filter(Tag.facet_id.in_(part)).delete(synchronize_session=False)
             refs = [f"facet:{i}" for i in part]
-            out["interactions"] += db.session.query(Link).filter(
-                or_(Link.a_ref.in_(refs), Link.b_ref.in_(refs))).delete(synchronize_session=False)
-        for f in db.session.query(Facet):
-            if f.id in gone:
-                out["parts"] += len(f.parents or [])
-                continue
-            if f.parents and any(p in gone for p in f.parents):
-                kept = [p for p in f.parents if p not in gone]
-                out["parts"] += len(f.parents) - len(kept)
-                f.parents = kept or None
+            touching = or_(Link.a_ref.in_(refs), Link.b_ref.in_(refs))
+            out["parts"] += db.session.query(Link).filter(Link.kind == PART_OF, Link.status == "approved",
+                                                          touching).count()
+            out["interactions"] += db.session.query(Link).filter(Link.kind != PART_OF, touching).count()
+            db.session.query(Link).filter(touching).delete(synchronize_session=False)   # proposed parts too
+        for f in db.session.query(Facet).filter(Facet.suggested.isnot(None)):
             sug = dict(f.suggested or {})
-            before = json.dumps(sug, sort_keys=True, default=str)
-            for key in ("parents", "declined"):
-                if sug.get(key):
-                    sug[key] = [p for p in sug[key] if p not in gone]
-                    if not sug[key]:
-                        sug.pop(key)
             if sug.get("same_as") in gone:
                 sug.pop("same_as")
-            if isinstance(sug.get("from"), dict):
-                sug["from"] = {k: v for k, v in sug["from"].items() if not (str(k).isdigit() and int(k) in gone)}
-                if not sug["from"] or not sug.get("parents"):
-                    sug.pop("from")
-            if json.dumps(sug, sort_keys=True, default=str) != before:
                 f.suggested = sug or None
         db.session.flush()
         for part in _chunks(ids):
@@ -1096,6 +1191,7 @@ def system_map() -> list[dict[str, Any]]:
     values = {f.id: f for f in db.session.query(Facet).filter(Facet.status == "approved", Facet.facet.in_(list(editable())))}
     if not values:
         return []
+    parents = part_of_map()
     refs: dict[int, set[str]] = {}
     for ref, fid in db.session.query(Tag.ref, Tag.facet_id).filter(Tag.status == "approved",
                                                                    Tag.facet_id.in_(list(values))):
@@ -1130,7 +1226,7 @@ def system_map() -> list[dict[str, Any]]:
             if k:
                 kinds[k] = kinds.get(k, 0) + 1
         out.append({"id": f.id, "facet": f.facet, "value": f.value, "description": f.description,
-                    "parents": [i for i in (f.parents or []) if i in values and i != f.id],
+                    "parents": [i for i in parents.get(f.id, []) if i in values and i != f.id],
                     "items": sum(kinds.values()), "kinds": kinds, "tagged": len(refs.get(f.id, ()))})
     return out
 

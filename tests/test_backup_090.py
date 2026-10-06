@@ -52,7 +52,8 @@ def test_a_backup_holds_every_part_and_no_secret(knowledge):
     assert oct(os.stat(out["path"]).st_mode & 0o777) == "0o600"
     parts = out["parts"]
     assert set(parts) == {"categories", "catalog", "memory", "documents", "notes", "context", "learned", "dictionary", "settings"}
-    assert parts["categories"]["supagent_facet"] == 8 and parts["categories"]["supagent_link"] == 4
+    # (0.9.6: the four "part of" of the fixture are links too: 4 interactions + 4 parts)
+    assert parts["categories"]["supagent_facet"] == 8 and parts["categories"]["supagent_link"] == 8
     assert parts["documents"] == {"supagent_doc": 1} and parts["memory"] == {"supagent_memory": 1}
     with zipfile.ZipFile(out["path"]) as z:
         everything = b"".join(z.read(n) for n in z.namelist())
@@ -89,7 +90,7 @@ def test_a_part_is_restored_alone_and_the_present_state_is_saved_first(knowledge
     out = backup.restore(name, ["categories"], by="admin")
     assert out["parts"]["categories"]["supagent_facet"] == 8 and "error" not in out
     assert db.session.get(Facet, grid).value == "grid-a"                              # back, with its id
-    assert db.session.query(Link).filter(Link.b_ref == f"facet:{grid}").count() == 2
+    assert db.session.query(Link).filter(Link.b_ref == f"facet:{grid}").count() == 4     # 2 run on it, 2 are parts
     assert sysmap.layout()["groups"] == [{"name": "Infra", "categories": ["server", "pool"]}]
     assert facets.about() == {"pool": "a group of servers"}
     assert db.session.get(Entry, entry_id).content == "changed after the backup"      # the catalog was not asked

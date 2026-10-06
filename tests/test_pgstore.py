@@ -427,3 +427,76 @@ def test_the_upgrade_to_guides_follows_in_the_store(store):
                                  {"refs": ["entry:9999#0", "note:9999#0"]}).all())
     assert kinds == {"entry:9999#0": "guide", "note:9999#0": "teamnote"}
     assert db.session.query(Chunk).count() >= 0                  # the session still answers
+
+
+def test_a_misspelled_word_is_read_as_the_knowledge_spells_it(store):
+    import json
+
+    from superset.extensions import db, security_manager as sm
+    from superset.models.core import Database
+
+    from supagent.knowledge import pgstore, spelling
+    from supagent.knowledge.search import search
+    from supagent.security import acting_as
+
+    st = pgstore.state(fresh=True)
+    info = st["info"] if isinstance(st["info"], dict) else json.loads(st["info"])
+    assert info["words"] > 20                                     # the store's words, built with it
+    with acting_as("admin"):
+        spelling._CACHE.clear()
+        got = spelling.correct("Secnods the CPUs spent in each mode")
+        assert got["changes"] == [{"typed": "Secnods", "read": "seconds"}]
+        top = search("Secnods the CPUs spent", 3)
+        assert top[0]["title"] == "metric node_cpu_seconds_total" and "words" in top[0]["via"]
+        assert spelling.correct("job duration histogrma")["changes"][0]["read"] == "histogram"
+        assert ("cpu", "spent") in pgstore.side_by_side([("cpu", "spent"), ("cpu", "billing")])
+        assert ("cpu", "billing") not in pgstore.side_by_side([("cpu", "spent"), ("cpu", "billing")])
+    role = sm.find_role("store readers") or sm.add_role("store readers")
+    main = db.session.get(Database, store["main"])
+    pvm = sm.find_permission_view_menu("database_access", main.perm) or \
+        sm.add_permission_view_menu("database_access", main.perm)
+    sm.add_permission_role(role, pvm)
+    alice = sm.find_user(username="alice")
+    alice.roles.append(role)
+    db.session.commit()
+    try:
+        with acting_as("alice"):                                  # the jobs database only: a word of the metrics
+            spelling._CACHE.clear()                               # is not hers to be read as
+            assert spelling.correct("job duration histogrma")["changes"] == []
+            assert pgstore.holding(["histogram", "batch"]) == {"batch"}
+    finally:
+        alice = sm.find_user(username="alice")
+        alice.roles = [r for r in alice.roles if r.name != "store readers"]
+        db.session.commit()
+
+
+def test_a_word_written_now_is_known_now_and_an_old_store_gets_its_words(store):
+    from sqlalchemy import text
+
+    from superset.extensions import db
+
+    from supagent.knowledge import pgstore, spelling
+    from supagent.knowledge.index import sync
+    from supagent.models import Entry
+    from supagent.security import acting_as
+
+    db.session.add(Entry(title="Spelling words", classification="rule", enabled=True, version=1,
+                         content="The flamingo cluster restarts every night."))
+    db.session.commit()
+    try:
+        sync(("entry:",))                                         # the store kept in step: its words too
+        with acting_as("admin"):
+            spelling._CACHE.clear()
+            assert pgstore.word_counts(["flamingo"]) == {"flamingo": 1}
+            assert spelling.correct("flamigno cluster")["changes"] == [{"typed": "flamigno", "read": "flamingo"}]
+            assert spelling.correct("flamingo cluster")["changes"] == []
+        v = int(pgstore.state(fresh=True)["version"])
+        with pgstore.engine().connect() as con:                   # a store built before 0.9.6: no words yet
+            con.execute(text(f"DROP TABLE {pgstore._q(f'word_{v}')}"))
+        with acting_as("admin"):
+            assert pgstore.word_counts(["flamingo"]) == {}
+        out = pgstore.sync(prefixes=("entry:",), chats=False)
+        assert out.get("words", 0) > 20 and pgstore.word_counts(["flamingo"]) == {"flamingo": 1}
+    finally:
+        db.session.query(Entry).filter(Entry.title == "Spelling words").delete()
+        db.session.commit()

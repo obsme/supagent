@@ -25,8 +25,12 @@ def parts(system):  # noqa: F811
     f = {x.value: x for x in db.session.query(Facet)}
     f["srv-1"].source = f["srv-2"].source = "data"
     f["srv-1"].origins = ["field NODE of jobs (db)"]
-    hand = Facet(facet="server", value="srv-hand", status="approved", source="admin", parents=[system["grid-a"]])
+    hand = Facet(facet="server", value="srv-hand", status="approved", source="admin")
     db.session.add(hand)
+    db.session.flush()
+    from conftest import part_of
+
+    part_of(hand, system["grid-a"])
     db.session.commit()
     yield {**system, "srv-hand": hand.id}
     db.session.rollback()

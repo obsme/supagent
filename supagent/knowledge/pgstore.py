@@ -437,7 +437,7 @@ def _create_tables(con: Connection, v: int, dims: int | None) -> None:
     con.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema()}"))
     con.execute(text(f"CREATE TABLE IF NOT EXISTS {_q('state')} (id int PRIMARY KEY, version int NOT NULL, "
                      "dims int, model text, bm25 text, built_at timestamptz, synced_at timestamptz, info jsonb)"))
-    con.execute(text(f"DROP TABLE IF EXISTS {_q(f'doc_{v}')}, {_q(f'name_{v}')}"))
+    con.execute(text(f"DROP TABLE IF EXISTS {_q(f'doc_{v}')}, {_q(f'name_{v}')}, {_q(f'word_{v}')}"))
     con.execute(text(f"CREATE TABLE {_q(f'doc_{v}')} (id bigserial PRIMARY KEY, ref text NOT NULL UNIQUE, "
                      "kind text NOT NULL, source_id int, database_id int, scope text NOT NULL DEFAULT 'team', "
                      "user_id int, title text NOT NULL DEFAULT '', body text NOT NULL DEFAULT '', "
@@ -446,6 +446,7 @@ def _create_tables(con: Connection, v: int, dims: int | None) -> None:
     con.execute(text(f"CREATE TABLE {_q(f'name_{v}')} (id bigserial PRIMARY KEY, name text NOT NULL, "
                      "norm text NOT NULL, what text NOT NULL, doc_ref text, source_id int, database_id int, "
                      "parent text, field text)"))
+    con.execute(text(f"CREATE TABLE {_q(f'word_{v}')} (word text PRIMARY KEY, ndoc int NOT NULL)"))
 
 
 def _insert(con: Connection, table: str, columns: tuple[str, ...], rows: Iterable[dict[str, Any]],
@@ -481,6 +482,27 @@ def _insert(con: Connection, table: str, columns: tuple[str, ...], rows: Iterabl
         if len(batch) >= INSERT_ROWS:
             flush()
     flush()
+    return n
+
+
+WORDS_OF = ("SELECT w, count(*) FROM (SELECT unnest(tsvector_to_array(to_tsvector('simple', terms))) AS w FROM {doc} "
+            "WHERE kind NOT IN ('chat', 'route'){more}) x WHERE w ~ '^[a-z]{{2,40}}$' GROUP BY w")
+
+
+def _fill_words(con: Connection, v: int, refs: list[str] | None = None) -> int:
+    """The store's words (its pieces' words, as indexed: stems) and how many pieces hold each, for reading a search's
+    words as the knowledge spells them (spelling.py); `refs`: the words of these pieces added to the counts (a sync:
+    the counts only grow until the next build, and a word no piece holds any more is never offered: the live index
+    is asked)."""
+    words_t, doc = _q(f"word_{v}"), _q(f"doc_{v}")
+    if refs is None:
+        con.execute(text(f"TRUNCATE {words_t}"))
+        return con.execute(text(f"INSERT INTO {words_t} (word, ndoc) " + WORDS_OF.format(doc=doc, more=""))).rowcount
+    n = 0
+    for i in range(0, len(refs), 1000):
+        n += con.execute(text(f"INSERT INTO {words_t} (word, ndoc) " + WORDS_OF.format(doc=doc, more=" AND ref = ANY(:refs)")
+                              + f" ON CONFLICT (word) DO UPDATE SET ndoc = {words_t}.ndoc + EXCLUDED.ndoc"),
+                         {"refs": refs[i:i + 1000]}).rowcount
     return n
 
 
@@ -554,8 +576,9 @@ def rebuild(embed: bool = True) -> dict[str, Any]:
                        (r for rows in (_chunk_rows(model if dims else None), _chat_rows(), _route_rows())
                         for r in rows), cast)
         names = _insert(con, _q(f"name_{v}"), NAME_COLUMNS, _name_rows())
+        n_words = _fill_words(con, v)
         bm25 = _create_indexes(con, v, caps, dims)
-        info = {"docs": docs, "names": names, "seconds": round(time.time() - t0, 1), "caps": caps,
+        info = {"docs": docs, "names": names, "words": n_words, "seconds": round(time.time() - t0, 1), "caps": caps,
                 "names_stamp": names_stamp}
         con.execute(text(f"INSERT INTO {_q('state')} (id, version, dims, model, bm25, built_at, synced_at, info) "
                          "VALUES (1, :v, :d, :m, :b, now(), now(), CAST(:i AS jsonb)) ON CONFLICT (id) DO UPDATE SET "
@@ -572,7 +595,7 @@ def rebuild(embed: bool = True) -> dict[str, Any]:
 
 def _drop_old(con: Connection, keep: int) -> None:
     """The versions not in use (a search still reading one: dropped at the next sync)."""
-    rows = con.execute(text("SELECT tablename FROM pg_tables WHERE schemaname = :s AND tablename ~ '^(doc|name)_[0-9]+$'"),
+    rows = con.execute(text("SELECT tablename FROM pg_tables WHERE schemaname = :s AND tablename ~ '^(doc|name|word)_[0-9]+$'"),
                        {"s": schema()}).scalars().all()
     for t in rows:
         if int(t.split("_")[1]) == keep:
@@ -678,6 +701,11 @@ def sync(prefixes: tuple[str, ...] | None = None, chats: bool = True, names: boo
             part = todo[i:i + INSERT_ROWS]
             con.execute(text(f"DELETE FROM {doc} WHERE ref = ANY(:refs)"), {"refs": [r["ref"] for r in part]})
             _insert(con, doc, DOC_COLUMNS, part, cast)
+        if not con.execute(text("SELECT to_regclass(:t)"), {"t": f"{schema()}.word_{v}"}).scalar():
+            con.execute(text(f"CREATE TABLE {_q(f'word_{v}')} (word text PRIMARY KEY, ndoc int NOT NULL)"))
+            out["words"] = _fill_words(con, v)          # a store built before 0.9.6: its words now
+        elif todo:
+            _fill_words(con, v, [r["ref"] for r in todo if r["kind"] not in ("chat", "route")])
         now_stamp = stamp()
         if names and info.get("names_stamp") != now_stamp:
             name = _q(f"name_{v}")
@@ -763,17 +791,68 @@ def _who() -> dict[str, Any]:
 
     from supagent.knowledge.context import visible_pages
     from supagent.knowledge.curated import sources_of_user
-    from supagent.security import visible_databases
+    from supagent.security import group_scopes, visible_databases
 
-    return {"uid": getattr(getattr(g, "user", None), "id", None) or -1,
+    return {"uid": getattr(getattr(g, "user", None), "id", None) or -1, "groups": group_scopes() or ["-"],
             "sources": [s.id for s in sources_of_user()] or [-1], "dbs": sorted(visible_databases()) or [-1],
             "pages": [f"context:{p.id}#%" for p in visible_pages()] or ["-"]}
 
 
 PERMITTED = ("(d.source_id IS NULL OR d.source_id = ANY(:sources)) "
              "AND (d.database_id IS NULL OR d.database_id = ANY(:dbs)) "
-             "AND (d.scope = 'team' OR d.user_id = :uid) "
+             "AND (d.scope = 'team' OR d.user_id = :uid OR d.scope = ANY(:groups)) "
              "AND (d.kind <> 'context' OR d.ref LIKE ANY(:pages))")
+
+
+def word_counts(stems: list[str]) -> dict[str, int]:
+    """How many pieces hold each of these words (stems) by the store's list of words ({}: none of them, or a store
+    without its list)."""
+    st = state()
+    e = engine()
+    if not st or e is None or not stems:
+        return {}
+    v = int(st["version"])
+    with e.connect() as con:
+        if not con.execute(text("SELECT to_regclass(:t)"), {"t": f"{schema()}.word_{v}"}).scalar():
+            return {}
+        rows = con.execute(text(f"SELECT word, ndoc FROM {_q(f'word_{v}')} WHERE word = ANY(:w)"),
+                           {"w": list(stems)}).all()
+    return {r.word: int(r.ndoc) for r in rows}
+
+
+def holding(stems: list[str]) -> set[str]:
+    """The words (stems) some piece the current user may see holds now (the live index: a piece written a minute
+    ago counts; the chats and routes do not)."""
+    st = state()
+    e = engine()
+    stems = [w for w in dict.fromkeys(stems) if re.fullmatch(r"[a-z0-9]{1,60}", w or "")]
+    if not st or e is None or not stems:
+        return set()
+    doc = _q(f"doc_{int(st['version'])}")
+    with e.connect() as con:
+        rows = con.execute(text(
+            f"SELECT t.w FROM unnest(CAST(:ws AS text[])) AS t(w) WHERE EXISTS (SELECT 1 FROM {doc} d "
+            f"WHERE to_tsvector('simple', d.terms) @@ to_tsquery('simple', t.w) AND d.kind NOT IN ('chat', 'route') "
+            f"AND {PERMITTED})"), {**_who(), "ws": stems}).all()
+    return {r.w for r in rows}
+
+
+def side_by_side(pairs: list[tuple[str, str]]) -> set[tuple[str, str]]:
+    """The pairs of words (stems) some piece the current user may see holds next to each other."""
+    st = state()
+    e = engine()
+    ok = re.compile(r"[a-z0-9]{1,60}")
+    pairs = [(a, b) for a, b in dict.fromkeys(pairs) if ok.fullmatch(a or "") and ok.fullmatch(b or "")]
+    if not st or e is None or not pairs:
+        return set()
+    doc = _q(f"doc_{int(st['version'])}")
+    with e.connect() as con:
+        rows = con.execute(text(
+            f"SELECT t.a, t.b FROM unnest(CAST(:a AS text[]), CAST(:b AS text[])) AS t(a, b) WHERE EXISTS (SELECT 1 "
+            f"FROM {doc} d WHERE to_tsvector('simple', d.terms) @@ (to_tsquery('simple', t.a) <-> "
+            f"to_tsquery('simple', t.b)) AND d.kind NOT IN ('chat', 'route') AND {PERMITTED})"),
+            {**_who(), "a": [a for a, _b in pairs], "b": [b for _a, b in pairs]}).all()
+    return {(r.a, r.b) for r in rows}
 
 
 def _kinds_sql(kinds: tuple[str, ...] | None, skip: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
@@ -888,11 +967,17 @@ def _by_spelling(con: Connection, v: int, query: str, params: dict[str, Any]) ->
     return sorted(best.items(), key=lambda x: -x[1])[:CANDIDATES], matched
 
 
+MEANING_READ = True        # the meaning of the query as read (its misspelled words read otherwise), not as typed:
+#                            measured +2 to +4 points on misspelled queries, the same on the others
+
+
 def search(query: str, k: int, kinds: tuple[str, ...] | None = None, lower: dict[str, int] | None = None,
-           skip: tuple[str, ...] = (), n: int | None = None) -> list[dict[str, Any]]:
+           skip: tuple[str, ...] = (), n: int | None = None, words_query: str | None = None) -> list[dict[str, Any]]:
     """As search.search: the pieces for a query, best first, each with how it was found ("via": words,
     meaning, spelling) and its rank in each way ("ranks"). `n`: the pieces each way gives (CANDIDATES; more
-    to list every piece found, the Data dictionary's search)."""
+    to list every piece found, the Data dictionary's search). `words_query`: the query as its words are read
+    (spelling.py: a misspelled word read as the knowledge spells it), for the search by words and by meaning; the
+    near spellings of names take the query as typed."""
     from supagent.knowledge.search import _superset_allowed
 
     st = state()
@@ -910,8 +995,9 @@ def search(query: str, k: int, kinds: tuple[str, ...] | None = None, lower: dict
     info = st.get("info") if isinstance(st.get("info"), dict) else json.loads(st.get("info") or "{}")
     built = info.get("caps") or {}
     n = max(int(n or CANDIDATES), CANDIDATES)
-    ways = [("words", lambda: _by_words(con, v, st, query, where, params, n=n)),
-            ("meaning", lambda: _by_meaning(con, v, st, query, where, params, n=n))]
+    ways = [("words", lambda: _by_words(con, v, st, words_query or query, where, params, n=n)),
+            ("meaning", lambda: _by_meaning(con, v, st, words_query if MEANING_READ and words_query else query, where,
+                                            params, n=n))]
     if built.get("pg_trgm") or "caps" not in info:   # near spellings need pg_trgm (built without it: none)
         ways.append(("spelling", lambda: _by_spelling(con, v, query, params)))
     with e.connect() as con:

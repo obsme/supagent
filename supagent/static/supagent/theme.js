@@ -33,23 +33,32 @@
     var c = rgb(hex).map(function (v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); });
     return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
   }
+  function contrast(a, b) {
+    var x = luminance(a), y = luminance(b);
+    return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+  }
   function apply() {
     var m = mode();
     html.setAttribute("data-theme", m);
     var primary = html.getAttribute(m === "dark" ? "data-primary-dark" : "data-primary");
     var s = html.style;
     if (!primary || !/^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(primary)) {
-      ["--accent", "--accent-ink", "--accent-soft", "--user-bubble"].forEach(function (p) { s.removeProperty(p); });
+      ["--accent", "--accent-ink", "--accent-btn", "--accent-soft", "--user-bubble"].forEach(function (p) { s.removeProperty(p); });
       return;
     }
     if (m === "dark") {
-      var text = luminance(primary) < 0.3 ? mix(primary, "#ffffff", 0.3) : primary;   /* readable on dark panels */
+      /* Superset's own link color in its dark mode is the primary itself (#2893b3 by default): kept as long as it
+         reads on the #141414 panels (contrast 4.5), else lightened step by step until it does */
+      var text = primary, step = 0;
+      while (contrast(text, "#141414") < 4.5 && step < 8) { step += 1; text = mix(primary, "#ffffff", step * 0.1); }
       s.setProperty("--accent", text);
       s.setProperty("--accent-ink", luminance(text) > 0.35 ? "#0d1417" : "#ffffff");
-      s.setProperty("--accent-soft", mix("#1a2228", primary, 0.28));
-      s.setProperty("--user-bubble", mix("#1a2228", primary, 0.2));
+      s.setProperty("--accent-btn", mix(primary, "#141414", 0.15));     /* Superset's dark button: #2893b3 -> #25809b */
+      s.setProperty("--accent-soft", mix("#141414", primary, 0.25));
+      s.setProperty("--user-bubble", mix("#141414", primary, 0.12));
     } else {
       s.setProperty("--accent", primary);
+      s.setProperty("--accent-btn", primary);
       s.setProperty("--accent-ink", luminance(primary) > 0.5 ? "#1f2a33" : "#ffffff");
       s.setProperty("--accent-soft", mix("#ffffff", primary, 0.12));
       s.setProperty("--user-bubble", mix("#ffffff", primary, 0.1));

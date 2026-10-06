@@ -13,7 +13,7 @@
   height: 38px; padding: 0 6px 0 14px; border-bottom: 1px solid #e5e5e5; user-select: none;
 }
 #supagent-dock .sd-title { flex: 1; font-weight: 600; }
-#supagent-dock .sd-hint { font-size: 12px; color: #1677ff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#supagent-dock .sd-hint { font-size: 12px; color: #2893b3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 #supagent-dock .sd-hint[hidden] { display: none; }
 #supagent-dock .sd-btn {
   display: inline-flex; align-items: center; justify-content: center;
@@ -27,7 +27,7 @@
 #supagent-dock.sd-resizing iframe { pointer-events: none; }
 #supagent-dock.sd-resizing { user-select: none; }
 #supagent-dock .sd-fallback { padding: 16px 14px; }
-#supagent-dock .sd-fallback a { color: #1677ff; }
+#supagent-dock .sd-fallback a { color: #2893b3; }
 /* docked: the left edge widens or narrows it (a visible handle in its middle) */
 #supagent-dock .sd-grip { position: absolute; left: -5px; top: 0; bottom: 0; width: 10px; cursor: col-resize; z-index: 2;
   display: flex; align-items: center; justify-content: center; }
@@ -55,7 +55,7 @@
 #supagent-dock.sd-dark .sd-bar { border-bottom-color: #303030; }
 #supagent-dock.sd-dark .sd-btn:hover, #supagent-dock.sd-dark .sd-btn:focus-visible { background: rgba(255, 255, 255, .08); }
 #supagent-dock.sd-dark .sd-grip-dots { background: rgba(255, 255, 255, .25); }
-#supagent-dock.sd-dark .sd-hint { color: #69b1ff; }
+#supagent-dock.sd-dark .sd-hint { color: #2893b3; }
 /* the page beside the docked panel (not on narrow screens: there the panel covers it; not when it floats) */
 html.supagent-docked body { margin-right: var(--supagent-dock-width, 440px) !important; }
 @media print { #supagent-dock { display: none; } html.supagent-docked body { margin-right: 0 !important; } }

@@ -73,7 +73,8 @@ def _interactions() -> tuple[dict[str, Any], list[str]]:
 
     counts: dict[str, dict[str, int]] = {}
     q = (db.session.query(Link.status, Link.kind, func.count(Link.id))
-         .filter(Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%")).group_by(Link.status, Link.kind))
+         .filter(Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%"), Link.kind != "part_of")   # (structure: not
+         .group_by(Link.status, Link.kind))                                                         # an interaction)
     for status, kind, n in q:
         counts.setdefault(status or "", {})[kind or ""] = int(n)
     out = {"approved": counts.get("approved", {}), "proposed": sum(counts.get("proposed", {}).values())}

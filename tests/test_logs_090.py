@@ -117,6 +117,25 @@ def test_new_more_rare_numbers_gone_and_every_day_are_told_apart():
     assert 'As every day: "full GC pause of # s" (30 lines)' in text
 
 
+def test_two_new_patterns_that_share_a_place_say_what_they_share():
+    """Two services slow from the same site: the site (its network) can explain both, neither service alone does.
+    A unit both patterns write (MB) is no part of the system."""
+    now = (_rows(30, lambda i: f"request to SVC_A from SITE1 took {300 + i} ms (round trip usually under 90 ms)")
+           + _rows(20, lambda i: f"commit to DB_B from SITE1 took {2 + i % 3}.5 s"))
+    _found, res = _survey(now, [[] for _ in range(DAYS)])
+    text = res["conclusion"]
+    assert "(1) and (2) both name SITE1 while each names another part (DB_B, SVC_A): what they share (SITE1: the " \
+           "place, the network or the resource they have in common) can explain both, which neither DB_B nor SVC_A " \
+           "alone does." in text
+    now = (_rows(30, lambda i: f"slow write to /data: {9 + i % 3} s for {100 + i} MB")
+           + _rows(20, lambda i: f"slow read of /vol: {7 + i % 3} s for {50 + i} MB"))
+    _found, res = _survey(now, [[] for _ in range(DAYS)])
+    assert "both name" not in res["conclusion"]
+    assert L.shared_part(["queue on POOL_A for <name>", "OOM on srv-9"]) is None
+    assert L.shared_part(["AGGREGATION on <name>: # threads waiting for a CPU", "PRICING on <name>: # threads waiting "
+                          "for a CPU"]) == (0, 1, ["CPU"], ["AGGREGATION", "PRICING"])
+
+
 def test_how_many_lines_make_a_finding():
     nothing = [[] for _ in range(DAYS)]
     # an error counts from two lines, a warning from five
@@ -433,3 +452,49 @@ def test_the_agent_knows_the_logs_and_learns_them_in_its_paths(app, monkeypatch)
     assert paths._steps_text([{"tool": "compare_logs", "status": "done", "args": {"table": "app_logs",
                                                                                "where": "\"HOST\" = 'srv-2'"},
                                "result": json.dumps({"conclusion": "What the logs say that they do not usually"})}])
+
+
+def test_one_earlier_day_is_compared_with_and_said_so(logs, app):
+    """A table whose earlier days are gone (a short retention, a data stream whose first generations are deleted):
+    the one earlier day with lines is compared with, and said to be the only one (it was refused)."""
+    from supagent.security import acting_as
+    from supagent.tools import compare_logs
+
+    with app.app_context(), acting_as("admin"):
+        r = compare_logs(table="app_logs", start="2026-09-02 00:00", end="2026-09-02 04:00")
+    assert "error" not in r, r
+    assert r["compared_with"] == ("the same window on 2026-09-01 only: no other earlier day has lines in this window "
+                                  "(the usual is that one day)")
+
+
+def test_the_kind_of_a_log_table_says_where_its_line_and_its_level_are(world):  # noqa: F811
+    """OpenTelemetry's severity.text and Logstash's log.level were not found by their names: every line was read,
+    without its level (the errors were not put first)."""
+    from superset.extensions import db
+
+    from supagent import tools as T
+    from supagent.knowledge.store import upsert
+    from supagent.models import Run
+
+    run, src = db.session.query(Run).first(), world["s_jobs"]
+    upsert(run, src, "index", "", "otel-logs", {"stats": {"kind": {"kind": "logs", "layout": "OpenTelemetry Collector",
+                                                                    "message": "body", "level": "severity.text"}}})
+    for f, t in (("body", "text"), ("severity.text", "keyword"), ("resource.service.name", "keyword")):
+        upsert(run, src, "field", "otel-logs", f, {"data_type": t, "stats": {"cardinality": 4}})
+    upsert(run, src, "index", "", "ecs-logs", {"stats": {}})
+    for f, t in (("message", "text"), ("log.level", "keyword")):
+        upsert(run, src, "field", "ecs-logs", f, {"data_type": t, "stats": {"cardinality": 3}})
+    db.session.commit()
+    assert (T._message_field("otel-logs"), T._level_field("otel-logs")) == ("body", "severity.text")
+    assert (T._message_field("ecs-logs"), T._level_field("ecs-logs")) == ("message", "log.level")   # by its name too
+
+
+def test_a_level_written_in_the_line_is_read_when_the_table_has_no_level_field():
+    """Fluent Bit's container stdout has no level field: the level is in the line ("... ERROR [inventory] ...")."""
+    from supagent.tools import TEXT_LEVELS, _text_level
+
+    cond = _text_level("log", "ERROR")
+    for form in ("'% ERROR %'", "'ERROR %'", "'% ERROR:%'", "'%[ERROR]%'", "'%level=error%'", "'%" + '"level":"error"' + "%'"):
+        assert form in cond, form
+    assert cond.startswith('("log" LIKE ') and " OR " in cond
+    assert TEXT_LEVELS[:3] == ("FATAL", "CRITICAL", "ERROR")

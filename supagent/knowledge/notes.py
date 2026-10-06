@@ -90,13 +90,35 @@ def _day(value: Any) -> dt.date | None:
 
 def _scope(scope: Any) -> str:
     scope = str(scope or "team")
-    if scope not in ("team", "user"):
-        raise NoteError("for: team or user")
+    if scope not in ("team", "user", "group"):
+        raise NoteError("for: team, user or group")
     return scope
 
 
+def group_of(group: Any, user: Any, admin: bool = False) -> Any:
+    """A Superset group (a team) a note is written for: by id or by name, one of the user's own groups (an admin:
+    any group)."""
+    from superset.extensions import db as meta
+
+    from supagent.security import user_groups
+
+    mine = user_groups(user)
+    key = str(group or "").strip()
+    if not key:
+        raise NoteError("the group: one of yours")
+    pick = [x for x in mine if str(x.id) == key or (x.name or "").lower() == key.lower()]
+    if not pick and admin:
+        from flask_appbuilder.security.sqla.models import Group
+
+        pick = [x for x in meta.session.query(Group).all() if str(x.id) == key or (x.name or "").lower() == key.lower()]
+    if not pick:
+        raise NoteError(f"no group {key!r} of yours" + (f" (yours: {', '.join(x.name for x in mine)})" if mine else
+                                                          " (you belong to no group)"))
+    return pick[0]
+
+
 def add(user_id: int, text: str, title: str | None = None, scope: str = "team", tags: Any = None,
-        meeting_on: Any = None, source: str = "page", by: str | None = None) -> Note:
+        meeting_on: Any = None, source: str = "page", by: str | None = None, group_id: int | None = None) -> Note:
     text = (text or "").strip()
     if not text:
         raise NoteError("the note is empty")
@@ -109,24 +131,33 @@ def add(user_id: int, text: str, title: str | None = None, scope: str = "team", 
             .order_by(Note.id.desc()).first())
     if same is not None:                                   # a double click, a "/note" sent twice
         return same
+    if scope == "group" and not group_id:
+        raise NoteError("a group's note: which group")
     n = Note(user_id=user_id, scope=scope, text=text, title=(title or "").strip()[:300] or _title_of(text),
-             tags=_tags(tags), meeting_on=_day(meeting_on), source=source[:16], updated_by=by)
+             tags=_tags(tags), meeting_on=_day(meeting_on), source=source[:16], updated_by=by,
+             group_id=group_id if scope == "group" else None)
     db.session.add(n)
     db.session.commit()
     return n
 
 
-def visible(user_id: int | None) -> Any:
-    """The notes this user may read: the team's and their own."""
+def visible(user_id: int | None, groups: list[int] | None = None, every_group: bool = False) -> Any:
+    """The notes this user may read: everyone's (the team's), their own, and those of their groups (an admin:
+    every group's). `groups`: the user's group ids (the current user's when not given)."""
     from sqlalchemy import and_, or_
 
+    if groups is None:
+        from supagent.security import user_groups
+
+        groups = [x.id for x in user_groups()]
+    group_ok = (Note.scope == "group") if every_group else and_(Note.scope == "group", Note.group_id.in_(groups or [-1]))
     return db.session.query(Note).filter(or_(Note.scope == "team", and_(Note.scope == "user",
-                                                                        Note.user_id == (user_id or -1))))
+                                                                        Note.user_id == (user_id or -1)), group_ok))
 
 
 def can_change(n: Note, user_id: int | None, admin: bool) -> bool:
-    """Its author, or an admin (a team note only: a personal note stays its author's)."""
-    return n.user_id == user_id or (admin and n.scope == "team")
+    """Its author, or an editor (a team's or a group's note: a personal note stays its author's)."""
+    return n.user_id == user_id or (admin and n.scope in ("team", "group"))
 
 
 def _state(n: Note) -> dict[str, Any]:
@@ -210,12 +241,13 @@ def remove(n: Note) -> None:
 
 
 def listing(user_id: int | None, q: str = "", offset: int = 0, limit: int = 20, mine: bool = False,
-            tag: str | None = None, since: Any = None, until: Any = None) -> tuple[list[Note], int]:
+            tag: str | None = None, since: Any = None, until: Any = None,
+            every_group: bool = False) -> tuple[list[Note], int]:
     """A page of the notes this user may read, every word of `q` in the title, the text or the tags, of the days
     `since`-`until` (the day a note is about, else the day it was written): pinned first, then the newest."""
     from sqlalchemy import String, cast, func, or_
 
-    query = visible(user_id)
+    query = visible(user_id, every_group=every_group)
     day = func.coalesce(Note.meeting_on, func.date(Note.created_at))
     if since:
         query = query.filter(day >= _day(since))
@@ -250,8 +282,23 @@ def day_of(n: Note) -> dt.date:
     return n.meeting_on or (n.created_at or dt.datetime.utcnow()).date()
 
 
+def group_names(ids: set[int]) -> dict[int, str]:
+    """{group id: its name} (Superset's groups)."""
+    if not ids:
+        return {}
+    try:
+        from flask_appbuilder.security.sqla.models import Group
+        from superset.extensions import db as meta
+
+        return {x.id: x.name for x in meta.session.query(Group).filter(Group.id.in_(list(ids)))}
+    except Exception:  # pylint: disable=broad-except   (a Superset without groups)
+        return {}
+
+
 def to_json(n: Note, me: int | None, admin: bool, names: dict[int, str]) -> dict[str, Any]:
-    return {"id": n.id, "scope": n.scope, "title": n.title, "text": n.text, "tags": n.tags or [],
+    return {"id": n.id, "scope": n.scope, "group_id": n.group_id,
+            "group": group_names({n.group_id}).get(n.group_id) if n.group_id else None,
+            "title": n.title, "text": n.text, "tags": n.tags or [],
             "meeting_on": n.meeting_on.isoformat() if n.meeting_on else None, "day": day_of(n).isoformat(),
             "pinned": bool(n.pinned), "author": names.get(n.user_id, "?"), "mine": n.user_id == me,
             "can_change": can_change(n, me, admin), "entry_id": n.entry_id, "source": n.source,
@@ -298,9 +345,10 @@ def pieces() -> Iterator[dict[str, Any]]:
     rows = db.session.query(Note).order_by(Note.id).all()
     names = authors({n.user_id for n in rows if n.user_id})
     for n in rows:
-        whose = "Team note" if n.scope == "team" else "Personal note"
+        whose = "Team note" if n.scope == "team" else "Personal note" if n.scope == "user" else "Group note"
         title = (f"{whose} by {names.get(n.user_id, '?')} of {day_of(n).isoformat()} (not verified): "
                  f"{n.title or _title_of(n.text)}" + (f" [{', '.join(n.tags or [])}]" if n.tags else ""))
         for i, part in enumerate(split_text(n.text or "")):
-            yield {"ref": f"note:{n.id}#{i}", "kind": KIND, "scope": n.scope,
+            yield {"ref": f"note:{n.id}#{i}", "kind": KIND,
+                   "scope": f"g{n.group_id}" if n.scope == "group" else n.scope,   # a group's: searched by its members
                    "user_id": n.user_id if n.scope == "user" else None, "title": title[:500], "text": part}
