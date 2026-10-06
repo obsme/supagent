@@ -419,7 +419,7 @@ def items() -> Iterator[dict[str, Any]]:
         yield {"ref": f"doc:{d.id}", "kind": "document", "title": d.title or d.url or "", "text": d.content or ""}
     for n in db.session.query(Note).filter(Note.scope == "team"):          # a personal note stays its author's
         yield {"ref": f"note:{n.id}", "kind": "team note", "title": n.title or "", "text": n.text or ""}
-    for p in db.session.query(ContextPage):
+    for p in db.session.query(ContextPage).filter(ContextPage.kind.is_distinct_from("rejected")):
         yield {"ref": f"context:{p.id}", "kind": f"context ({p.section})", "title": p.title, "text": p.content or ""}
     for r in db.session.query(Recipe).filter(Recipe.status.in_(USED)):
         yield {"ref": f"recipe:{r.id}", "kind": "learned answer", "title": (r.question or "")[:120],

@@ -102,6 +102,9 @@ def _catalog_changed(before: dict) -> dict:
         return {}
 
 
+MAX_DOC_PAGES = 5000    # pages or files of one document at most (a repository's code: 0.9.6.1)
+DOC_OPTIONS = ("verify_tls", "ca_bundle", "files")      # a document's certificate check, CA file, repository files
+
 def _ref_titles(refs: Any) -> dict[str, str]:
     """What knowledge refs are, in words (entry:3 -> the entry's title), one query per kind of ref."""
     from superset import db
@@ -1846,7 +1849,7 @@ class AdminView(BaseView):
         body = _body()
         kind = "url" if body.get("url") else "upload"
         d = Doc(kind=kind, title=(str(body.get("title") or "").strip() or None), category=body.get("category"),
-                created_by=g.user.username, max_pages=max(1, min(int(body.get("max_pages") or 1), 500)),
+                created_by=g.user.username, max_pages=max(1, min(int(body.get("max_pages") or 1), MAX_DOC_PAGES)),
                 refresh_days=max(1, int(body.get("refresh_days") or 7)))
         if kind == "url":
             from supagent.knowledge.docs import configure
@@ -1902,7 +1905,7 @@ class AdminView(BaseView):
             if "category" in body:
                 d.category = str(body.get("category") or "").strip()[:128] or None
             if "max_pages" in body:
-                d.max_pages = max(1, min(int(body.get("max_pages") or 1), 500))
+                d.max_pages = max(1, min(int(body.get("max_pages") or 1), MAX_DOC_PAGES))
             if "refresh_days" in body:
                 d.refresh_days = max(1, int(body.get("refresh_days") or 7))
             if "enabled" in body:
@@ -1911,13 +1914,14 @@ class AdminView(BaseView):
                 if str(body.get("url") or "").strip():
                     d.url = str(body["url"]).strip()
                     check_url(d.url)
-                if any(k in body for k in ("reader", "auth", "secret")) or d.url != before:
+                if any(k in body for k in ("reader", "auth", "secret") + DOC_OPTIONS) or d.url != before:
                     configure(d, body, previous_url=before)
         except (DocError, ValueError) as ex:
             db.session.rollback()
             return _json({"error": str(ex)}, 400)
         db.session.commit()
-        if d.kind == "url" and (d.url != before or any(k in body for k in ("reader", "auth", "secret", "max_pages"))):
+        if d.kind == "url" and (d.url != before or any(k in body for k in ("reader", "auth", "secret", "max_pages")
+                                                         + DOC_OPTIONS)):
             from supagent.tasks import dispatch_doc
 
             dispatch_doc(d.id)                             # read again with what changed

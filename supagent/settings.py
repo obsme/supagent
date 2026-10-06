@@ -229,6 +229,9 @@ SPECS: list[Spec] = [
          "only for a chart that changed)"),
     Spec("context.max_llm_calls", 12, "int", "LLM calls of a Context build at most (its summary pages: only the ones "
          "whose sources changed are written again; the facts pages need no LLM)"),
+    Spec("context.fields_shown", 30, "int", "The fields (or labels) listed on a data source's Context page for each of "
+         "its first three main indices (or metrics), the described ones first, then the most filled (0: none; the "
+         "Data dictionary has them all)"),
     Spec("knowledge.apply_background", True, "bool", "A save in the Data dictionary answers at once; the catalog "
          "applied to the dictionary, the searchable pieces and their vectors follow in the background (seconds)"),
     Spec("categories.custom", [], "list", "Categories of your own besides subject, application and component (e.g. "
@@ -385,6 +388,10 @@ SPECS: list[Spec] = [
     # ---- documents and sites
     Spec("docs.allowed_domains", [], "list", "Domains the agent may fetch pages from (e.g. wiki.company.com); "
          "empty: public sites only (no private addresses)"),
+    Spec("docs.verify_tls", True, "bool", "Check the TLS certificate of the sites documents are read from (a document can "
+         "say otherwise: Documents and sites, Edit); off: the connection is encrypted but the site is not checked"),
+    Spec("docs.ca_bundle", "", "str", "CA file (PEM, a path on every Superset host) to trust for the documents' sites, "
+         "e.g. the company's root CA (empty: the system's CAs; a document can give its own)"),
     Spec("docs.max_kb", 2048, "int", "Largest page or file read (KB)"),
     # ---- memory learned from the chats
     Spec("memory.enabled", True, "bool", "Learn preferences, rules and facts from the chats"),

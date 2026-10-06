@@ -1,5 +1,42 @@
 # Changes
 
+## 0.9.6.1 — 6 October 2026
+
+The team's reports of 6 October on 0.9.6: Context pages that stopped in the middle of a sentence and did not go on,
+no way to reject a new Context page, a wiki not read because of its certificate, a Bitbucket repository's code not
+read.
+
+Not measured again: the agent's answering code is 0.9.6's, measured before its release (see 0.9.6). Checked before this release: the unit tests (989 passed); the Context pages built read-only from a lab database; the documents' readers against local servers (a site whose certificate no system CA trusts: refused with how to read it, then read with its CA file, then read without the check; a Bitbucket repository read in full, then at the same commit with nothing read, then at a new commit with only its three changed files read and a deleted one removed).
+
+The Context
+* **Pages complete**: a description was cut at 200 characters, in the middle of a sentence ("... and a"): whole
+  sentences now. A data source's page gives its main indices' documents and time range, and the fields (or labels)
+  of its first three main indices or metrics, the described ones first (`context.fields_shown`, 30).
+* **AI-written pages**: 3,000 tokens a page; an answer cut by that limit is asked to go on (twice at most); a
+  reasoning cut before its end is never kept as the page; still cut, the page says where it stops and is written
+  again at the next build.
+* **The build goes on**: one page whose LLM call fails (an empty answer, a timeout, a prompt too long) no longer
+  stops the build: the other pages are written, the search is updated, the run says "partial" with the pages not
+  written.
+* **Reject a new page** (To review): shown to nobody and not searched, proposed again only when its sources change;
+  a change kept as it is is no longer proposed again with the same sources.
+
+Documents and sites
+* **The site's certificate**: checked (as before), checked with a CA file (the document's, or `docs.ca_bundle`:
+  the company's root CA), or not checked (the document's choice, or `docs.verify_tls`); a site whose certificate
+  is not trusted says so, with these ways to read it.
+* **A Bitbucket repository's code** (*A repository: read*: all its code too): the source code of every common
+  language, build and deployment files, 5,000 files at most a document; never the files that hold keys (`.env`,
+  `*.pem`, `*.key`...) nor the vendored and built ones (`node_modules`, `dist`, `*.min.js`, lock files); the
+  secrets written in the code (a password, token or key given a value, a URL's password, a private key) masked.
+* **Read again only as far as it changed**: the branch's last commit is kept with each file; the same commit,
+  nothing is read; another commit, only the files changed between the two.
+* **The search**: a document's pieces are named after their page: a changed page makes again its pieces only (at
+  the first index after the upgrade, the pieces of the documents read from an address are made again once).
+
+Upgrade from 0.9.6: the wheel on every host, restart; nothing to run (tables v17). INSTALL.txt, *From 0.9.6 to
+0.9.6.1*.
+
 ## 0.9.6 — 6 October 2026
 
 The team's requests of 5 October: roles and teams, the System map's links and inventory, a search that reads

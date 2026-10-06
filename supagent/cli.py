@@ -375,7 +375,8 @@ def context(build: bool, no_llm: bool, force: bool, no_classify: bool) -> None:
         return
     pages = db.session.query(ContextPage).order_by(ContextPage.section, ContextPage.title).all()
     for p in pages:
-        who = "AI-written" if p.kind == "summary" and (p.author or "agent") == "agent" else \
+        who = "rejected by " + (p.reviewed_by or "a person") + ", not shown" if p.kind == "rejected" else \
+            "AI-written" if p.kind == "summary" and (p.author or "agent") == "agent" else \
             ("facts" if (p.author or "agent") == "agent" else f"edited by {p.author}")
         click.echo(f"{p.section:<10} {p.title} ({who}, version {p.version}, {p.updated_at:%Y-%m-%d %H:%M})")
     if not pages:

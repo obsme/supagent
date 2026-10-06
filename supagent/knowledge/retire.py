@@ -192,7 +192,7 @@ def texts() -> Iterator[dict[str, Any]]:
         yield {"ref": f"doc:{d.id}", "title": d.title or d.url or "", "text": d.content or ""}
     for e in db.session.query(Entry).filter(Entry.deleted_at.is_(None), Entry.enabled.is_(True)):
         yield {"ref": f"entry:{e.id}", "title": e.title, "text": e.content or ""}
-    for p in db.session.query(ContextPage):
+    for p in db.session.query(ContextPage).filter(ContextPage.kind.is_distinct_from("rejected")):
         yield {"ref": f"context:{p.id}", "title": p.title, "text": p.content or ""}
     for n in db.session.query(Note).filter(Note.scope == "team"):
         yield {"ref": f"note:{n.id}", "title": n.title or "", "text": n.text or ""}

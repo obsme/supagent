@@ -110,7 +110,7 @@
             <option value="">Detected from the address</option><option value="web">Web page or site</option>
             <option value="confluence">Confluence wiki</option><option value="bitbucket">Bitbucket repository</option></select></label>
           <label class="field"><span>Category</span><input type="text" id="doc-category" placeholder="e.g. Runbooks"></label>
-          <label class="field"><span>Pages or files at most</span><input type="number" id="doc-pages" value="20" min="1" max="500"></label>
+          <label class="field"><span>Pages or files at most</span><input type="number" id="doc-pages" value="20" min="1" max="5000"></label>
           <label class="field"><span>Read again every (days)</span><input type="number" id="doc-days" value="7" min="1"></label>
           <label class="field"><span>Sign-in</span><select id="doc-auth">
             <option value="">None (a public site)</option><option value="bearer">Token (Bearer)</option>
@@ -121,6 +121,14 @@
             <input type="text" id="doc-header" placeholder="e.g. Private-Token" autocomplete="off"></label>
           <label class="field" id="doc-secret-box" hidden><span>Token or password</span>
             <input type="password" id="doc-secret" autocomplete="new-password"></label>
+          <label class="field"><span>The site's certificate</span><select id="doc-tls">
+            <option value="">As in Settings (checked)</option><option value="yes">Checked</option>
+            <option value="no">Not checked (a site of the company whose certificate this server does not trust)</option></select></label>
+          <label class="field"><span>CA file on the server (optional)</span>
+            <input type="text" id="doc-ca" placeholder="/etc/ssl/certs/company-ca.pem" autocomplete="off"></label>
+          <label class="field" id="doc-files-box"><span>A repository: read</span><select id="doc-files">
+            <option value="docs">Its documentation and text files</option>
+            <option value="code">All its code too (passwords, tokens and keys in it masked)</option></select></label>
         </div>
         <p class="muted small-note" id="doc-auth-note" hidden>The token is kept encrypted and sent only to this site.
           What it reads becomes searchable by everyone who can open the Data dictionary: use a token that only reads

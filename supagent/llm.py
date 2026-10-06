@@ -301,7 +301,7 @@ class LLM:
             body["max_tokens"] = max_tokens
         if not self.cfg.thinking and _TEMPLATE_KWARGS.get(self.base, True):
             body["chat_template_kwargs"] = {"enable_thinking": False}   # Qwen3 and the like: no reasoning
-        self.last_usage = None
+        self.last_usage = self.last_finish = None
         for _attempt in range(EMPTY_RETRIES + 1):
             t0 = time.time()
             try:
@@ -331,6 +331,7 @@ class LLM:
             one = _usage(data, time.time() - t0)
             _record(body.get("model") or "", one, time.time() - t0, len(tools or []), None)
             self.last_usage = add_usage(self.last_usage or {}, one)
+            self.last_finish = (data["choices"][0] or {}).get("finish_reason")    # "length": cut by max_tokens
             text = re.sub(r"<think>.*?</think>", "", msg.get("content") or "", flags=re.S)
             if text.strip() or msg.get("tool_calls"):
                 return msg

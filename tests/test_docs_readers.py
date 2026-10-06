@@ -185,13 +185,15 @@ def test_the_sign_in_goes_to_the_documents_own_site_only(ctx):
     assert sc.for_url("https://api.bitbucket.org/2.0/repositories/acme/runbooks/src/main/") and \
         sc.for_url("https://bitbucket.org/acme/runbooks") and not sc.for_url("https://evil.example.com/")
     shown = D.describe_auth(basic)
-    assert shown == {"type": "basic", "user": "bob@example.com", "header": None, "secret_set": True}
+    assert shown == {"type": "basic", "user": "bob@example.com", "header": None, "secret_set": True,
+                     "verify_tls": None, "ca_bundle": "", "files": "docs"}             # (0.9.6.1: how it is read)
     assert SECRET not in json.dumps(shown) and pair not in json.dumps(shown)
     plain = D.sign_in(Doc(kind="url", url="http://wiki.example.com/ops/", auth={"type": "bearer"}, secret=SECRET))
     assert plain.for_url("https://wiki.example.com/ops/") and not plain.for_url("http://wiki.example.com:8080/")
     assert not s.for_url("http://wiki.example.com/ops/")             # https to http: never
-    assert D.describe_auth(Doc(kind="url", url="https://w.example.com/")) == {"type": None, "user": None,
-                                                                             "header": None, "secret_set": False}
+    assert D.describe_auth(Doc(kind="url", url="https://w.example.com/")) == {
+        "type": None, "user": None, "header": None, "secret_set": False, "verify_tls": None, "ca_bundle": "",
+        "files": "docs"}
     said = D.scrub(f"failed: {SECRET} / Basic {pair}", basic)
     assert SECRET not in said and pair not in said and said.startswith("failed: ***")
 
@@ -529,7 +531,8 @@ def test_the_pieces_are_made_page_by_page_with_their_address(env, servers):
     d = _doc(s.base + "/kb/", category="Runbooks")
     assert D.refresh(d)["status"] == "ok"
     mine = [p for p in pieces(("doc:",)) if p["ref"].startswith(f"doc:{d.id}#")]
-    assert [p["ref"] for p in mine] == [f"doc:{d.id}#{i}" for i in range(len(mine))]
+    keys = [p["ref"].split("#", 1)[1].rsplit("-", 1) for p in mine]           # named after their page (0.9.6.1)
+    assert all(len(k) == 10 and n.isdigit() for k, n in keys) and len({k for k, _n in keys}) == 3
     pools = [p for p in mine if p["title"] == "KB › Pools (Runbooks)"]
     assert len(pools) >= 2 and all(p["text"].startswith(f"Source: {s.base}/kb/pools\n") for p in pools)
     restart = [p for p in mine if "Restart order" in p["text"]]

@@ -138,6 +138,13 @@ what a group's members may query stays what their roles give. The role **AI Agen
 it was (`grant --role agent`). `superset init` never gives these pages to Gamma or Alpha. What a user can query
 through the agent stays what Superset lets that user query.
 
+## Upgrade from 0.9.6 to 0.9.6.1
+
+`pip install` the new wheel on every host, restart. Nothing to run (tables v17). Fixes of the Context (pages complete,
+a failing page no longer stops the build, Reject for a new page) and of Documents and sites (the certificate check,
+a repository's code, a repository read again only as far as it changed); the agent's answers are 0.9.6's. INSTALL.txt,
+*From 0.9.6 to 0.9.6.1*.
+
 ## Upgrade from 0.9.x to 0.9.6
 
 `pip install` the new wheel on every host, `superset supagent init` once ("schema version 15 -> 17": nullable
@@ -1670,6 +1677,11 @@ Knowledge → Documents and sites*. Fetching is safe by default: http(s) only, `
 request, redirects checked; only `docs.allowed_domains` are read (with none set, only public addresses: no
 intranet, no localhost). PDF is not read (it would need a package Superset does not have).
 
+**The site's certificate** (0.9.6.1): checked with the system's CAs (as before), or with a CA file (a PEM file
+on every Superset host: the document's own, or `docs.ca_bundle` for every document, e.g. the company's root CA),
+or not checked (*Edit*: certificate not checked; or `docs.verify_tls` off: the connection stays encrypted, the site
+is not authenticated). A site whose certificate this server does not trust says so, with these two ways to read it.
+
 **A site behind a sign-in** (0.8): a token (`Authorization: Bearer`), a user with a password or an app token
 (Basic), or a token in a header of its own (e.g. `Private-Token`). The secret is kept encrypted with Superset's
 SECRET_KEY, sent only to the document's own site (never after a redirect to another site), never shown on the page
@@ -1684,11 +1696,19 @@ searchable by everyone who can open the Data dictionary: use a token that only r
   API (the page's storage format, code macros and tables kept), up to the number of pages asked.
 * **Bitbucket** (Data Center: `/projects/P/repos/R/browse/...`; Cloud: `bitbucket.org/ws/repo/src/...`): the text
   files of a folder (Markdown, txt, rst, adoc, HTML, YAML, JSON, CSV, config, XML, SQL), README and docs first, each
-  at most `docs.max_kb`, through the REST API.
+  at most `docs.max_kb`, through the REST API. **All the code** (0.9.6.1, *A repository: read*): the source code too
+  (Python, Java, Kotlin, Scala, Groovy, JavaScript, TypeScript, Go, Rust, C, C++, C#, Ruby, PHP, shell, PowerShell,
+  Terraform, SQL, Dockerfile, Makefile, Jenkinsfile, build files...), 5,000 files at most a document, never the
+  files that hold keys (`.env`, `*.pem`, `*.key`, `id_rsa`, `secrets.yaml`...) nor the vendored and built ones
+  (`node_modules`, `vendor`, `dist`, `build`, `*.min.js`, lock files); a password, token or key given a value in a
+  file, a URL's password, a private key and cloud or git tokens are masked (`***`) before anything is kept. **Read
+  again only as far as it changed** (0.9.6.1): the branch's last commit is kept with each file; the same commit,
+  nothing is read; another one, only the files changed between the two commits (a deleted file removed), and the
+  search makes again the pieces of those files only.
 * Other addresses: the web pages under the same address.
 
-**In the search** (0.8): each page is cut in its own pieces (a piece never mixes two pages), each with the page's
-address, so the agent finds the passage a question needs and names its page; they go in the knowledge store when
+**In the search** (0.8): each page is cut in its own pieces (a piece never mixes two pages; named after their
+page since 0.9.6.1, so that a changed page makes again its pieces only), each with the page's address, so the agent finds the passage a question needs and names its page; they go in the knowledge store when
 Superset's PostgreSQL has pgvector, pg_textsearch or pg_trgm (words, near spellings, meaning), else in the search of
 0.5. The table says how many pieces each document has in the search.
 

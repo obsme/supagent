@@ -624,7 +624,7 @@
           // a Context page: its change as statements added and dropped, what an earlier proposal said that this one does not
           var main = [el("div", { class: "rtext" }, [document.createTextNode(pg.title + " "),
             el("span", { class: "facet-chip", text: pg.section + " \u00b7 " + (pg.what === "remove" ? "removal proposed" :
-              pg.what === "new" ? "new page" : "change proposed") })])];
+              pg.what === "new" ? (pg.rejected_before ? "new version of a page you rejected" : "new page") : "change proposed") })])];
           function list(title, items, cls) {
             if (!items || !items.length) return;
             main.push(el("div", { class: "ctx-diff-h", text: title + " (" + items.length + ")" }));
@@ -650,7 +650,8 @@
             main.push(dv);
           }
           var acts = [];
-          if (pg.what !== "remove" || canDelete) acts.push(act(pg.what === "remove" ? "Remove" : pg.what === "new" ? "Read: fine" : "Approve",
+          if (pg.what !== "remove" || canDelete) acts.push(act(pg.what === "remove" ? "Remove" :
+            pg.what === "new" && !pg.rejected_before ? "Read: fine" : "Approve",
             "primary", "context", function () {
               return S.admin("POST", "context/" + pg.id + "/review", { action: "approve" }).then(function (r) {
                 return r.error ? r : { done: pg.what === "remove" ? "removed" : "approved" }; });
@@ -658,6 +659,11 @@
           if (pg.what !== "new") acts.push(act(pg.what === "remove" ? "Keep it" : "Keep the page as it is", "", "context", function () {
             return S.admin("POST", "context/" + pg.id + "/review", { action: "reject" }).then(function (r) {
               return r.error ? r : { done: "kept as it is" }; });
+          }));
+          // a new page can be refused (0.9.6.1): shown to nobody, not searched; proposed again (here) when its sources change
+          if (pg.what === "new") acts.push(act("Reject", "", "context", function () {
+            return S.admin("POST", "context/" + pg.id + "/review", { action: "reject" }).then(function (r) {
+              return r.error ? r : { done: "rejected: not shown nor searched; proposed again when its sources change" }; });
           }));
           // edit the proposed page (or a new one) before approving it, as the other cards: your text is shown (0.9.6)
           if (pg.what !== "remove") acts.push(toggleButton("Edit", "p-edit", function () {
@@ -977,12 +983,26 @@
         return el("option", { value: o[0], text: o[1], selected: (x.reader || "") === o[0] ? "selected" : null }); }));
     var auth = el("span", { class: "signin" });
     var signIn = x.kind === "url" ? signInFields(auth, x.auth) : null;
+    var a0 = x.auth || {};
+    var tls = el("select", { "aria-label": "The site's certificate" }, [["", "certificate: as in Settings"], ["yes", "certificate checked"],
+      ["no", "certificate not checked"]].map(function (o) {
+        var cur = a0.verify_tls === true ? "yes" : a0.verify_tls === false ? "no" : "";
+        return el("option", { value: o[0], text: o[1], selected: cur === o[0] ? "selected" : null }); }));
+    var ca = el("input", { type: "text", "aria-label": "CA file on the server", placeholder: "CA file on the server (optional)", autocomplete: "off" });
+    ca.value = a0.ca_bundle || "";
+    var files = el("select", { "aria-label": "A repository: read" }, [["docs", "repository: documentation and text files"],
+      ["code", "repository: all the code too (secrets masked)"]].map(function (o) {
+        return el("option", { value: o[0], text: o[1], selected: (a0.files || "docs") === o[0] ? "selected" : null }); }));
+    files.hidden = !(x.reads_as === "bitbucket" || x.reader === "bitbucket");
+    reader.addEventListener("change", function () { files.hidden = !(reader.value === "bitbucket" || (!reader.value && x.reads_as === "bitbucket")); });
     var res = el("span", { class: "result" });
     var save = el("button", { type: "button", class: "btn small primary", text: "Save", onclick: function () {
       var body = { category: cat.value };
       if (x.kind === "url") {
         body.max_pages = +pages.value; body.refresh_days = +days.value; body.reader = reader.value;
         Object.assign(body, signIn());
+        body.verify_tls = tls.value === "" ? null : tls.value === "yes";
+        body.ca_bundle = ca.value; body.files = files.value;
       }
       save.disabled = true;
       S.admin("POST", "docs/" + x.id, body).then(function (r) {
@@ -996,6 +1016,7 @@
       el("div", { class: "filters" }, x.kind === "url" ? [cat, el("label", { class: "inline" }, ["Pages ", pages]),
         el("label", { class: "inline" }, ["Every ", days, " days"]), reader] : [cat]),
       x.kind === "url" ? el("div", { class: "filters" }, [el("span", { class: "muted", text: "Sign-in:" }), auth]) : null,
+      x.kind === "url" ? el("div", { class: "filters" }, [tls, ca, files]) : null,
       x.kind === "url" ? el("p", { class: "muted small-note", text: "The token is kept encrypted and sent only to this site; " +
         "what it reads becomes searchable by everyone who can open the Data dictionary." }) : null,
       el("div", { class: "actions" }, [save, el("button", { type: "button", class: "btn small", text: "Cancel",
@@ -1037,7 +1058,9 @@
           (x.kind === "url" ? (x.auth && x.auth.type ? ", and its saved sign-in is deleted" : "") + "; the site can be added again." :
             "; upload it again to get it back.")));
         var how = x.kind === "url" ? (READS[x.reads_as] || x.reads_as) + (x.auth && x.auth.type ? " · signed in with a " +
-          (SIGNIN[x.auth.type] || x.auth.type) + (x.auth.user ? " (" + x.auth.user + ")" : "") : "") : READS.upload;
+          (SIGNIN[x.auth.type] || x.auth.type) + (x.auth.user ? " (" + x.auth.user + ")" : "") : "") +
+          (x.auth && x.auth.verify_tls === false ? " · certificate not checked" : x.auth && x.auth.ca_bundle ? " · CA file " + x.auth.ca_bundle : "") +
+          (x.reads_as === "bitbucket" && x.auth && x.auth.files === "code" ? " · all the code" : "") : READS.upload;
         [el("td", {}, [el("div", { text: x.title || x.url || "document" }),
             x.url ? el("div", { class: "muted nm", text: x.url }) : null, el("div", { class: "muted small-note", text: how })]),
           el("td", { text: x.category || "" }), el("td", { class: "num", text: S.num((x.pages || []).length || (x.kind === "upload" ? 1 : 0)) }),
@@ -1059,19 +1082,29 @@
     };
     $("doc-auth").addEventListener("change", docAuth);
     docAuth();
+    var docFiles = function () {             // a repository's choice: shown for a Bitbucket address
+      var r = $("doc-reader").value, u = $("doc-url").value;
+      $("doc-files-box").hidden = !(r === "bitbucket" || (!r && /bitbucket|\brepos\b/i.test(u)));
+    };
+    $("doc-reader").addEventListener("change", docFiles);
+    $("doc-url").addEventListener("input", docFiles);
+    docFiles();
     $("doc-add").addEventListener("click", function () {
       var res = $("doc-result"), btn = $("doc-add");
       if (!$("doc-url").value.trim()) { res.textContent = "write the address first (or upload a file)"; res.className = "result bad"; return; }
       btn.disabled = true;
       var body = { url: $("doc-url").value, category: $("doc-category").value, reader: $("doc-reader").value,
                    max_pages: +$("doc-pages").value, refresh_days: +$("doc-days").value,
-                   auth: { type: $("doc-auth").value, user: $("doc-user").value, header: $("doc-header").value } };
+                   auth: { type: $("doc-auth").value, user: $("doc-user").value, header: $("doc-header").value },
+                   verify_tls: $("doc-tls").value === "" ? null : $("doc-tls").value === "yes",
+                   ca_bundle: $("doc-ca").value, files: $("doc-files").value };
       if ($("doc-secret").value) body.secret = $("doc-secret").value;
       S.admin("POST", "docs", body).then(function (r) {
         btn.disabled = false;
         result(res, r, "added: reading it now");
         if (!r.error) {
-          ["doc-url", "doc-secret", "doc-user", "doc-header"].forEach(function (id) { $(id).value = ""; });
+          ["doc-url", "doc-secret", "doc-user", "doc-header", "doc-ca"].forEach(function (id) { $(id).value = ""; });
+          $("doc-tls").value = ""; $("doc-files").value = "docs";
           $("doc-auth").value = ""; docAuth();
           saved(); setTimeout(docsLoad, 3000);
         }

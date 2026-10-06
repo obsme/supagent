@@ -267,13 +267,12 @@ def _doc_pieces() -> Iterator[dict[str, Any]]:
             for i, (where, part) in enumerate(split_sections(d.content or "")):
                 yield {"ref": f"doc:{d.id}#{i}", "kind": "doc", "title": _titled(name, where, category), "text": part}
             continue
-        i = 0
         for url, title, text in pages:
             named = f"{name} \u203a {title}" if title and title != name else name
-            for where, part in split_sections(text):
-                yield {"ref": f"doc:{d.id}#{i}", "kind": "doc", "title": _titled(named, where, category),
-                       "text": f"Source: {url}\n{part}" if url else part}
-                i += 1
+            key = hashlib.sha1((url or title).encode("utf-8")).hexdigest()[:10]
+            for j, (where, part) in enumerate(split_sections(text)):   # named after its page (0.9.6.1): a page
+                yield {"ref": f"doc:{d.id}#{key}-{j}", "kind": "doc",      # changed makes again its pieces only
+                       "title": _titled(named, where, category), "text": f"Source: {url}\n{part}" if url else part}
 
 
 def _titled(name: str, where: str, category: str = "") -> str:
@@ -295,6 +294,8 @@ def _context_pieces() -> Iterator[dict[str, Any]]:
     for p in db.session.query(ContextPage):
         if p.kind == "facts" and p.slug in CATALOG_COPIES:
             continue                                    # the catalog's own pieces are searched
+        if p.kind == "rejected":
+            continue                                    # a new page a person refused: not searched
         ai = p.kind == "summary" and (p.author or "agent") == "agent"
         label = "Context (AI-written overview)" if ai else "Context"
         for i, (where, part) in enumerate(split_sections(p.content or "")):

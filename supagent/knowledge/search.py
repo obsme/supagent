@@ -130,6 +130,15 @@ def link_of(ref: str) -> dict[str, str] | None:
     return None
 
 
+def _piece_order(c: Any) -> tuple:
+    """A piece's place in its item: doc:4#7 (its number), doc:4#<page>-7 (its page, then its number in it)."""
+    tail = c.ref.rsplit("#", 1)[-1] if "#" in c.ref else ""
+    if tail.isdigit():
+        return ("", int(tail))
+    page, _, n = tail.rpartition("-")
+    return (page, int(n) if n.isdigit() else 0)
+
+
 def item(ref: str) -> dict[str, Any] | None:
     """One piece of the knowledge as the search sees it (its parts joined), for a user who may search it."""
     ref = (ref or "").strip()
@@ -141,7 +150,7 @@ def item(ref: str) -> dict[str, Any] | None:
     if not rows:
         return None
     first = rows[0]
-    parts = sorted(rows, key=lambda c: int(c.ref.rsplit("#", 1)[1]) if c.ref.rsplit("#", 1)[-1].isdigit() else 0)
+    parts = sorted(rows, key=_piece_order)
     return {"ref": ref, "kind": first.kind, "title": first.title, "text": "\n\n".join(c.text or "" for c in parts),
             "link": link_of(ref)}
 

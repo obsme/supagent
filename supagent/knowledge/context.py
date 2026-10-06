@@ -49,6 +49,29 @@ MAIN_ITEMS = 25            # the main metrics and indices of a data source on it
 MAX_VALUES = 300           # values listed per inventory line
 MAX_APPS = 8               # application pages at most
 DOC_CHARS = 3000           # of each document in an LLM prompt
+DESC_CHARS = 1200          # of a main index's or metric's description on its page (cut after a whole sentence)
+FIELDS_OF = 3              # the main indices and metrics whose fields or labels a data source's page lists
+FIELD_CHARS = 240          # of a field's description on that list
+FORMULA_CHARS = 800        # of a formula on a data source's page
+SUMMARY_TOKENS = 3000      # of an LLM summary page; cut by that limit, it is asked to go on (CONTINUATIONS times)
+CONTINUATIONS = 2
+REJECTED = "rejected"      # the kind of a new page a person refused: not shown nor searched; proposed again (to
+#                            review) only when its evidence changes
+
+
+def clip(text: str, limit: int) -> str:
+    """`text` on one line, at most `limit` characters: cut after its last whole sentence that fits (else after a
+    whole word), with " …" when something was left out; never in the middle of a word."""
+    t = " ".join((text or "").split())
+    if len(t) <= limit:
+        return t
+    head = t[:limit]
+    ends = [m.end() for m in re.finditer(r"[.!?;](?=\s)", t[:limit + 1])]     # a sentence ending at the limit too
+    if ends and ends[-1] >= limit // 2:
+        return head[:ends[-1]].rstrip(";") + " …"
+    return (head.rsplit(" ", 1)[0] if " " in head else head).rstrip(",;:") + " …"
+
+
 PROMPT = """You write one page of the internal documentation of an information system, in Markdown, from the
 evidence given as JSON (documents, catalog entries, team memory, data dictionary, questions people asked).
 Rules: use only this evidence, never invent a name, a number, a link or a dependency; when the evidence does
@@ -90,6 +113,59 @@ def _importance() -> dict[tuple[int, str], float]:
     return {**out, **{("*", n): 50.0 for n in named}}
 
 
+def _span(stats: dict[str, Any] | None) -> dict[str, Any]:
+    """An index's documents and time range, as its learning measured them."""
+    st = stats or {}
+    out: dict[str, Any] = {}
+    if isinstance(st.get("docs"), (int, float)):
+        out["docs"] = int(st["docs"])
+    tr = st.get("time_range")
+    if st.get("time_field") and isinstance(tr, (list, tuple)) and len(tr) == 2 and tr[0] and tr[1]:
+        out["time"] = {"field": str(st["time_field"]), "from": str(tr[0])[:10], "to": str(tr[1])[:10]}
+    return out
+
+
+RANK = {"curated": 0, "backend": 1, "llm": 1, "inferred": 2}
+
+
+def _fields_of(source_id: int, items: list[tuple[str, str]]) -> list[dict[str, Any]]:
+    """The fields (of an index) or labels (of a metric) of a data source's first main items, for its page: the
+    described ones first, then the most filled; at most context.fields_shown of each (the Data dictionary has
+    them all)."""
+    try:
+        limit = max(0, int(settings.get("context.fields_shown")))
+    except Exception:  # pylint: disable=broad-except   (an older settings table)
+        limit = 30
+    out: list[dict[str, Any]] = []
+    if not limit:
+        return out
+    for kind, name in items:
+        rows = (db.session.query(KObject).filter(KObject.source_id == source_id, KObject.parent == name,
+                                                 KObject.kind == ("label" if kind == "metric" else "field"),
+                                                 KObject.gone_at.is_(None)).all())
+        if not rows:
+            continue
+
+        def rank(o: KObject) -> tuple:
+            st = o.stats or {}
+            filled = st.get("filled_pct")
+            return (0 if o.verified else RANK.get(o.description_source or "", 3) if o.description else 4,
+                    -(filled if isinstance(filled, (int, float)) else 0), o.name.lower())
+
+        shown = []
+        for o in sorted(rows, key=rank)[:limit]:
+            st = o.stats or {}
+            vals = st.get("values") if isinstance(st.get("values"), list) else []
+            card = st.get("cardinality")
+            few = vals and len(vals) <= 12 and (not isinstance(card, (int, float)) or card <= 12)
+            shown.append({"name": o.name, "type": o.data_type or o.metric_type or "",
+                          "about": clip(o.description or o.backend_help or "", FIELD_CHARS),
+                          "values": [str(v) for v in vals[:12]] if few else []})
+        out.append({"kind": kind, "name": name, "child": "label" if kind == "metric" else "field",
+                    "total": len(rows), "shown": shown})
+    return out
+
+
 def collect() -> dict[str, Any]:
     """The shared knowledge, bounded: databases, inventories, relations, catalog, documents, team
     memory, Helpful answers."""
@@ -116,7 +192,8 @@ def collect() -> dict[str, Any]:
                 score = weight.get((s.database_id, o.name), 0) + weight.get(("*", o.name), 0) \
                     + (100 if o.description_source == "curated" else 0) \
                     + (5 if o.description else 0) + (10 if o.kind in ("index", "family") else 0)
-                main.append((-score, o.kind, o.name, (o.description or "").strip()[:200]))
+                main.append((-score, o.kind, o.name, (o.description or "").strip()[:4000],
+                             o.stats if o.kind == "index" else None))
             names = [dim for dim, keys in INVENTORY.items() if o.kind in ("label", "field") and o.name.lower() in keys]
             if names:
                 st = o.stats or {}
@@ -128,13 +205,15 @@ def collect() -> dict[str, Any]:
                 slot["partial"] = slot["partial"] or bool(st.get("partial") or st.get("sample"))
         if not counts:                                   # nothing learned there (yet): no page
             continue
-        main.sort()
+        main.sort(key=lambda x: x[:3])
         d = dbs.get(s.database_id)
         out["databases"][s.database_id] = {
             "name": s.database_name or (d.database_name if d else str(s.database_id)), "backend": s.backend,
             "counts": dict(counts), "categories": dict(sorted(categories.items(), key=lambda x: -x[1])[:20]),
-            "main": [{"kind": k, "name": n, "about": t} for _s, k, n, t in main[:MAIN_ITEMS]],
-            "others": max(0, len(main) - MAIN_ITEMS)}
+            "main": [{"kind": k, "name": n, "about": t, **_span(st)} for _s, k, n, t, st in main[:MAIN_ITEMS]],
+            "others": max(0, len(main) - MAIN_ITEMS),
+            "fields": _fields_of(sid, [(k, n) for _s, k, n, _t, _st in main[:MAIN_ITEMS]
+                                       if k in ("index", "family", "metric")][:FIELDS_OF])}
     for dim, per_db in out["inventory"].items():
         for slot in per_db.values():
             slot["values"] = sorted(slot["values"])
@@ -171,23 +250,56 @@ def collect() -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # facts pages (no LLM)
 # --------------------------------------------------------------------------- #
+PLURALS = {"index": "indices", "family": "families"}
+
+
+def _plural(kind: str, n: int) -> str:
+    return kind if n == 1 else PLURALS.get(kind, kind + "s")
+
+
+def _sentence(text: str) -> str:
+    """A text that ends as a sentence (a full stop added when it ends without one)."""
+    t = (text or "").rstrip()
+    return t if not t or t[-1] in ".!?…:" else t + "."
+
+
+def _main_line(m: dict[str, Any]) -> str:
+    """One main index or metric: its description (whole sentences), its documents and time range."""
+    line = f"- {m['kind']} `{m['name']}`" + (f": {clip(m['about'], DESC_CHARS)}" if m.get("about") else "")
+    facts = []
+    if m.get("docs") is not None:
+        facts.append(f"{m['docs']:,} documents")
+    if m.get("time"):
+        facts.append(f"from {m['time']['from']} to {m['time']['to']}, time field `{m['time']['field']}`")
+    return line + (f" ({'; '.join(facts)})" if facts else "")
+
+
 def fact_pages(ev: dict[str, Any]) -> list[dict[str, Any]]:
     pages = []
     names = {i: d["name"] for i, d in ev["databases"].items()}
     for dbid, d in ev["databases"].items():
         lines = [f"# {d['name']}", "", f"Engine: {d['backend']}. Learned objects: " +
-                 ", ".join(f"{n} {k}{'s' if n > 1 else ''}" for k, n in sorted(d["counts"].items())) + "."]
+                 ", ".join(f"{n:,} {_plural(k, n)}" for k, n in sorted(d["counts"].items())) + "."]
         if d["categories"]:
             lines += ["", "## Domains", ""] + [f"- {c}: {n}" for c, n in d["categories"].items()]
         if d["main"]:
             lines += ["", "## Main data", "", "What the team described or uses most (the Data dictionary has every "
-                      "object)."] + [f"- {m['kind']} `{m['name']}`" + (f": {m['about']}" if m["about"] else "")
-                                     for m in d["main"]]
+                      "object)."] + [_main_line(m) for m in d["main"]]
             if d.get("others"):
                 lines.append(f"- ... and {d['others']:,} more, in the domains above")
+        for f in d.get("fields") or []:
+            lines += ["", f"## The {f['child']}s of {f['kind']} `{f['name']}`", "",
+                      f"{f['total']:,} {f['child']}{'s' if f['total'] > 1 else ''}"
+                      + (f"; the {len(f['shown'])} described or filled most:" if len(f["shown"]) < f["total"] else ":")]
+            for x in f["shown"]:
+                lines.append(f"- `{x['name']}`" + (f" ({x['type']})" if x["type"] else "")
+                             + (f": {_sentence(x['about'])}" if x["about"] else "")
+                             + (f"{' ' if x['about'] else ': '}Values: {', '.join(x['values'])}." if x["values"] else ""))
+            if len(f["shown"]) < f["total"]:
+                lines.append(f"- ... and {f['total'] - len(f['shown']):,} more in the Data dictionary")
         formulas = [e for e in ev["entries"] if e["database_id"] == dbid and e["classification"] == "formula"]
         if formulas:
-            lines += ["", "## Formulas", ""] + [f"- {e['title']}: {e['content'][:300]}" for e in formulas]
+            lines += ["", "## Formulas", ""] + [f"- {e['title']}: {clip(e['content'], FORMULA_CHARS)}" for e in formulas]
         pages.append({"section": "technical", "slug": f"data-sources-{slugify(d['name'])}",
                       "title": f"Data source: {d['name']}", "content": "\n".join(lines), "database_ids": [dbid],
                       "sources": [{"ref": f"database:{dbid}", "title": d["name"]}]})
@@ -326,15 +438,45 @@ def summary_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
     return specs
 
 
+CONTINUE = ("Your page stopped before its end (the length limit of one answer). Go on exactly where it stopped, "
+            "with the same rules: no repetition, no preamble.")
+CUT_NOTE = ("*(The page stops here: the LLM's answer reached its length limit three times. The next build writes it "
+            "again.)*")
+
+
+def _page_text(msg: dict[str, Any]) -> str:
+    """An answer's text without its reasoning, a reasoning cut before its end (no closing tag) included."""
+    text = re.sub(r"<think>.*?</think>", "", (msg or {}).get("content") or "", flags=re.S)
+    return re.sub(r"<think>.*\Z", "", text, flags=re.S)
+
+
 def write_summary(spec: dict[str, Any], llm: Any) -> dict[str, Any]:
+    """One summary page. An answer cut by the length limit (finish_reason "length") is asked to go on, at most
+    CONTINUATIONS times (one cut while reasoning, with nothing written yet, is asked again with twice the room);
+    still cut, the page keeps its whole lines and says that it stops there ("cut": the next build writes it
+    again)."""
     prompt_items, sources = _numbered(spec["evidence"])
-    msg = llm.chat([{"role": "system", "content": PROMPT.format(title=spec["title"], brief=spec["brief"])},
-                    {"role": "user", "content": json.dumps(prompt_items, ensure_ascii=False, default=str)}],
-                   max_tokens=1800)
-    usage = getattr(llm, "last_usage", None) or {}
-    text = re.sub(r"<think>.*?</think>", "", msg.get("content") or "", flags=re.S).strip()
-    return {"content": text, "sources": sources,
-            "tokens": int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)}
+    messages = [{"role": "system", "content": PROMPT.format(title=spec["title"], brief=spec["brief"])},
+                {"role": "user", "content": json.dumps(prompt_items, ensure_ascii=False, default=str)}]
+    text, tokens, cut, room = "", 0, False, SUMMARY_TOKENS
+    for _turn in range(CONTINUATIONS + 1):
+        msg = llm.chat(messages, max_tokens=room)
+        usage = getattr(llm, "last_usage", None) or {}
+        tokens += int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
+        part = _page_text(msg)
+        cut = getattr(llm, "last_finish", None) == "length"
+        if cut and not part.strip() and not text:
+            room *= 2                                 # the room went to the reasoning: again, with more
+            continue
+        text += part
+        if not cut:
+            break
+        messages = messages + [{"role": "assistant", "content": part}, {"role": "user", "content": CONTINUE}]
+    text = text.strip()
+    if cut and text:
+        whole = text.rsplit("\n", 1)[0].rstrip() if "\n" in text else text
+        text = whole + "\n\n" + CUT_NOTE
+    return {"content": text, "sources": sources, "tokens": tokens, "cut": cut}
 
 
 # --------------------------------------------------------------------------- #
@@ -436,6 +578,12 @@ def diff_rows(old: str, new: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _refused(p: ContextPage) -> dict[str, Any] | None:
+    """What a page keeps of its review when its proposal is cleared: the version a person refused, if any."""
+    h = (p.compared or {}).get("rejected_hash")
+    return {"rejected_hash": h} if h else None
+
+
 def _propose(p: ContextPage, page: dict[str, Any], kind: str, input_hash: str) -> str:
     """The agent's new version of a page that exists: a proposal a person validates (the page shown stays as it
     is). A proposal not validated yet is replaced by this one, and what it said that this one does not is kept
@@ -447,7 +595,8 @@ def _propose(p: ContextPage, page: dict[str, Any], kind: str, input_hash: str) -
     done = dict(p.compared or {})
     p.compared = {"added": now_vs["added"], "obsolete": now_vs["dropped"], "left_out": earlier["dropped"],
                   "replaced": int(done.get("replaced") or 0) + (1 if p.proposed_content else 0),
-                  "replaced_at": dt.datetime.utcnow().isoformat(timespec="seconds") if p.proposed_content else None}
+                  "replaced_at": dt.datetime.utcnow().isoformat(timespec="seconds") if p.proposed_content else None,
+                  **({"rejected_hash": done["rejected_hash"]} if done.get("rejected_hash") else {})}
     p.proposed_content, p.proposed_sources, p.proposed_kind = page["content"], page.get("sources") or [], kind
     p.proposed_hash, p.proposed_at, p.proposed_drop = input_hash, dt.datetime.utcnow(), False
     db.session.commit()
@@ -463,11 +612,14 @@ def save_page(page: dict[str, Any], kind: str, input_hash: str, llm_calls: int =
         return "kept"
     if p is not None and p.input_hash == input_hash and p.content:
         if p.proposed_content or p.proposed_drop:          # the evidence came back to what the page says
-            p.proposed_content = p.proposed_sources = p.proposed_kind = p.proposed_hash = p.compared = None
+            p.proposed_content = p.proposed_sources = p.proposed_kind = p.proposed_hash = None
+            p.compared = _refused(p)
             p.proposed_at, p.proposed_drop = None, False
             db.session.commit()
-        return "unchanged"
-    if p is not None and p.content and settings.get("context.review"):
+        return "unchanged" if p.kind != REJECTED else "rejected"
+    if p is not None and input_hash and input_hash == (p.compared or {}).get("rejected_hash"):
+        return "rejected"                                  # a person refused this very version
+    if p is not None and p.content and (settings.get("context.review") or p.kind == REJECTED):
         return _propose(p, page, kind, input_hash)
     if p is None:
         p = ContextPage(section=page["section"], slug=page["slug"], version=0)
@@ -487,7 +639,10 @@ def drop_pages(keep: set[tuple[str, str]]) -> int:
     review = settings.get("context.review")
     for p in db.session.query(ContextPage).filter(ContextPage.author == "agent"):
         if (p.section, p.slug) not in keep:
-            if review:
+            if p.kind == REJECTED:                      # refused and hidden already: nothing to review
+                db.session.delete(p)
+                n += 1
+            elif review:
                 if not p.proposed_drop:
                     p.proposed_drop, p.proposed_at = True, dt.datetime.utcnow()
                     n += 1
@@ -508,7 +663,7 @@ def review(page_id: int, action: str, by: str, content: str | None = None) -> di
         raise ValueError("no such page")
     if action not in ("approve", "reject"):
         raise ValueError("approve or reject")
-    if not (p.proposed_content or p.proposed_drop or (action == "approve" and not p.reviewed_by)):
+    if not (p.proposed_content or p.proposed_drop or not p.reviewed_by):
         raise ValueError("nothing to review on this page")
     now = dt.datetime.utcnow()
     if action == "approve" and p.proposed_drop:
@@ -526,7 +681,12 @@ def review(page_id: int, action: str, by: str, content: str | None = None) -> di
         p.content, p.version, p.updated_at, p.edited_by = edited, (p.version or 0) + 1, now, by   # a new page edited
     elif action == "reject" and p.proposed_drop:
         p.author = by                                   # kept by a person: the agent leaves it alone
-    p.proposed_content = p.proposed_sources = p.proposed_kind = p.proposed_hash = p.compared = None
+    refused = p.proposed_hash if action == "reject" and p.proposed_content else (p.compared or {}).get("rejected_hash")
+    if action == "reject" and not p.proposed_content and not p.proposed_drop:
+        p.kind = REJECTED                               # a new page refused: neither shown nor searched; the agent
+        refused = p.input_hash                          # proposes it again (to review) when its evidence changes
+    p.proposed_content = p.proposed_sources = p.proposed_kind = p.proposed_hash = None
+    p.compared = {"rejected_hash": refused} if refused else None
     p.proposed_at, p.proposed_drop = None, False
     p.reviewed_by, p.reviewed_at = by, now
     db.session.commit()
@@ -537,13 +697,16 @@ def proposals() -> list[dict[str, Any]]:
     """The pages with a change or a removal waiting, and the new pages nobody reviewed yet (for To review)."""
     out = []
     for p in db.session.query(ContextPage).order_by(ContextPage.section, ContextPage.title):
-        if p.proposed_content or p.proposed_drop or (not p.reviewed_by and (p.author or "agent") == "agent"):
+        refused = p.kind == REJECTED
+        if p.proposed_content or p.proposed_drop or (not refused and not p.reviewed_by and
+                                                     (p.author or "agent") == "agent"):
             c = p.compared or {}
-            what = "remove" if p.proposed_drop else "change" if p.proposed_content else "new"
+            what = "remove" if p.proposed_drop else "new" if refused or not p.proposed_content else "change"
+            text = (p.proposed_content if refused else p.content) or ""
             out.append({"id": p.id, "section": p.section, "title": p.title, "slug": p.slug, "what": what,
                         "diff": diff_rows(p.content or "", "" if what == "remove" else p.proposed_content or "")
-                        if what != "new" else diff_rows("", p.content or ""),
-                        "content": p.content or "", "proposed": p.proposed_content or "",
+                        if what != "new" else diff_rows("", text), "rejected_before": refused,
+                        "content": text, "proposed": p.proposed_content or "",
                         "added": c.get("added") or [], "obsolete": c.get("obsolete") or [],
                         "left_out": c.get("left_out") or [], "replaced": c.get("replaced") or 0,
                         "proposed_at": p.proposed_at, "version": p.version})
@@ -618,6 +781,7 @@ def build_context(reason: str = "manual", llm: bool = True, force: bool = False)
                 budget = int(settings.get("context.max_llm_calls"))
                 steps.begin("summary pages (LLM)")
                 res: dict[str, int] = defaultdict(int)
+                failed: list[str] = []
                 client = None
                 for spec in specs:
                     check()
@@ -633,6 +797,9 @@ def build_context(reason: str = "manual", llm: bool = True, force: bool = False)
                     if p is not None and p.proposed_hash == h and p.proposed_content and not force:
                         res["waiting"] += 1                   # its proposal waits for a person: no LLM call again
                         continue
+                    if p is not None and (p.compared or {}).get("rejected_hash") == h and not force:
+                        res["rejected"] += 1                  # a person refused this version: no LLM call again
+                        continue
                     if not spec["evidence"]:
                         continue
                     if res["llm_calls"] >= budget:
@@ -643,18 +810,33 @@ def build_context(reason: str = "manual", llm: bool = True, force: bool = False)
 
                         client = LLM()
                     db.session.commit()                       # no connection held during the LLM call
-                    out = write_summary(spec, client)
+                    try:
+                        out = write_summary(spec, client)
+                    except LearningStopped:
+                        raise
+                    except Exception as ex:  # pylint: disable=broad-except   (the other pages are written)
+                        db.session.rollback()
+                        res["llm_calls"] += 1
+                        res["failed"] += 1
+                        failed.append(f"{spec['title']}: {type(ex).__name__}: {str(ex)[:200]}")
+                        log.warning("supagent context: the page %s was not written: %s", spec["title"], ex)
+                        steps.update(**res)
+                        continue
                     res["llm_calls"] += 1
                     res["tokens"] += out["tokens"]
                     if not out["content"]:
                         res["empty"] += 1
                         continue
-                    res[save_page({**spec, "content": out["content"], "sources": out["sources"]}, "summary", h,
-                                  1, out["tokens"])] += 1
+                    if out.get("cut"):
+                        res["cut"] += 1                       # saved as it is, written again at the next build
+                    res[save_page({**spec, "content": out["content"], "sources": out["sources"]}, "summary",
+                                  _hash([h, "cut"]) if out.get("cut") else h, 1, out["tokens"])] += 1
                     steps.update(**res)
-                steps.end(**res)
-                if res.get("left"):
+                steps.end(**res, **({"failed_pages": failed[:12]} if failed else {}))
+                if res.get("left") or failed:
                     status = "partial"
+                if failed:
+                    error = "pages not written (the next build tries again): " + "; ".join(failed)[:1400]
             steps.begin("pages of subjects gone")
             steps.end(dropped=drop_pages(keep))
             from supagent.knowledge.index import embed_pending, sync
@@ -739,7 +921,7 @@ def visible_pages() -> list[ContextPage]:
 
     dbs = visible_databases()
     return [p for p in db.session.query(ContextPage).order_by(ContextPage.section, ContextPage.title)
-            if set(p.database_ids or []) <= dbs]
+            if set(p.database_ids or []) <= dbs and p.kind != REJECTED]
 
 
 # --------------------------------------------------------------------------- #

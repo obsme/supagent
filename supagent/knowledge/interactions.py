@@ -79,7 +79,7 @@ def items() -> Iterator[dict[str, Any]]:
     for e in db.session.query(Entry).filter(Entry.deleted_at.is_(None), Entry.enabled.is_(True),
                                             Entry.classification == "guide"):
         yield {"ref": f"entry:{e.id}", "title": e.title, "text": e.content or ""}
-    for p in db.session.query(ContextPage):
+    for p in db.session.query(ContextPage).filter(ContextPage.kind.is_distinct_from("rejected")):
         yield {"ref": f"context:{p.id}", "title": p.title, "text": p.content or ""}
     for n in db.session.query(Note).filter(Note.scope == "team"):
         yield {"ref": f"note:{n.id}", "title": n.title or "", "text": n.text or ""}
@@ -307,7 +307,8 @@ def explain(llm: Any, seconds: float = 300.0, limit: int = 200) -> dict[str, Any
         return out
     facets = {f.id: f for f in db.session.query(Facet).filter(
         Facet.id.in_({int(r.split(":", 1)[1]) for x in todo for r in (x.a_ref, x.b_ref) if r.split(":", 1)[1].isdigit()}))}
-    pages = [(p.title or "", p.content or "") for p in db.session.query(ContextPage)]
+    pages = [(p.title or "", p.content or "")
+             for p in db.session.query(ContextPage).filter(ContextPage.kind.is_distinct_from("rejected"))]
     _graph()                                          # (the map's names are read once)
     for start in range(0, len(todo), EXPLAIN_BATCH):
         if time.time() - t0 > seconds:
