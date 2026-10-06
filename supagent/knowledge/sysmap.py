@@ -763,12 +763,12 @@ def map_data(admin: bool) -> dict[str, Any]:
         except Exception:  # pylint: disable=broad-except   (the map without it)
             log.warning("supagent map: what is missing for investigations: not read", exc_info=True)
             db.session.rollback()
-    from supagent.knowledge.facets import about, field_rules
+    from supagent.knowledge.facets import about, field_rules, inside
 
-    said = about()
+    said, within = about(), inside()
     read = {c: rx.pattern for c, rx in field_rules()}
     return {"categories": [{"name": c, "count": counts.get(c, 0), "builtin": c in ("subject", "application", "component"),
-                            "about": said.get(c, ""), "fields": read.get(c, "")}
+                            "about": said.get(c, ""), "fields": read.get(c, ""), "inside": within.get(c, "")}
                            for c in order if counts.get(c) or admin],
             "values": values, "links": links, "layout": layout(),
             "removals": sum(1 for x in links if x["drop"]) if admin else 0, "is_admin": admin,

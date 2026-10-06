@@ -153,6 +153,85 @@ def review_all() -> bool:
         return False
 
 
+def _inside_of(raw: Any, cats: Any) -> dict[str, str]:
+    """{category: the category its values are inside} from categories.inside (`raw`) and categories.qualified, the
+    known categories only, none inside itself (cycles kept: the callers check them)."""
+    from supagent.knowledge.datalinks import qualified
+
+    raw = {str(k).strip().lower(): " ".join(str(v or "").lower().split())
+           for k, v in (raw if isinstance(raw, dict) else {}).items()}
+    out = {c: p for c, p in qualified().items() if c not in raw}
+    out.update({c: p for c, p in raw.items() if p})
+    return {c: p for c, p in out.items() if c in cats and p in cats and c != p}
+
+
+def _loops(m: dict[str, str], c: str) -> bool:
+    seen, p = {c}, m.get(c)
+    while p is not None:
+        if p in seen:
+            return True
+        seen.add(p)
+        p = m.get(p)
+    return False
+
+
+def inside() -> dict[str, str]:
+    """The categories drawn inside another on the System map {category: the category its values are inside}
+    (categories.inside, else the category a categories.qualified one is named after): display only. A category in a
+    loop of them is left out (drawn as a column of its own)."""
+    from supagent import settings
+
+    try:
+        raw = settings.get("categories.inside")
+    except Exception:  # pylint: disable=broad-except   (no settings table yet)
+        raw = None
+    m = _inside_of(raw, set(editable()))
+    for c in [c for c in m if _loops(m, c)]:
+        m.pop(c, None)
+    return m
+
+
+def set_inside(category: str, parent: str, by: str) -> str:
+    """A category drawn inside another on the System map ("": in a column of its own)."""
+    from supagent import settings
+
+    cats = editable()
+    category = " ".join(str(category or "").lower().split())
+    parent = " ".join(str(parent or "").lower().split())
+    if category not in cats:
+        raise ValueError("no such category: " + category)
+    if parent and parent not in cats:
+        raise ValueError("inside: one of " + ", ".join(c for c in cats if c != category))
+    if parent == category:
+        raise ValueError("a category is not inside itself (a value can be inside another of its category: link it "
+                         "to the one it is part of)")
+    raw = settings.get("categories.inside")
+    raw = {str(k).strip().lower(): str(v or "").strip().lower() for k, v in (raw if isinstance(raw, dict) else {}).items()}
+    raw[category] = parent
+    if parent and _loops(_inside_of(raw, set(cats)), category):
+        raise ValueError(f"{parent} is inside {category} already (directly or further down): not both ways")
+    settings.set_value("categories.inside", raw, by=by)
+    return parent
+
+
+def _rename_inside(old: str, new: str | None, by: str) -> None:
+    """categories.inside and categories.qualified after a category is renamed (`new`) or removed (None)."""
+    from supagent import settings
+
+    for key in ("categories.inside", "categories.qualified"):
+        raw = settings.get(key)
+        if not isinstance(raw, dict) or not raw:
+            continue
+        out = {}
+        for k, v in raw.items():
+            k, v = str(k).strip().lower(), str(v or "").strip().lower()
+            if new is None and old in (k, v):
+                continue
+            out[new if k == old else k] = new if (v == old and new is not None) else v
+        if out != {str(k).strip().lower(): str(v or "").strip().lower() for k, v in raw.items()}:
+            settings.set_value(key, out, by=by)
+
+
 def rank(category: str) -> int:
     """Wider first: subject, application, component, then the deployment's own in their order."""
     cats = list(editable())
@@ -989,9 +1068,9 @@ def categories_info() -> list[dict[str, Any]]:
 
     fields = settings.get("categories.fields")
     fields = {str(k).strip().lower(): str(v) for k, v in (fields if isinstance(fields, dict) else {}).items()}
-    said = about()
+    said, within = about(), inside()
     info = {c: {"name": c, "builtin": c in BUILTIN, "fields": fields.get(c) or "", "about": said.get(c, ""),
-                "values": 0, "tags": 0, "parts": 0, "interactions": 0} for c in editable()}
+                "inside": within.get(c, ""), "values": 0, "tags": 0, "parts": 0, "interactions": 0} for c in editable()}
     cat_of: dict[int, str] = {}
     rows = db.session.query(Facet.id, Facet.facet, Facet.status).filter(Facet.facet.in_(list(info))).all()
     for fid, cat, status in rows:
@@ -1059,6 +1138,7 @@ def rename_category(old: str, new: str, by: str) -> str:
 
     said = dict(about())                              # what it is: under its new name (read before the name goes)
     _set_categories(change, by)
+    _rename_inside(old, new, by)                      # the categories drawn inside it, the one it is inside
     if old in said:
         from supagent import settings
 
@@ -1121,6 +1201,7 @@ def remove_category(name: str, by: str) -> dict[str, int]:
 
     said = dict(about())
     _set_categories(change, by)
+    _rename_inside(name, None, by)
     if name in said:
         from supagent import settings
 

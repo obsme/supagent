@@ -138,6 +138,12 @@ what a group's members may query stays what their roles give. The role **AI Agen
 it was (`grant --role agent`). `superset init` never gives these pages to Gamma or Alpha. What a user can query
 through the agent stays what Superset lets that user query.
 
+## Upgrade from 0.9.6.4 to 0.9.6.5
+
+`pip install` the new wheel on every host, restart. Nothing to run (tables v17). The System map in levels: a category
+drawn inside another (Categories -> Edit -> Inside: a server's disks inside it), opened and closed with a click; the
+map filtered on a part; big categories grouped by what their parts hold. INSTALL.txt, *From 0.9.6.4 to 0.9.6.5*.
+
 ## Upgrade from 0.9.6.3 to 0.9.6.4
 
 `pip install` the new wheel on every host, restart. Nothing to run (tables v17). The System map answers in under a

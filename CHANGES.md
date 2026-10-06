@@ -1,5 +1,32 @@
 # Changes
 
+## 0.9.6.5 — 6 October 2026
+
+The System map in levels: categories drawn inside others, opened and closed with a click; the map filtered on a
+part; big categories grouped by what their parts hold.
+
+Not measured again: the agent's answering code is 0.9.6's (see 0.9.6). Checked before this release: the unit tests (1006 passed, among them: with categories inside others, the values, their links and the agent's picture of the system are the same), the page in a browser (below).
+
+* **A category inside another** (Categories → Edit → Inside): a server's disks drawn inside the server, a disk's
+  partitions inside the disk, its cpu inside it, as many levels as the categories go. Each value is drawn inside the
+  value it is part of (else runs on); the line at the bottom of a box opens or closes what is inside it (this browser
+  remembers; a category's ⓘ opens or closes them all). A category named after another (`categories.qualified`) is
+  inside it unless you choose otherwise. Never inside itself nor in a loop.
+* **A value inside another of its category**: a sub-subject inside the subject it is part of.
+* **The map filtered on a part** (the box above the map, or "Filter the map on it" in its panel): the part, what it
+  is in, what is inside it every level down, the parts it is linked to; a chip says what the map is filtered on.
+* **Big categories grouped by what their parts hold**: servers by the components that run on them ("holding grafana
+  + redis · 26 servers"), as the links say (read in the metrics' labels, or drawn by people: "runs on", "hosted on",
+  "deployed on"); or by what they belong to (their application), as before. Each viewer chooses in the category's ⓘ.
+* Display only: what the agent reads (the values, their links, the system around a question) does not change.
+* 0.9.6.4's sentences of the parts: among sentences of the same score, the first shown can differ from 0.9.6.3's
+  (the texts are read in the order they were made); the sentences found are the same.
+
+Checked in a browser on a synthetic map of 5,522 parts and 6,812 links (servers, disks, partitions, cpus,
+sub-subjects): drawn in about 1 s; three levels opened; the filter on a server; the groups switched; the PNG export.
+
+Upgrade from 0.9.6.4: the wheel on every host, restart; nothing to run (tables v17).
+
 ## 0.9.6.4 — 6 October 2026
 
 The System map answers in under a second on a big platform (it could take about 20 seconds).

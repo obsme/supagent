@@ -6,7 +6,12 @@
    in a category's name: kept in the browser); the map can take the whole screen. Admins: Edit to move the boxes
    and the categories (drag a category's name), put categories in a group drawn around them (display only), add a
    link (a box, then another), write what a part is, hide a part.
-   Exports: SVG, PNG, PDF. Drawn in SVG by hand: Superset's pages allow no external script. */
+   Exports: SVG, PNG, PDF. Drawn in SVG by hand: Superset's pages allow no external script.
+   0.9.6.5: a category drawn inside another (categories.inside: a server's disks inside it), as many levels down
+   as the categories go, and a value inside another of its category (a sub-subject): opened and closed with a click
+   (kept in the browser); the map filtered on a part (it, what it is in, what is inside it, what it is linked to);
+   a big category's parts grouped by what they hold (servers by the components that run on them) or by what they
+   belong to, each viewer's choice. */
 (function () {
   "use strict";
   var S = window.supagent, el = S.el, D = S.dictionary;
@@ -15,7 +20,8 @@
   var NS = "http://www.w3.org/2000/svg";
   var FOLD_AT = 18, FOLD_ALWAYS = 60;   // a category read from the data with more parts than 18 is folded into one
                                         // box (servers...), any category with more than 60
-  var BOX_W = 224, GAP = 14, COL_GAP = 96, PAD = 28, HEAD_H = 40, LINE = 16;
+  var BOX_W = 224, GAP = 14, COL_GAP = 96, PAD = 28, HEAD_H = 40, LINE = 16, INDENT = 18;
+  var RUNS_ON = /\b(runs?|running|hosted|deployed|installed)\s+on\b/i;   // a link drawn by a person that says so
   var GROUP_AT = 40, PAGE = 60;         // (0.9.6) an open category of more parts than 40 shows them by what they
                                         // belong to (servers by their application), each group folded until opened;
                                         // a group or a column shows its first 60 parts, the others behind one box
@@ -23,11 +29,23 @@
      parts chosen (none: every part of those categories; each chosen part comes with what it is part of, what it
      is made of and what it interacts with). Both are chosen in the box above the map; the legend and the cross
      in a category's name change `cats` too. */
+  var TREE_KEY = "supagent.map.open", GROUPBY_KEY = "supagent.map.groupby";   // the parts opened, the groups chosen
   var st = { data: null, edit: false, open: {}, sel: null, from: null, view: { x: 0, y: 0, k: 1 },
              boxes: {}, saveTimer: null, fitted: false, seq: 0, sig: "", fresh: null, freshTimer: null, autoAt: 0, note: "", freshAt: -1, freshCats: [], inputAt: Date.now(),
              cols: {}, groups: [], cats: readCats(), parts: [], full: false, pick: null,
-             owners: {}, openGroups: {}, more: {}, busy: false, tookMs: 0 };
+             owners: {}, openGroups: {}, more: {}, busy: false, tookMs: 0,
+             tree: readKept(TREE_KEY, {}), groupBy: readKept(GROUPBY_KEY, {}), inside: {}, tparent: {}, tkids: {},
+             holds: {}, autoOpen: {}, tcands: {} };
   var CATS_KEY = "supagent.map.categories";      // the categories this viewer chose (this browser only)
+  function readKept(key, empty) {
+    try {
+      var v = JSON.parse(window.localStorage.getItem(key) || "null");
+      return v && typeof v === "object" && !Array.isArray(v) ? v : empty;
+    } catch (e) { return empty; }
+  }
+  function keep(key, value) {
+    try { window.localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* kept for this page only */ }
+  }
   var GROUP_PAD = 12, GROUP_HEAD = 22, PICK_PARTS = 80;
   function readCats() {
     try {
@@ -200,10 +218,18 @@
       st.kids = {};
       d.values.forEach(function (v) { (v.parents || []).forEach(function (p) { (st.kids[p] = st.kids[p] || []).push(v.id); }); });
       st.owners = {};                                         // what a part belongs to: is part of, runs on (groups)
+      st.holds = {};                                          // (0.9.6.5) what runs on a part (a server's components)
       d.links.forEach(function (x) {
-        if ((x.kind === "part_of" || x.kind === "runs_on") && st.byId[x.a] && st.byId[x.b])
-          (st.owners[x.a] = st.owners[x.a] || []).push(x.b);
+        if (!st.byId[x.a] || !st.byId[x.b]) return;
+        var runs = x.kind === "runs_on" || (!x.both && /^link/.test(x.kind || "") && RUNS_ON.test(x.label || ""));
+        if (x.kind === "part_of" || runs) (st.owners[x.a] = st.owners[x.a] || []).push(x.b);
+        if (runs && !x.both) (st.holds[x.b] = st.holds[x.b] || []).push(x.a);
       });
+      st.inside = {};                                         // (0.9.6.5) the categories drawn inside another
+      var named = {};
+      d.categories.forEach(function (c) { named[c.name] = true; });
+      d.categories.forEach(function (c) { if (c.inside && named[c.inside]) st.inside[c.name] = c.inside; });
+      computeTree();
       var lay = d.layout || {};
       st.positions = lay.positions || {};
       st.hidden = lay.hidden || [];
@@ -258,7 +284,8 @@
           if (q && v.value.toLowerCase().indexOf(q) < 0 &&
               !(v.synonyms || []).some(function (x) { return String(x).toLowerCase().indexOf(q) >= 0; })) return;
           if (++n > PICK_PARTS) { more++; return; }
-          var kids = (st.kids[v.id] || []).length;
+          var kids = (st.kids[v.id] || []).length + (st.tkids[v.id] || []).filter(function (k) {
+            return (st.kids[v.id] || []).indexOf(k) < 0; }).length;
           items.push({ id: String(v.id), label: v.value, group: catLabel(c.name, 2), hint: kids ? S.num(kids) + " part" + (kids > 1 ? "s" : "") : "" });
         });
     });
@@ -275,8 +302,8 @@
   function syncPick() {
     if (!st.data) return;
     if (!st.pick) {
-      st.pick = S.picker({ load: pickLoad, chosen: pickChosen(), placeholder: "Everything: choose categories or parts…",
-        label: "Show: categories and parts", wait: 0, onchange: function (chosen) {
+      st.pick = S.picker({ load: pickLoad, chosen: pickChosen(), placeholder: "Everything: filter by categories or parts…",
+        label: "Filter: categories and parts", wait: 0, onchange: function (chosen) {
           var all = allCats();
           var cats = chosen.filter(function (x) { return String(x.id).indexOf("cat:") === 0; }).map(function (x) { return String(x.id).slice(4); });
           st.cats = cats.length === all.length ? [] : all.filter(function (c) { return cats.indexOf(c) >= 0; });
@@ -291,23 +318,37 @@
       host.appendChild(st.pick.el);
     } else st.pick.set(pickChosen());
   }
-  /* the parts shown: every part of the categories chosen (the hidden ones aside); with parts chosen, each of them
-     with what it is part of, what is part of it and what it interacts with */
+  /* the parts shown: every part of the categories chosen (the hidden ones aside); with parts chosen (the map
+     filtered on them), each of them with what it is part of (and inside), what is part of it or inside it (every
+     level down; 0.9.6.5) and what it is linked to, the way to a part inside others opened */
   function shownIds() {
     var ids = {};
+    st.autoOpen = {};
     if (st.parts.length) {
       st.parts.forEach(function (f) {
         if (!st.byId[f]) return;
         var todo = [f];
         ids[f] = true;
+        st.autoOpen[f] = true;                                // what is inside it: shown
         while (todo.length) {                                 // what it is part of, all the way up
-          var v = st.byId[todo.pop()];
-          (v.parents || []).forEach(function (p) { if (st.byId[p] && !ids[p]) { ids[p] = true; todo.push(p); } });
+          var v = st.byId[todo.pop()], up = (v.parents || []).slice();
+          if (st.tparent[v.id] !== undefined) up.push(st.tparent[v.id]);
+          up.forEach(function (p) { if (st.byId[p] && !ids[p]) { ids[p] = true; todo.push(p); } });
         }
-        var level = [f];
-        for (var depth = 0; depth < 2; depth++) {             // what is part of it, two levels down
+        for (var t = st.tparent[f], guard = {}; t !== undefined && !guard[t]; t = st.tparent[t]) {
+          guard[t] = true;
+          st.autoOpen[t] = true;                              // the way to it opened
+        }
+        (st.tcands[f] || []).forEach(function (c) { st.autoOpen[c] = true; });   // whichever it is drawn in
+        var level = [f], seen = {};
+        seen[f] = true;
+        while (level.length) {                                // what is part of it or inside it, every level down
           var nxt = [];
-          level.forEach(function (i) { (st.kids[i] || []).forEach(function (k) { if (!ids[k]) { ids[k] = true; nxt.push(k); } }); });
+          level.forEach(function (i) {
+            (st.kids[i] || []).concat(st.tkids[i] || []).forEach(function (k) {
+              if (!seen[k]) { seen[k] = true; ids[k] = true; nxt.push(k); }
+            });
+          });
           level = nxt;
         }
         st.data.links.forEach(function (x) { if (x.a === f) ids[x.b] = true; if (x.b === f) ids[x.a] = true; });
@@ -340,36 +381,45 @@
 
   // ------------------------------------------------------------------ the layout: columns, an order with few crossings
   function layout(ids) {
-    var cats = catOrder();
-    var cols = {}, nodes = {};
+    var cats = catOrder(), tree = treeOf(ids);
+    var cols = {}, nodes = {}, inner = {}, own = {};
+    /* (0.9.6.5) a column per category inside no other; a value of a category inside another (categories.inside: a
+       disk inside a server) is drawn in that one's column, inside the value it is part of or runs on, as is a value
+       inside another of its own category (a sub-subject); one with no such value shown starts a line of its own */
     Object.keys(ids).forEach(function (i) {
-      var v = st.byId[i];
-      (cols[v.facet] = cols[v.facet] || []).push(v);
+      var v = st.byId[i], c = colOf(v.facet);
+      if (v.facet === c) own[c] = (own[c] || 0) + 1;
+      else inner[c] = (inner[c] || 0) + 1;
+      if (tree.up[v.id] !== undefined) return;                // drawn inside the part it is in
+      (cols[c] = cols[c] || []).push(v);
     });
     var C = colors(), titleFont = "600 13.5px " + C.font, textFont = "12px " + C.font;
     var none = !!st.data.is_admin && !st.parts.length;       // an admin: a category with no value yet has its column
-    cats.forEach(function (c) { if (none && !cols[c] && !isOff(c)) cols[c] = []; });
-    var order = cats.filter(function (c) { return cols[c] && (cols[c].length || none); });
+    cats.forEach(function (c) { if (none && !cols[c] && !isOff(c) && colOf(c) === c) cols[c] = []; });
+    var order = cats.filter(function (c) { return colOf(c) === c && cols[c] && (cols[c].length || none); });
     /* the place of each column when every category is shown: a box an admin placed there keeps its place next to
        its column when a viewer shows fewer categories (the columns close up) */
     var has = {};
-    st.data.values.forEach(function (v) { if (st.hidden.indexOf(v.id) < 0) has[v.facet] = true; });
-    var full = cats.filter(function (c) { return has[c] || !!st.data.is_admin; });
+    st.data.values.forEach(function (v) { if (st.hidden.indexOf(v.id) < 0) has[colOf(v.facet)] = true; });
+    var full = cats.filter(function (c) { return colOf(c) === c && (has[c] || !!st.data.is_admin); });
     var shift = {};
     order.forEach(function (c, ci) {
       var fi = full.indexOf(c);
       shift[c] = fi < 0 ? 0 : (ci - fi) * (BOX_W + COL_GAP);
     });
-    var folded = {};
+    var folded = {}, roots = {}, loose = {};
     order.forEach(function (c) {
-      var fromData = cols[c].filter(function (v) { return v.source === "data"; }).length * 2 >= cols[c].length;
-      var big = cols[c].length > FOLD_ALWAYS || (cols[c].length > FOLD_AT && fromData);
+      roots[c] = cols[c].filter(function (v) { return v.facet === c; });
+      loose[c] = cols[c].filter(function (v) { return v.facet !== c; });      // inside nothing shown: grouped apart
+      var list = roots[c].length ? roots[c] : cols[c];
+      var fromData = list.filter(function (v) { return v.source === "data"; }).length * 2 >= list.length;
+      var big = list.length > FOLD_ALWAYS || (list.length > FOLD_AT && fromData);
       var usual = st.folded[c] === undefined ? big : !!st.folded[c];      // as an admin left it, else a big one is folded
       folded[c] = !st.parts.length && cols[c].length > 0 && (st.open[c] === undefined ? usual : !st.open[c]);
     });
     var rankOf = {};                                          // a part's place in its column (the previous pass)
     order.forEach(function (c, ci) {
-      var list = cols[c];
+      var list = roots[c];
       list.sort(function (a, b) {
         var pa = bary(a, rankOf), pb = bary(b, rankOf);
         if (pa !== pb) return pa - pb;
@@ -380,70 +430,124 @@
     for (var pass = 0; pass < 2; pass++) {                    // up again: a column by what is part of it
       order.slice(0, -1).reverse().forEach(function (c) {
         var ci = order.indexOf(c);
-        cols[c].sort(function (a, b) { return down(a, rankOf) - down(b, rankOf); });
-        cols[c].forEach(function (v, i) { rankOf[v.id] = ci * 10000 + i; });
+        roots[c].sort(function (a, b) { return down(a, rankOf) - down(b, rankOf); });
+        roots[c].forEach(function (v, i) { rankOf[v.id] = ci * 10000 + i; });
       });
     }
-    var heads = [];
+    var heads = [], guides = [];
+    var under = function (id) { return tree.down[id] || []; };  // the parts drawn inside a part
+    var hideUnder = function (id, alias, seen) {              // everything inside a part: drawn as `alias`
+      seen = seen || {};
+      under(id).forEach(function (k) {
+        if (seen[k]) return;
+        seen[k] = true;
+        nodes[k] = { alias: alias };
+        hideUnder(k, alias, seen);
+      });
+    };
     order.forEach(function (c, ci) {
       var off = st.cols[c] || [0, 0];                         // where an admin moved the category
       var x = PAD + ci * (BOX_W + COL_GAP) + (+off[0] || 0), top = PAD + (+off[1] || 0), y = top + HEAD_H;
       var info = st.data.categories.filter(function (k) { return k.name === c; })[0] || {};
-      heads.push({ cat: c, x: x, y: top, n: cols[c].length, folded: !!folded[c], shift: shift[c], about: info.about || "",
-                   fields: info.fields || "",
+      heads.push({ cat: c, x: x, y: top, n: own[c] || 0, inner: inner[c] || 0, folded: !!folded[c], shift: shift[c],
+                   about: info.about || "", fields: info.fields || "",
                    color: C.series[st.data.categories.map(function (k) { return k.name; }).indexOf(c) % 8] });
       if (!cols[c].length) {                                  // no value yet: said in its column
         nodes["none:" + c] = { id: "none:" + c, none: c, cat: c, x: x, y: y, w: BOX_W, h: 58 };
         return;
       }
       if (folded[c]) {
-        var names = cols[c].slice(0, 6).map(function (v) { return v.value; }).join(", ") + (cols[c].length > 6 ? "…" : "");
+        var first = roots[c].length ? roots[c] : cols[c];
+        var names = first.slice(0, 6).map(function (v) { return v.value; }).join(", ") + (first.length > 6 ? "…" : "");
         var lines = wrap(names, textFont, BOX_W - 24, 3);
         var h = 36 + lines.length * LINE;
-        nodes["cat:" + c] = { id: "cat:" + c, fold: c, cat: c, x: x, y: y, w: BOX_W, h: h, title: [catLabel(c, cols[c].length) + " · " +
-          S.num(cols[c].length)], lines: lines, members: cols[c].map(function (v) { return v.id; }) };
-        cols[c].forEach(function (v) { nodes[v.id] = { alias: "cat:" + c }; });
+        var members = Object.keys(ids).filter(function (i) { return colOf(st.byId[i].facet) === c; }).map(Number);
+        nodes["cat:" + c] = { id: "cat:" + c, fold: c, cat: c, x: x, y: y, w: BOX_W, h: h, title: [catLabel(c, own[c] || 0) + " · " +
+          S.num(own[c] || 0) + (inner[c] ? " · " + S.num(inner[c]) + " inside" : "")], lines: lines, members: members };
+        members.forEach(function (i) { nodes[i] = { alias: "cat:" + c }; });
         return;
       }
-      var grouped = !st.parts.length && cols[c].length > GROUP_AT ? groupsOf(c, cols[c], rankOf) : null;
-      var place = function (v) {
-        var title = wrap(v.value, titleFont, BOX_W - 24, 2);
-        var about = v.description ? wrap(v.description, textFont, BOX_W - 24, 3) :
-          v.hint ? wrap("“" + v.hint.text + "”", "italic " + textFont, BOX_W - 24, 3) : [];
+      var place = function (v, depth, seen) {
+        seen = seen || {};
+        seen[v.id] = true;
+        var w = Math.max(120, BOX_W - depth * INDENT), bx = x + depth * INDENT;
+        var title = wrap(v.value, titleFont, w - 24, 2);
+        var about = v.description ? wrap(v.description, textFont, w - 24, 3) :
+          v.hint ? wrap("“" + v.hint.text + "”", "italic " + textFont, w - 24, 3) : [];
         var items = v.gone ? "its items are gone" : v.items ? S.num(v.items) + " item" + (v.items > 1 ? "s" : "") : "no item yet";
-        var h = 16 + title.length * 17 + (about.length ? 4 + about.length * LINE : 0) + (v.hint && !v.description ? LINE : 0) + 22;
-        var p = st.positions[v.id];
-        nodes[v.id] = { id: v.id, v: v, cat: c, x: p ? p[0] + shift[c] : x, y: p ? p[1] : y, w: BOX_W, h: h, title: title, about: about,
-                        items: items, hintFrom: v.hint && !v.description ? v.hint.from : null, moved: !!p };
+        var kids = under(v.id).filter(function (k) { return !seen[k]; });
+        var open = kids.length > 0 && isOpen(v.id);
+        var tree = kids.length ? { open: open, label: kidsLabel(kids) } : null;
+        var h = 16 + title.length * 17 + (about.length ? 4 + about.length * LINE : 0) + (v.hint && !v.description ? LINE : 0) + 22 +
+          (tree ? LINE + 2 : 0);
+        var p = depth ? null : st.positions[v.id];            // a box inside another stays in it (not moved by hand)
+        var node = { id: v.id, v: v, cat: c, depth: depth, x: p ? p[0] + shift[c] : bx, y: p ? p[1] : y, w: w, h: h, title: title,
+                     about: about, items: items, hintFrom: v.hint && !v.description ? v.hint.from : null, moved: !!p, tree: tree };
+        nodes[v.id] = node;
         y += h + GAP;
+        if (!kids.length) return node;
+        if (!open) { hideUnder(v.id, v.id); return node; }
+        var list = kids.map(function (k) { return st.byId[k]; }).sort(inOrder);
+        var placed = paged(list, "in:" + v.id, depth + 1, seen);
+        if (placed.length) guides.push({ x: bx + 9, y1: node.y + node.h, kids: placed });
+        return node;
       };
-      var paged = function (list, scope) {                    // the first PAGE, the others behind one box
-        var shown = st.more[scope] || list.length <= PAGE + 5 ? list : list.slice(0, PAGE);
-        shown.forEach(place);
+      // the first PAGE, the others behind one box; returns the boxes placed (the one of the others last)
+      var paged = function (list, scope, depth, seen) {
+        var shown = st.more[scope] || list.length <= PAGE + 5 ? list : list.slice(0, PAGE), out = [];
+        shown.forEach(function (v) { out.push(place(v, depth, seen)); });
         if (shown.length < list.length) {
-          var id = "more:" + scope, rest = list.slice(shown.length);
-          nodes[id] = { id: id, more: scope, cat: c, x: x, y: y, w: BOX_W, h: 40, title: ["Show the " + S.num(rest.length) + " others"],
-                        lines: [], members: rest.map(function (v) { return v.id; }) };
-          rest.forEach(function (v) { nodes[v.id] = { alias: id }; });
+          var id = "more:" + scope, rest = list.slice(shown.length), w = Math.max(120, BOX_W - depth * INDENT);
+          nodes[id] = { id: id, more: scope, cat: c, depth: depth, x: x + depth * INDENT, y: y, w: w, h: 40,
+                        title: ["Show the " + S.num(rest.length) + " others"], lines: [], members: rest.map(function (v) { return v.id; }) };
+          rest.forEach(function (v) { nodes[v.id] = { alias: id }; hideUnder(v.id, id); });
+          out.push(nodes[id]);
           y += 40 + GAP;
         }
+        return out;
       };
-      if (!grouped) { paged(cols[c], c); return; }
-      grouped.keys.forEach(function (key) {                    // a group: folded until opened
-        var list = grouped.by[key], gid = "grp:" + c + ":" + key, open = !!st.openGroups[gid];
-        var owner = key === "none" ? null : st.byId[key];
-        var noun = catLabel(c, list.length).toLowerCase();
-        if (list.length > 1 && !/s$/.test(noun)) noun += "s";
-        var name = (owner ? owner.value : "linked to no " + catLabel(grouped.cat, 1).toLowerCase()) + " · " + S.num(list.length) +
-          " " + noun;
-        var lines = open ? [] : wrap(list.slice(0, 5).map(function (v) { return v.value; }).join(", ") + (list.length > 5 ? "…" : ""),
-                                     textFont, BOX_W - 24, 2);
+      var box = function (gid, name, list, lines) {          // a group: folded until opened
+        var open = !!st.openGroups[gid];
         var gh = open ? 34 : 36 + lines.length * LINE;
-        nodes[gid] = { id: gid, group: gid, owner: owner ? owner.id : null, open: open, cat: c, x: x, y: y, w: BOX_W, h: gh,
-                       title: [(open ? "\u25be " : "\u25b8 ") + name], lines: lines, members: list.map(function (v) { return v.id; }) };
+        nodes[gid] = { id: gid, group: gid, open: open, cat: c, x: x, y: y, w: BOX_W, h: gh,
+                       title: [(open ? "▾ " : "▸ ") + name], lines: open ? [] : lines,
+                       members: list.map(function (v) { return v.id; }) };
         y += gh + GAP;
-        if (open) paged(list, gid);
-        else list.forEach(function (v) { nodes[v.id] = { alias: gid }; });
+        if (open) paged(list, gid, 0);
+        else list.forEach(function (v) { nodes[v.id] = { alias: gid }; hideUnder(v.id, gid); });
+        return nodes[gid];
+      };
+      var some = function (list) {
+        return wrap(list.slice(0, 5).map(function (v) { return v.value; }).join(", ") + (list.length > 5 ? "…" : ""),
+                    textFont, BOX_W - 24, 2);
+      };
+      var grouped = !st.parts.length && roots[c].length > GROUP_AT ? groupsOf(c, roots[c], rankOf) : null;
+      if (!grouped) paged(roots[c], c, 0);
+      else grouped.keys.forEach(function (key) {
+        var list = grouped.by[key], noun = catLabel(c, list.length).toLowerCase();
+        if (list.length > 1 && !/s$/.test(noun)) noun += "s";
+        var name;
+        if (grouped.kind === "holds") {
+          name = (key === "none" ? "holding no " + catLabel(grouped.cat, 1).toLowerCase() : "holding " + key) + " · " +
+            S.num(list.length) + " " + noun;
+        } else {
+          var owner = key === "none" ? null : st.byId[key];
+          name = (owner ? owner.value : "linked to no " + catLabel(grouped.cat, 1).toLowerCase()) + " · " + S.num(list.length) + " " + noun;
+        }
+        var g = box("grp:" + c + ":" + (grouped.kind === "holds" ? "h" + hash(key) : key), name, list, some(list));
+        if (grouped.kind !== "holds" && key !== "none") g.owner = +key;
+      });
+      // the values of a category inside this one that are inside none of its values shown: one group per category
+      var byCat = {}, catsIn = [];
+      loose[c].forEach(function (v) {
+        if (!byCat[v.facet]) { byCat[v.facet] = []; catsIn.push(v.facet); }
+        byCat[v.facet].push(v);
+      });
+      catsIn.forEach(function (k) {
+        var list = byCat[k].sort(inOrder), noun = catLabel(k, list.length).toLowerCase();
+        if (list.length > 1 && !/s$/.test(noun)) noun += "s";
+        box("grp:" + c + ":in:" + k, S.num(list.length) + " " + noun + " inside no " + catLabel(st.inside[k] || c, 1).toLowerCase() +
+            " shown", list, some(list));
       });
     });
     /* the groups an admin made (display only): a frame around the columns of their categories that are shown */
@@ -463,12 +567,96 @@
       frames.push({ name: g.name, index: gi, x: x0 - GROUP_PAD, y: y0 - GROUP_HEAD, w: x1 - x0 + 2 * GROUP_PAD,
                     h: y1 - y0 + GROUP_HEAD + GROUP_PAD });
     });
-    return { nodes: nodes, heads: heads, folded: folded, frames: frames, shift: shift };
+    return { nodes: nodes, heads: heads, folded: folded, frames: frames, shift: shift, guides: guides, up: tree.up };
   }
-  /* The groups of a big open category: its parts by what they belong to (is part of, runs on) in the category most
-     of them belong to (servers by their application, disks by their server); none when that makes groups of one or
-     two (then the column is only paged). Groups in the order of what they belong to on the map. */
+  /* (0.9.6.5) a category's column: the category it is inside, all the way up */
+  function colOf(c) {
+    var seen = {};
+    while (st.inside[c] && !seen[c]) { seen[c] = true; c = st.inside[c]; }
+    return c;
+  }
+  function isOpen(id) { return !!st.tree[id] || !!st.autoOpen[id]; }
+  function inOrder(a, b) {                                    // by category (their order on the map), then name
+    var cats = st.data.categories.map(function (k) { return k.name; });
+    return cats.indexOf(a.facet) - cats.indexOf(b.facet) || a.value.localeCompare(b.value);
+  }
+  function kidsLabel(kids) {                                  // 3 disks · 1 cpu
+    var n = {}, order = [];
+    kids.forEach(function (k) { var c = st.byId[k].facet; if (!n[c]) { n[c] = 0; order.push(c); } n[c]++; });
+    return order.map(function (c) {
+      var noun = catLabel(c, n[c]).toLowerCase();
+      if (n[c] > 1 && !/s$/.test(noun)) noun += "s";
+      return S.num(n[c]) + " " + noun;
+    }).join(" · ");
+  }
+  function hash(s) {
+    var h = 0;
+    for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+    return (h >>> 0).toString(36);
+  }
+  /* (0.9.6.5) The values drawn inside another: a value of a category inside another (a disk) under the value of that
+     category it is part of, else runs on (its server); a value under another of its own category it is part of (a
+     sub-subject under its subject). Several: the first link made; one that would be inside itself: none. */
+  function computeTree() {
+    st.tparent = {};
+    st.tkids = {};
+    st.tcands = {};
+    st.data.values.forEach(function (v) {
+      var want = st.inside[v.facet], cands = [];
+      if (want) {
+        (v.parents || []).concat(st.owners[v.id] || []).forEach(function (p) {
+          if (st.byId[p] && st.byId[p].facet === want && cands.indexOf(p) < 0) cands.push(p);
+        });
+      } else {
+        (v.parents || []).forEach(function (p) { if (st.byId[p] && st.byId[p].facet === v.facet) cands.push(p); });
+      }
+      if (cands.length) st.tcands[v.id] = cands;
+      for (var i = 0; i < cands.length; i++) {
+        if (!loops(v.id, cands[i], st.tparent)) { st.tparent[v.id] = cands[i]; break; }
+      }
+    });
+    Object.keys(st.tparent).forEach(function (k) {
+      var p = st.tparent[k];
+      (st.tkids[p] = st.tkids[p] || []).push(+k);
+    });
+  }
+  function loops(id, p, up) {                                 // p, or what p is inside (`up`), is id itself
+    var seen = {};
+    while (p !== undefined && !seen[p]) {
+      if (p === id) return true;
+      seen[p] = true;
+      p = up[p];
+    }
+    return false;
+  }
+  /* the parts inside others among the ones shown: each in the first of its candidates that is shown (a disk of two
+     servers: in the one shown) {part: the part it is inside}, and the parts inside each */
+  function treeOf(ids) {
+    var up = {}, down = {};
+    Object.keys(st.tcands).map(Number).sort(function (a, b) { return a - b; }).forEach(function (i) {
+      if (!ids[i]) return;
+      var cands = st.tcands[i];
+      for (var k = 0; k < cands.length; k++) {
+        if (ids[cands[k]] && !loops(i, cands[k], up)) { up[i] = cands[k]; break; }
+      }
+    });
+    Object.keys(up).forEach(function (k) { (down[up[k]] = down[up[k]] || []).push(+k); });
+    return { up: up, down: down };
+  }
+  /* The groups of a big open category (its values inside none of it): by what they hold (0.9.6.5: servers by the
+     components that run on them, as the links say) or by what they belong to (is part of, runs on: servers by their
+     application); none when that makes groups of one or two. Each viewer chooses (the category's ⓘ); by default
+     what they hold when most of them hold something, else what they belong to. */
   function groupsOf(c, members, rankOf) {
+    var mode = st.groupBy[c] || "auto";
+    if (mode === "none") return null;
+    var holds = mode === "owner" ? null : byHolds(c, members);
+    var owner = mode === "holds" ? null : byOwner(c, members, rankOf);
+    if (mode === "holds") return holds;
+    if (mode === "owner") return owner;
+    return holds && (!owner || holds.covered * 2 >= members.length) ? holds : owner || holds;
+  }
+  function byOwner(c, members, rankOf) {
     var count = {};
     members.forEach(function (v) {
       var seen = {};
@@ -499,7 +687,46 @@
       var ra = rankOf[a] !== undefined ? rankOf[a] % 10000 : 1e9, rb = rankOf[b] !== undefined ? rankOf[b] % 10000 : 1e9;
       return ra - rb || st.byId[a].value.localeCompare(st.byId[b].value);
     });
-    return { cat: best, by: by, keys: keys };
+    return { kind: "owner", cat: best, by: by, keys: keys, covered: count[best] };
+  }
+  function byHolds(c, members) {
+    var count = {}, held = {};
+    members.forEach(function (v) {
+      var hs = (st.holds[v.id] || []).filter(function (h) { return st.byId[h] && st.byId[h].facet !== c; }), seen = {};
+      held[v.id] = hs;
+      hs.forEach(function (h) {
+        var hc = st.byId[h].facet;
+        if (!seen[hc]) { seen[hc] = true; count[hc] = (count[hc] || 0) + 1; }
+      });
+    });
+    var best = null;                                          // the category most of them hold parts of
+    Object.keys(count).forEach(function (k) { if (count[k] * 2 >= members.length && (!best || count[k] > count[best])) best = k; });
+    if (!best) return null;
+    var mine = function (v) { return held[v.id].filter(function (h) { return st.byId[h].facet === best; }); };
+    var split = function (keyOf) {
+      var by = {}, keys = [];
+      members.forEach(function (v) { var k = keyOf(v); if (!by[k]) { by[k] = []; keys.push(k); } by[k].push(v); });
+      return { by: by, keys: keys };
+    };
+    // one group per set of parts held (grafana + prometheus); nearly one set per server: by the part held most often
+    var got = split(function (v) {
+      var names = mine(v).map(function (h) { return st.byId[h].value; }).sort();
+      return names.length ? names.join(" + ") : "none";
+    });
+    if (got.keys.length * 2 > members.length) {
+      var freq = {};
+      members.forEach(function (v) { mine(v).forEach(function (h) { freq[h] = (freq[h] || 0) + 1; }); });
+      got = split(function (v) {
+        var hs = mine(v).sort(function (a, b) { return freq[b] - freq[a] || st.byId[a].value.localeCompare(st.byId[b].value); });
+        return hs.length ? st.byId[hs[0]].value : "none";
+      });
+      if (got.keys.length * 2 > members.length) return null;
+    }
+    got.keys.sort(function (a, b) {
+      if (a === "none" || b === "none") return a === "none" ? 1 : -1;
+      return got.by[b].length - got.by[a].length || a.localeCompare(b);
+    });
+    return { kind: "holds", cat: best, by: got.by, keys: got.keys, covered: count[best] };
   }
   function bary(v, rankOf) {
     var ps = (v.parents || []).filter(function (p) { return rankOf[p] !== undefined; });
@@ -539,7 +766,14 @@
     var vp = svg("g", { class: "map-viewport" });
     root.appendChild(vp);
     var gFrames = svg("g", {}), gHeads = svg("g", {}), gEdges = svg("g", {}), gLinks = svg("g", {}), gNodes = svg("g", {});
-    [gFrames, gEdges, gLinks, gNodes, gHeads].forEach(function (g) { vp.appendChild(g); });
+    var gTree = svg("g", { class: "map-tree-lines" });
+    [gFrames, gEdges, gTree, gLinks, gNodes, gHeads].forEach(function (g) { vp.appendChild(g); });
+    (L.guides || []).forEach(function (t) {                  // a part's line down to each part inside it
+      var lastY = t.kids[t.kids.length - 1].y + Math.min(t.kids[t.kids.length - 1].h, 34) / 2;
+      var d = "M" + t.x + "," + t.y1 + " L" + t.x + "," + lastY;
+      t.kids.forEach(function (k) { var my = k.y + Math.min(k.h, 34) / 2; d += " M" + t.x + "," + my + " L" + k.x + "," + my; });
+      gTree.appendChild(svg("path", { d: d, fill: "none", stroke: C.axis, "stroke-width": "1.2" }));
+    });
     L.frames.forEach(function (f) {                           // a group of categories: a frame around their columns
       var g = svg("g", { class: "map-group", "data-group": String(f.index) });
       g.appendChild(svg("rect", { x: f.x, y: f.y, width: f.w, height: f.h, rx: 12, fill: C.bg, stroke: C.axis,
@@ -556,6 +790,8 @@
       if (!ids[x.a] || !ids[x.b]) return;
       var a = real(L.nodes, x.a), b = real(L.nodes, x.b);
       if (!a || !b || a === b) return;
+      if (L.up[x.a] === x.b && a.id === x.a && b.id === x.b && a.depth && !x.both &&
+          (x.kind === "part_of" || x.kind === "runs_on" || RUNS_ON.test(x.label || ""))) return;   // drawn inside it
       var key = a.id + ">" + b.id, isNew = !!(st.fresh && st.fresh.pairs["L" + x.id]);
       if (drawn[key]) { drawn[key].links.push(x); drawn[key].fresh = drawn[key].fresh || isNew; return; }
       drawn[key] = { a: a, b: b, links: [x], fresh: isNew };
@@ -606,7 +842,7 @@
     if (h.n) g.appendChild(svg("path", { d: h.folded ? "M2,13 L8,18 L2,23 z" : "M0,15 L10,15 L5,21 z", fill: C.ink2, class: "map-chevron" }));
     var t = svg("text", { x: h.n ? 16 : 0, y: 24, fill: C.ink2, "font-family": C.font, "font-size": "13", "font-weight": "600",
                           "letter-spacing": ".04em" });
-    t.textContent = label.toUpperCase() + "  ·  " + S.num(h.n);
+    t.textContent = label.toUpperCase() + "  ·  " + S.num(h.n) + (h.inner ? "  ·  " + S.num(h.inner) + " INSIDE" : "");
     g.appendChild(t);
     if (h.about) {                                            // what the category is, in a line under its name
       measure.font = "11px " + C.font;
@@ -696,7 +932,7 @@
     return g;
   }
   function nodeView(n, C) {
-    var catIdx = st.data.categories.map(function (k) { return k.name; }).indexOf(n.fold || n.cat || (n.v && n.v.facet));
+    var catIdx = st.data.categories.map(function (k) { return k.name; }).indexOf(n.fold || (n.v && n.v.facet) || n.cat);
     var color = C.series[(catIdx < 0 ? 0 : catIdx) % 8];
     var box = !!(n.fold || n.group || n.more);                // a box of several parts: opened by a click
     var isNew = !!st.fresh && (box ? (n.members || []).some(function (i) { return st.fresh.ids[i]; }) : !!st.fresh.ids[n.id]);
@@ -735,9 +971,11 @@
         f.textContent = "from " + (n.hintFrom.length > 34 ? n.hintFrom.slice(0, 33) + "…" : n.hintFrom);
         g.appendChild(f); y += LINE;
       }
-      var it = svg("text", { x: 14, y: n.h - 10, fill: n.v.gone ? C.warn : C.muted, "font-family": C.font, "font-size": "11.5" });
+      var it = svg("text", { x: 14, y: n.h - 10 - (n.tree ? LINE + 2 : 0), fill: n.v.gone ? C.warn : C.muted,
+                             "font-family": C.font, "font-size": "11.5" });
       it.textContent = n.items;
       g.appendChild(it);
+      if (n.tree) g.appendChild(treeToggle(n, C));
     }
     g.addEventListener("click", function (ev) {
       ev.stopPropagation();
@@ -749,8 +987,31 @@
       select(n.id);
     });
     g.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); g.dispatchEvent(new MouseEvent("click")); } });
-    if (st.edit && !box) dragBox(g, n);
+    if (st.edit && !box && !n.depth) dragBox(g, n);
     return g;
+  }
+  /* (0.9.6.5) the line at the bottom of a box with parts inside it: a click opens them under it or closes them
+     (kept in the browser) */
+  function treeToggle(n, C) {
+    var t = svg("g", { class: "map-tree", tabindex: "0", role: "button", "aria-expanded": String(!!n.tree.open),
+                       "aria-label": (n.tree.open ? "Close " : "Open ") + n.tree.label + " inside " + n.v.value });
+    t.appendChild(svg("rect", { x: 8, y: n.h - LINE - 8, width: n.w - 16, height: LINE + 4, rx: 4, fill: C.bg,
+                                "pointer-events": "all" }));
+    var x = svg("text", { x: 14, y: n.h - 10, fill: C.accent, "font-family": C.font, "font-size": "11.5", "font-weight": "600" });
+    x.textContent = (n.tree.open ? "\u25be " : "\u25b8 ") + n.tree.label;
+    t.appendChild(x);
+    t.appendChild(svg("title", {}, [document.createTextNode(n.tree.open ? "Close: the parts inside it" : "Open: the parts inside it")]));
+    var toggle = function (ev) {
+      ev.stopPropagation();
+      ev.preventDefault();
+      if (n.tree.open) { delete st.tree[n.id]; delete st.autoOpen[n.id]; } else st.tree[n.id] = true;
+      keep(TREE_KEY, st.tree);
+      draw();
+    };
+    t.addEventListener("pointerdown", function (ev) { ev.stopPropagation(); });
+    t.addEventListener("click", toggle);
+    t.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") toggle(ev); });
+    return t;
   }
   function legend(C) {
     var box = $("map-legend");
@@ -775,8 +1036,10 @@
     if (st.edit && st.data.is_admin) box.appendChild(el("button", { type: "button", class: "chip", id: "map-groups",
       title: "Put categories in a group drawn around them (display only: nothing changes for the agent)",
       text: st.groups.length ? "Groups (" + st.groups.length + ")…" : "Group categories…", onclick: groupsPanel }));
-    if (st.parts.length) box.appendChild(el("button", { type: "button", class: "chip", id: "map-all-parts",
-      text: "Show every part", title: "The map no longer narrowed to the parts chosen",
+    if (st.parts.length) box.appendChild(el("button", { type: "button", class: "chip on", id: "map-all-parts",
+      text: "Filtered on " + st.parts.filter(function (i) { return st.byId[i]; }).slice(0, 3).map(function (i) { return st.byId[i].value; })
+        .join(", ") + (st.parts.length > 3 ? "…" : "") + " \u00d7", title: "Only these parts, what they are in, what is inside them " +
+        "and what they are linked to: a click shows every part again",
       onclick: function () { st.parts = []; syncPick(); draw(); fit(true); } }));
     if (st.data.proposed) box.appendChild(el("button", { type: "button", class: "chip",
       title: "The map draws the approved values: a proposed one comes once approved",
@@ -814,6 +1077,36 @@
       (c.fields ? " · its values are read from the fields " + c.fields : " · its values are added by hand or proposed by the LLM") }));
     var g = groupOf(c.name);
     if (g) box.appendChild(el("div", { class: "muted", text: "Drawn in the group “" + g.name + "”." }));
+    // (0.9.6.5) the category it is drawn inside, the ones drawn inside it, the parts inside its values opened or closed
+    if (st.inside[c.name]) box.appendChild(el("div", { class: "muted", text: "Drawn inside the " +
+      catLabel(st.inside[c.name], 1).toLowerCase() + " each value is part of or runs on (Categories → Edit: Inside)." }));
+    var within = Object.keys(st.inside).filter(function (k) { return st.inside[k] === c.name; });
+    if (within.length) box.appendChild(el("div", { class: "muted", text: "Inside its values: " +
+      within.map(function (k) { return catLabel(k, 2).toLowerCase(); }).join(", ") + "." }));
+    var col = colOf(c.name), nested = st.data.values.filter(function (v) {
+      return colOf(v.facet) === col && st.tkids[v.id] && st.tkids[v.id].length; });
+    if (nested.length) box.appendChild(el("div", { class: "actions" }, [
+      el("button", { type: "button", class: "btn small", text: "Open every part inside", onclick: function () {
+        nested.forEach(function (v) { st.tree[v.id] = true; });
+        keep(TREE_KEY, st.tree); draw(); } }),
+      el("button", { type: "button", class: "btn small", text: "Close them", onclick: function () {
+        nested.forEach(function (v) { delete st.tree[v.id]; });
+        keep(TREE_KEY, st.tree); draw(); } })]));
+    if (colOf(c.name) === c.name && c.count > GROUP_AT) {     // a big one: its groups as this viewer chooses
+      var mode = st.groupBy[c.name] || "auto";
+      var pick = el("select", { "aria-label": "Its parts grouped by" }, [
+        el("option", { value: "auto", text: "automatic: what they hold, else what they belong to" }),
+        el("option", { value: "holds", text: "what they hold (what runs on them)" }),
+        el("option", { value: "owner", text: "what they belong to" }),
+        el("option", { value: "none", text: "no groups (pages of " + PAGE + ")" })]);
+      pick.value = mode;
+      pick.addEventListener("change", function () {
+        if (pick.value === "auto") delete st.groupBy[c.name]; else st.groupBy[c.name] = pick.value;
+        keep(GROUPBY_KEY, st.groupBy);
+        draw();
+      });
+      box.appendChild(el("label", { class: "map-groupby" }, [el("span", { class: "muted", text: "Its parts grouped by " }), pick]));
+    }
     if (st.data.is_admin) {
       var ta = el("textarea", { rows: "3", maxlength: "300", "aria-label": "What this category is",
                                 placeholder: "What this category is, in a sentence (a pool: a group of servers that share the same queue of slots)" });
@@ -911,6 +1204,9 @@
       x.classList.toggle("dim", !touches);
       if (touches) { near[x.dataset.a] = true; near[x.dataset.b] = true; }
     });
+    var up = st.layout.up || {};                              // (0.9.6.5) the part it is in, the parts inside it
+    if (up[id] !== undefined) near[up[id]] = true;
+    Object.keys(up).forEach(function (k) { if (up[k] === +id) near[k] = true; });
     st.svg.querySelectorAll(".map-node").forEach(function (x) { x.classList.toggle("dim", !near[x.dataset.id]); });
     var g = st.svg.querySelector('.map-node[data-id="' + id + '"]');
     if (g) g.classList.add("on");
@@ -952,7 +1248,8 @@
     box.appendChild(el("div", { class: "map-rel" }, [el("strong", { text: "Links" }),
       S.linksBox({ id: v.id, value: v.value }, { onchange: function () { load(true); } })]));
     box.appendChild(el("div", { class: "actions" }, [
-      el("button", { type: "button", class: "btn small", text: "What touches it", onclick: function () { focusOn(v.id); } }),
+      el("button", { type: "button", class: "btn small", text: "Filter the map on it",
+                     title: "Only this part, what it is in, what is inside it and what it is linked to", onclick: function () { focusOn(v.id); } }),
       el("a", { class: "btn small", href: "#search", text: "Its knowledge", onclick: function (ev) {
         ev.preventDefault(); D.show("search"); $("k-q").value = v.value; $("k-form").requestSubmit(); } })]));
     if (admin) {

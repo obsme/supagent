@@ -265,6 +265,12 @@ SPECS: list[Spec] = [
     Spec("categories.qualified", {}, "json", "Categories whose values are named after the part they belong to: "
          "category -> the category of that part, e.g. {\"disk\": \"server\"}: a disk /dev/sda1 seen with server srv-1 "
          "is the value \"srv-1 /dev/sda1\", part of srv-1 (every server has its own sda1)"),
+    Spec("categories.inside", {}, "json", "Categories drawn inside another on the System map (0.9.6.5): category -> "
+         "the category its values are inside, e.g. {\"disk\": \"server\", \"partition\": \"disk\"}: a server's "
+         "disks are drawn inside the server they are part of (or run on), opened and closed with a click, as many "
+         "levels down as the categories go. A category of categories.qualified is inside the category it is named "
+         "after unless this says otherwise (\"\": not inside). Display only: the agent reads what each value is part "
+         "of, not this"),
     Spec("categories.label_links", True, "bool", "Link at once the values a metric's series carry together (a "
          "server with its component, a tenant with its servers: 0.9.6); off: proposed in To review like an index's"),
     Spec("categories.data_link_days", 21, "int", "A link read from the data that the data has not shown for this many "

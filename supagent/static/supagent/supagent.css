@@ -755,11 +755,17 @@ button.map-cat.off i { opacity: .35; }
 .map-state .linkish { margin-left: 8px; font-weight: 600; }
 .map-state.warn { color: var(--warn); }
 .map-canvas[aria-busy="true"] svg { opacity: .6; transition: opacity .2s; }
-.map-node.map-new rect:first-child { stroke: var(--accent); stroke-width: 2.6; }
+.map-node.map-new > rect:first-child { stroke: var(--accent); stroke-width: 2.6; }
 .map-edge.map-edge-new { stroke: var(--accent); stroke-width: 2.6; }
 @keyframes map-pulse { 50% { opacity: .3; } }
 @media (prefers-reduced-motion: reduce) { .map-state.busy::before { animation: none; } }
-.map-node:focus rect:first-child, .map-node.on rect:first-child { stroke: var(--accent); stroke-width: 2.2; }
+.map-node:focus > rect:first-child, .map-node.on > rect:first-child { stroke: var(--accent); stroke-width: 2.2; }
+/* (0.9.6.5) the line that opens the parts inside a box */
+.map-tree { cursor: pointer; outline: none; }
+.map-tree:hover text, .map-tree:focus text { text-decoration: underline; }
+.map-tree:focus rect { stroke: var(--accent); stroke-width: 1.4; }
+.map-groupby { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; }
+.map-groupby select { max-width: 100%; }
 .map-node.dim, .map-edge.dim, .map-link.dim { opacity: .22; }
 .map-link { cursor: pointer; }
 .map-link:focus { outline: none; }

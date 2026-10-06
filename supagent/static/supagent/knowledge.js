@@ -1228,19 +1228,21 @@
       filt.value = was;
       var list = $("cat-own-list");
       list.innerHTML = "";
-      cats.forEach(function (c) { list.appendChild(categoryRow(c)); });
+      cats.forEach(function (c) { list.appendChild(categoryRow(c, cats)); });
     });
   }
-  /* a category in the list: what it holds, where its values are read; an admin changes its name (their own ones)
-     and its field names, or removes it (their own ones) with everything that names its values, asked first */
-  function categoryRow(c) {
+  /* a category in the list: what it holds, where its values are read, the category it is drawn inside on the
+     System map (0.9.6.5); an admin changes its name (their own ones), its field names and the category it is
+     inside, or removes it (their own ones) with everything that names its values, asked first */
+  function categoryRow(c, cats) {
     var li = el("li", {});
     var n = c.values || 0;
     var show = function () {
       li.innerHTML = "";
       li.appendChild(el("strong", { text: FACET_NAMES[c.name] }));
       li.appendChild(el("span", { class: "muted", text: (c.builtin ? " (built in)" : " (yours)") + " · " + S.num(n) + " value" + (n === 1 ? "" : "s") +
-        (c.fields ? " · values read from the fields " + c.fields : " · no field read") }));
+        (c.fields ? " · values read from the fields " + c.fields : " · no field read") +
+        (c.inside ? " · drawn inside its " + (FACET_NAMES[c.inside] || c.inside).toLowerCase() + " on the System map" : "") }));
       // what the category is: for people, and given to the agent and the router with the parts a question names
       li.appendChild(c.about ? el("div", { class: "cat-about", text: c.about }) :
         admin ? el("div", { class: "cat-about muted", text: "No description yet: Edit to say what it is (the agent and the router read it)." }) : null);
@@ -1276,14 +1278,23 @@
       var what = el("input", { type: "text", maxlength: "300", "aria-label": "What this category is", class: "cat-own-about",
                                placeholder: "What it is, in a sentence (the agent and the router read it)" });
       what.value = c.about || "";
+      // the System map draws its values inside the value of that category they are part of or run on
+      var within = el("select", { "aria-label": "Drawn inside (System map)", class: "cat-own-inside",
+                                  title: "On the System map, its values drawn inside the value of that category they are part of or run on (a server's disks inside it)" },
+        [el("option", { value: "", text: "In a column of its own" })].concat((cats || []).filter(function (x) { return x.name !== c.name; })
+          .map(function (x) { return el("option", { value: x.name, text: "Inside: " + FACET_NAMES[x.name] }); })));
+      within.value = c.inside || "";
       var msg = el("span", { class: "result", role: "status" });
-      li.appendChild(el("span", { class: "filters cat-own-edit" }, [name, rx, what,
+      li.appendChild(el("span", { class: "filters cat-own-edit" }, [name, rx, what, within,
         el("button", { type: "button", class: "btn small primary", text: "Save", onclick: function () {
           var body = { name: c.name, fields: rx.value, about: what.value };
+          if (within.value !== (c.inside || "")) body.inside = within.value;
           if (!c.builtin && name.value.trim().toLowerCase() !== c.name) body.rename = name.value;
           S.admin("POST", "facets/categories", body).then(function (r) {
             if (r.error) { result(msg, r, ""); return; }
-            result($("cat-own-result"), r, "saved" + (body.rename ? ": its values follow" : rx.value !== (c.fields || "") ? ": the next learning reads its values" : ""));
+            result($("cat-own-result"), r, "saved" + (body.rename ? ": its values follow" : rx.value !== (c.fields || "") ? ": the next learning reads its values" :
+              "inside" in body ? (body.inside ? ": the System map draws its values inside their " + (FACET_NAMES[body.inside] || body.inside).toLowerCase() :
+              ": the System map gives it a column of its own") : ""));
             saved(); loadCategories(); facetsLoad();
           });
         } }),

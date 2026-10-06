@@ -2574,6 +2574,13 @@ class AdminView(BaseView):
             elif "fields" in body:
                 fields.pop(name, None)
             settings.set_value("categories.fields", fields, by=g.user.username)
+            if "inside" in body:                      # the category it is drawn inside on the System map
+                from supagent.knowledge.facets import set_inside
+
+                try:
+                    set_inside(name, str(body.get("inside") or ""), g.user.username)
+                except ValueError as ex:
+                    return _json({"error": str(ex), "categories": categories_info()}, 400)
         return _json({"categories": categories_info()})
 
     @expose("/api/facets/map", methods=("GET",))
