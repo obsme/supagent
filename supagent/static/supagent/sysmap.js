@@ -26,7 +26,7 @@
   var st = { data: null, edit: false, open: {}, sel: null, from: null, view: { x: 0, y: 0, k: 1 },
              boxes: {}, saveTimer: null, fitted: false, seq: 0, sig: "", fresh: null, freshTimer: null, autoAt: 0, note: "", freshAt: -1, freshCats: [], inputAt: Date.now(),
              cols: {}, groups: [], cats: readCats(), parts: [], full: false, pick: null,
-             owners: {}, openGroups: {}, more: {} };
+             owners: {}, openGroups: {}, more: {}, busy: false, tookMs: 0 };
   var CATS_KEY = "supagent.map.categories";      // the categories this viewer chose (this browser only)
   var GROUP_PAD = 12, GROUP_HEAD = 22, PICK_PARTS = 80;
   function readCats() {
@@ -165,12 +165,15 @@
   }
   function load(quiet) {
     quiet = quiet === true;
-    var seq = ++st.seq;
+    var seq = ++st.seq, t0 = Date.now();
     if (!quiet) {
       setState(st.data ? "Updating…" : "Loading the map…", "busy");
       $("map-canvas").setAttribute("aria-busy", "true");
     }
+    st.busy = true;
+    var done = function () { st.busy = false; st.tookMs = Date.now() - t0; };
     return S.dict("GET", "map").then(function (d) {
+      done();
       if (seq !== st.seq) return;                             // a later reading answers
       $("map-canvas").removeAttribute("aria-busy");
       if (d.error) {
@@ -220,7 +223,7 @@
         if (nodes.length && !nodes.some(onScreen)) { st.freshAt = 0; inView(nodes[0]); }
       }
       say(what);
-    });
+    }, function (e) { done(); throw e; });
   }
   function editing() {                                        // an admin moves boxes, draws an interaction or types
     var a = document.activeElement;
@@ -230,8 +233,9 @@
     if (!st.data || !D.isActive("map") || document.visibilityState !== "visible" || editing()) return;
     if (Date.now() - st.inputAt > IDLE_MS) return;            // nobody there: no request keeps the session alive
     // admins change the categories and see it at once; for the others (their map costs the server what each of
-    // its items costs to check) once a minute is enough
-    if (Date.now() - st.autoAt < (st.data.is_admin ? 3000 : OTHERS_MS - 2000)) return;
+    // its items costs to check) once a minute is enough; a map the server is slow to give: less often (ten times
+    // its time), and never a second reading while one runs
+    if (st.busy || Date.now() - st.autoAt < Math.max(st.data.is_admin ? 3000 : OTHERS_MS - 2000, 10 * st.tookMs)) return;
     st.autoAt = Date.now();
     load(true);
   }

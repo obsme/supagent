@@ -1,5 +1,28 @@
 # Changes
 
+## 0.9.6.4 — 6 October 2026
+
+The System map answers in under a second on a big platform (it could take about 20 seconds).
+
+Not measured again: the agent's answering code is 0.9.6's (see 0.9.6). Checked before this release: the unit tests (1004 passed), the map's data and the page timed on a synthetic map before and after the change (below), the sentences found compared with 0.9.6.3's on random texts.
+
+* **The sentences that explain the parts are read in the background.** For each part with no description, the map
+  shows the sentence of a document, a guide or a Context page that says what it is. Its request read every text to
+  find them: up to 8 s each time, again in each Superset process, again whenever a text changed, and the parts after
+  the first 2,000 waited for a later reading. A job now reads them once for every process (kept in Superset's
+  database), when the texts change or when parts are new; the map shows them at its next reading (the first time, a
+  few seconds later).
+* **What exists now is read once per document**: the map counted each part's items by reading the name of every
+  piece of the search (hundreds of thousands with a repository's code); now one row per document, kept 30 s.
+* **The page asks again less often when the server is slow**, never while a reading runs.
+* An error while reading the admins' list of what investigations still lack no longer breaks the map.
+
+Measured on a synthetic map (4,240 parts, 4,800 links, 50,000 pieces of documents): the map's data in 0.65 s the
+first time and 0.26 s after (9.9 s before), the page drawn in 1 s (9.5 s before); with 300,000 pieces, 0.27 s, and
+21 s for the reading in the background. The sentences found are the ones 0.9.6.3 found (tested on random texts).
+
+Upgrade from 0.9.6.3: the wheel on every host, restart; nothing to run (tables v17).
+
 ## 0.9.6.3 — 6 October 2026
 
 Two more kinds of secret masked in what the documents give, before anything is kept.

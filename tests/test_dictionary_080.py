@@ -331,7 +331,7 @@ def test_a_parts_explanation_comes_from_the_sentence_about_it(ctx):
             Chunk(ref="context:902#0", kind="context", title="Apps", text="Ticketing is the helpdesk's tool [E2, E3].")]
     db.session.add_all(rows)
     db.session.commit()
-    sysmap._HINTS.update(state=None, at=0.0, names={}, partial=False)
+    sysmap.forget_hints()
     try:
         values = {1: SimpleNamespace(value="Payment gateway", description=None),
                   2: SimpleNamespace(value="Ticketing", description=None),

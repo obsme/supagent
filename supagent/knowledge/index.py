@@ -507,6 +507,9 @@ def _write(existing: dict[str, Chunk], wanted: Iterator[dict[str, Any]], dry_run
         except Exception as ex:  # pylint: disable=broad-except
             log.warning("supagent: qdrant delete: %s", ex)
     if out["added"] or out["changed"] or out["removed"]:
+        from supagent.knowledge.facets import forget_live
+
+        forget_live()                                # this process's map: what exists read again at once
         _store_sync(tuple(sorted({ref.split(":")[0] + ":" for ref in seen} | {c.ref.split(":")[0] + ":"
                                                                                for c in gone})))
     return out

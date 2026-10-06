@@ -1179,6 +1179,55 @@ def facets_of(refs: list[str]) -> dict[str, list[str]]:
 
 REF_KINDS = {"entry": "catalog entries", "memory": "team memories", "doc": "documents", "note": "notes",
              "context": "Context pages", "recipe": "learned answers", "family": "metric families"}
+# 0.9.6.4: what exists now (the items that have pieces in the search, the metric families of the metrics not gone),
+# kept this long by each process: the map is read every few seconds while it is open, and these grow with the
+# documents (a repository's code: hundreds of thousands of pieces) and the metrics
+LIVE_S = 30.0
+_LIVE: dict[str, Any] = {"bases": (0.0, None), "families": (0.0, None)}
+
+
+def forget_live() -> None:
+    """What exists now read again at the next map (the indexing changed the pieces or the metrics)."""
+    _LIVE.update(bases=(0.0, None), families=(0.0, None))
+
+
+def _live_bases() -> set[str]:
+    """The items that have pieces in the search now, by their base ref (doc:4 for doc:4#2, entry:3): the database
+    gives one row per item, not one per piece."""
+    at, got = _LIVE["bases"]
+    if got is not None and time.time() - at < LIVE_S:
+        return got
+    from sqlalchemy import func
+
+    from supagent.models import Chunk
+
+    dialect = db.engine.dialect.name
+    if dialect == "postgresql":
+        base = func.split_part(Chunk.ref, "#", 1)
+    elif dialect in ("mysql", "mariadb"):
+        base = func.substring_index(Chunk.ref, "#", 1)
+    elif dialect == "sqlite":
+        base = func.substr(Chunk.ref, 1, func.instr(Chunk.ref + "#", "#") - 1)
+    else:
+        base = None
+    q = db.session.query(base if base is not None else Chunk.ref).filter(Chunk.ref.notlike("object:%"),
+                                                                       Chunk.ref.notlike("superset:%"))
+    got = {str(r).split("#", 1)[0] for (r,) in (q.distinct() if base is not None else q) if r}
+    _LIVE["bases"] = (time.time(), got)
+    return got
+
+
+def _live_families() -> set[str]:
+    """The metric families of the metrics not gone (family:<source>:<prefix>)."""
+    at, got = _LIVE["families"]
+    if got is not None and time.time() - at < LIVE_S:
+        return got
+    from supagent.models import KObject
+
+    got = {family_of(source_id, name) for source_id, name in db.session.query(KObject.source_id, KObject.name).filter(
+        KObject.kind == "metric", KObject.gone_at.is_(None))}
+    _LIVE["families"] = (time.time(), got)
+    return got
 
 
 def system_map() -> list[dict[str, Any]]:
@@ -1186,7 +1235,7 @@ def system_map() -> list[dict[str, Any]]:
     applications and four components), and the items about it that exist now, by kind (a metric removed, a note
     deleted: no longer counted; a value with none says so). The page draws it as a tree from the values that are
     part of nothing."""
-    from supagent.models import Chunk, Facet, KObject, Tag
+    from supagent.models import Facet, KObject, Tag
 
     values = {f.id: f for f in db.session.query(Facet).filter(Facet.status == "approved", Facet.facet.in_(list(editable())))}
     if not values:
@@ -1201,13 +1250,8 @@ def system_map() -> list[dict[str, Any]]:
     # the columns only: a platform has tens of thousands of metrics, each with its statistics (the page waited on them)
     objs = {o.id: o for o in db.session.query(KObject.id, KObject.kind, KObject.gone_at).filter(
         KObject.id.in_(obj_ids or [-1]))}
-    live_families = set()
-    if any(r.startswith("family:") for r in every):
-        for source_id, name in db.session.query(KObject.source_id, KObject.name).filter(
-                KObject.kind == "metric", KObject.gone_at.is_(None)):
-            live_families.add(family_of(source_id, name))
-    pieces = {r.split("#", 1)[0] for (r,) in db.session.query(Chunk.ref).filter(
-        Chunk.ref.notlike("object:%"), Chunk.ref.notlike("superset:%"))}
+    live_families = _live_families() if any(r.startswith("family:") for r in every) else set()
+    pieces = _live_bases()
 
     def kind_if_live(r: str) -> str | None:
         k, _, rest = r.partition(":")

@@ -19,6 +19,7 @@ TALISMAN_ENABLED = False
 TESTING = True
 SUPAGENT_AGENT_ROUTER = False          # the router's LLM call only in its own tests (scripted LLMs elsewhere)
 SUPAGENT_KNOWLEDGE_APPLY_BACKGROUND = False   # saves apply at once (the background has its own test)
+SUPAGENT_MAP_HINTS_BACKGROUND = False         # the map's sentences read at once (the background has its own test)
 from supagent import init_app as FLASK_APP_MUTATOR
 ''')
 os.environ["SUPERSET_CONFIG_PATH"] = _CONFIG

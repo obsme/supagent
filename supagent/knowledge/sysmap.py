@@ -41,10 +41,22 @@ def generic(kind: str | None) -> bool:
 def described(note: str | None, kind: str | None) -> str:
     """What a link is, in words: its description, else what the learning read it as."""
     return (note or "").strip() or NATURE.get(kind or "", "is linked to")
+log = logging.getLogger(__name__)
 LAYOUT_KEY = "system_map"
 HINT_KINDS = ("doc", "guide", "context")
 HINT_CHARS = 220
-_HINTS: dict[str, Any] = {"state": None, "at": 0.0, "names": {}, "partial": False}   # per name, while the texts stay
+# 0.9.6.4: the sentences that say what each part is are read by a job in the background and kept in the database,
+# one copy for every process (the page read the texts inside its request before: up to 8 s per reading on a big
+# platform, again in each process, again whenever a text changed, and an admin's page asks every few seconds)
+HINTS_KEY = "map_hints"           # what the copy is: {"v", "state", "parts", "at", "took", "names"}
+HINTS_PART = "map_hints:"         # the copy (zlib, base64) in pieces: map_hints:<v>:<i>
+HINTS_LEASE = "map_hints_lease"   # the process reading the texts now, and until when
+PART_CHARS = 60000                # a piece fits a text column of any database (64 KB on MySQL)
+LEASE_S = 120.0                   # renewed while reading: a process that stops frees it in two minutes
+POKE_S = 30.0                     # how often each process asks whether the texts changed (a page open on the map)
+BATCH = 500
+_SNAP: dict[str, Any] = {"v": None, "names": {}, "state": None}       # this process's copy
+_JOB: dict[str, Any] = {"thread": None, "poked": 0.0}
 _LOCK = threading.Lock()
 
 
@@ -90,66 +102,335 @@ def _documents_state() -> str:
     return f"{n}:{last}"
 
 
-def hints(values: dict[int, Any]) -> dict[int, list[tuple[str, str, str]]]:
-    """For the values with no description: the sentences of the documents, guides and Context pages that say what
-    they are {facet id: [(ref, title, sentence)]} (the 3 best each: the part as the sentence's subject, a document
-    before the AI-written Context). Kept per name while those texts do not change: a value approved, renamed or
-    added costs the reading of its own name only (every change used to read all the texts again for every value,
-    seconds on a big platform, while the page still showed the map of before)."""
+WORDISH = re.compile(r"[\w-]+")
+
+
+def _wordish(ch: str) -> bool:
+    return ch.isalnum() or ch in "_-"                    # what \w (Unicode) and - match
+
+
+class _Matcher:
+    r"""The names a text holds, as one case-insensitive expression (?<![\w-])(name|name|...)(?![\w-]) of them all,
+    the longest first, would find them: at each place the longest name that is not inside a longer word, from the
+    left, without overlapping. That expression took seconds per thousand texts for thousands of names; here each
+    text's words are looked up, and only the names starting with one of them are looked for."""
+
+    def __init__(self, names: Any) -> None:
+        self.heads: dict[str, list[str]] = {}            # a name's first word -> the names starting with it
+        self.odd: list[str] = []                         # names that do not start with a letter or a digit
+        for n in sorted({str(x).lower() for x in names if x}, key=len, reverse=True):
+            m = WORDISH.match(n)
+            if m:
+                self.heads.setdefault(m.group(), []).append(n)
+            else:
+                self.odd.append(n)
+        self.names = {n for ns in self.heads.values() for n in ns} | set(self.odd)
+        self.rx = (re.compile(r"(?<![\w-])(" + "|".join(re.escape(n) for n in sorted(self.names, key=len, reverse=True))
+                              + r")(?![\w-])", re.I) if self.names else None)
+
+    def may(self, words: set[str]) -> bool:
+        """Whether a text with these words (WORDISH, in lower case) can hold one of the names."""
+        return bool(self.odd) or not self.heads.keys().isdisjoint(words)
+
+    def find(self, text: str, low: str | None = None, words: set[str] | None = None) -> list[tuple[int, int, str]]:
+        """(start, end, the name in lower case) of each name the text holds (`low`, `words`: its lower case and
+        its words, when known)."""
+        if not self.names:
+            return []
+        low = text.lower() if low is None else low
+        if len(low) != len(text):                        # a letter longer in lower case (İ): the expression itself
+            return [(m.start(), m.end(), m.group(1).lower()) for m in self.rx.finditer(text)]   # type: ignore[union-attr]
+        ends: dict[int, tuple[int, str]] = {}
+        for head in self.heads.keys() & (set(WORDISH.findall(low)) if words is None else words):
+            for n in self.heads[head]:
+                self._places(low, n, ends)
+        for n in self.odd:
+            self._places(low, n, ends)
+        out, last = [], 0
+        for at in sorted(ends):
+            if at >= last:
+                end, n = ends[at]
+                out.append((at, end, n))
+                last = end
+        return out
+
+    @staticmethod
+    def _places(low: str, n: str, ends: dict[int, tuple[int, str]]) -> None:
+        at = low.find(n)
+        while at >= 0:
+            end = at + len(n)
+            if (at == 0 or not _wordish(low[at - 1])) and (end == len(low) or not _wordish(low[end])) and \
+                    end > ends.get(at, (-1, ""))[0]:
+                ends[at] = (end, n)                      # the longest name starting here
+            at = low.find(n, at + 1)
+
+
+def _scan(todo: set[str], every: set[str]) -> tuple[dict[str, list[list[str]]], int]:
+    """The 3 best sentences of the texts about each name of `todo` {name: [[ref, title, sentence]]} (the part as the
+    sentence's subject, a document before the AI-written Context; not a list of parts: `every` name counts), and the
+    number of texts read. Every text is read, page after page, the process's other work going on in between."""
     from supagent.models import Chunk
 
-    wanted = {fid: v.value for fid, v in values.items() if not (v.description or "").strip() and len(v.value) >= 3}
-    if not wanted:
-        return {}
-    state = _documents_state()
-    with _LOCK:
-        if _HINTS["state"] != state or len(_HINTS["names"]) > 20000 or \
-                (_HINTS["partial"] and time.time() - _HINTS["at"] > 600):
-            _HINTS.update(state=state, at=time.time(), names={}, partial=False)
-        known = dict(_HINTS["names"])
-    by_name: dict[str, list[int]] = {}
-    for fid, name in wanted.items():
-        by_name.setdefault(name.lower(), []).append(fid)
-    missing = sorted((n for n in by_name if n not in known), key=len, reverse=True)[:2000]
-    if missing:
-        found: dict[str, list[tuple[float, str, str, str]]] = {n: [] for n in missing}
-        rx = re.compile(r"(?<![\w-])(" + "|".join(re.escape(n) for n in missing) + r")(?![\w-])", re.I)
-        every = re.compile(r"(?<![\w-])(" + "|".join(re.escape(n) for n in sorted(by_name, key=len, reverse=True)[:2000])
-                           + r")(?![\w-])", re.I) if len(by_name) > len(missing) else rx
-        t0, cut = time.time(), False
-        q = db.session.query(Chunk.ref, Chunk.kind, Chunk.title, Chunk.text).filter(Chunk.kind.in_(HINT_KINDS)).yield_per(500)
-        for ref, kind, title, text in q:
-            if time.time() - t0 > 8:                     # the page answers; these names are read again later
-                cut = True
-                break
-            if not rx.search(text or ""):
+    want = _Matcher(todo)
+    named_by = want if set(every) <= want.names else _Matcher(set(every) | want.names)
+    found: dict[str, list[tuple[float, str, str, str]]] = {n: [] for n in want.names}   # the 3 best so far
+    last, read, renewed = 0, 0, time.time()
+    while want.names:
+        page = (db.session.query(Chunk.id, Chunk.ref, Chunk.kind, Chunk.title, Chunk.text)
+                .filter(Chunk.kind.in_(HINT_KINDS), Chunk.id > last).order_by(Chunk.id).limit(BATCH).all())
+        db.session.rollback()                            # no transaction kept open between pages
+        if not page:
+            break
+        last = page[-1][0]
+        read += len(page)
+        for _id, ref, kind, title, text in page:
+            text = text or ""
+            low = text.lower()
+            words = set(WORDISH.findall(low)) if len(low) == len(text) else None
+            if words is not None and not want.may(words):
                 continue
-            for sentence in _sentences(text or ""):
+            if not want.find(text, low, words):
+                continue
+            seen: set[tuple[str, str]] = set()           # a sentence once per name (said twice in the text)
+            for sentence in _sentences(text):
                 sentence = CITES.sub("", sentence).strip()
-                hits = list(rx.finditer(sentence))
+                hits = want.find(sentence)
                 if not hits:
                     continue
-                named = {m.group(1).lower() for m in every.finditer(sentence)}
+                named = {h[2] for h in (hits if named_by is want else named_by.find(sentence))}
                 if len(named) >= 3 or sentence.count(",") >= 5:
                     continue                             # a list of parts: it says what they are, not what one is
                 if len(sentence) < 25 or sentence.strip(" .:").lower() in named:
                     continue                             # a heading, the name alone: no explanation
-                for m in hits:
-                    got = found[m.group(1).lower()]
-                    if any(x[1] == ref and x[3] == sentence for x in got):
-                        continue
+                for at, end, n in hits:
+                    if len(sentence) <= HINT_CHARS:
+                        if (n, sentence) in seen:
+                            continue
+                        seen.add((n, sentence))
                     short = sentence[:HINT_CHARS] + ("…" if len(sentence) > HINT_CHARS else "")
-                    got.append((_score(sentence, m.start(), m.end(), kind or ""), ref, title or ref, short))
+                    _best(found[n], (_score(sentence, at, end, kind or ""), ref, title or ref, short))
+        if time.time() - renewed > LEASE_S / 4:
+            _lease(True)
+            renewed = time.time()
+        time.sleep(0.005)                                # the other requests of this process go on
+    return {n: [[ref, title, sentence] for _sc, ref, title, sentence in got] for n, got in found.items()}, read
+
+
+def _best(kept: list[tuple[float, str, str, str]], item: tuple[float, str, str, str], size: int = 3) -> None:
+    """`item` among the best `size`, by score, the first found first among equals (all of them sorted, the same)."""
+    i = len(kept)
+    while i > 0 and kept[i - 1][0] < item[0]:
+        i -= 1
+    if i < size:
+        kept.insert(i, item)
+        del kept[size:]
+
+
+def _head() -> dict[str, Any] | None:
+    from supagent.models import Meta
+
+    try:
+        row = db.session.get(Meta, HINTS_KEY)
+        head = json.loads(row.value) if row is not None and row.value else None
+    except Exception:  # pylint: disable=broad-except   (tables not made yet, a value not readable)
+        db.session.rollback()
+        return None
+    return head if isinstance(head, dict) and head.get("v") else None
+
+
+def _snapshot() -> dict[str, Any]:
+    """The sentences kept {"names": {name: [[ref, title, sentence]]}, "state": the texts' state they were read
+    from}: read from the database only when another process wrote a newer copy."""
+    import base64
+    import zlib
+
+    from supagent.models import Meta
+
+    head = _head()
+    with _LOCK:
+        mine = dict(_SNAP)
+    if head is None or head["v"] == mine["v"]:
+        return mine if head is not None else {"v": None, "names": {}, "state": None}
+    keys = [f"{HINTS_PART}{head['v']}:{i}" for i in range(int(head.get("parts") or 0))]
+    rows = {r.key: r.value for r in db.session.query(Meta).filter(Meta.key.in_(keys))} if keys else {}
+    if len(rows) != len(keys):
+        return mine                                      # written again meanwhile: the copy of before
+    try:
+        names = json.loads(zlib.decompress(base64.b64decode("".join(rows[k] or "" for k in keys))).decode("utf-8"))
+    except Exception:  # pylint: disable=broad-except
+        log.warning("supagent map: the parts' sentences kept: not readable", exc_info=True)
+        return mine
+    snap = {"v": head["v"], "names": names if isinstance(names, dict) else {}, "state": head.get("state")}
+    with _LOCK:
+        _SNAP.update(snap)
+    return snap
+
+
+def _save(names: dict[str, list[list[str]]], state: str, took: float) -> None:
+    """A new copy of the sentences, for every process; the former pieces removed once it is there."""
+    import base64
+    import uuid
+    import zlib
+
+    from supagent.models import Meta
+
+    blob = base64.b64encode(zlib.compress(json.dumps(names, separators=(",", ":")).encode("utf-8"), 6)).decode("ascii")
+    v = uuid.uuid4().hex[:12]
+    parts = [blob[i:i + PART_CHARS] for i in range(0, len(blob), PART_CHARS)] or [""]
+    for i, piece in enumerate(parts):
+        db.session.add(Meta(key=f"{HINTS_PART}{v}:{i}", value=piece))
+    head = {"v": v, "state": state, "parts": len(parts), "at": round(time.time(), 1), "took": round(took, 2),
+            "names": len(names)}
+    row = db.session.get(Meta, HINTS_KEY)
+    if row is None:
+        db.session.add(Meta(key=HINTS_KEY, value=json.dumps(head)))
+    else:
+        row.value = json.dumps(head)
+    db.session.commit()
+    mine = {f"{HINTS_PART}{v}:{i}" for i in range(len(parts))}
+    stale = [k for (k,) in db.session.query(Meta.key).filter(Meta.key.startswith(HINTS_PART, autoescape=True))
+             if k not in mine]
+    if stale:
+        db.session.query(Meta).filter(Meta.key.in_(stale)).delete(synchronize_session=False)
         db.session.commit()
-        best = {n: [(ref, title, sentence) for _sc, ref, title, sentence in sorted(got, key=lambda x: -x[0])[:3]]
-                for n, got in found.items()}
-        with _LOCK:
-            if _HINTS["state"] == state:
-                _HINTS["names"].update(best)
-                if cut:
-                    _HINTS.update(partial=True, at=time.time())
-        known.update(best)
-    return {fid: known[n] for n, fids in by_name.items() for fid in fids if known.get(n)}
+    with _LOCK:
+        _SNAP.update(v=v, names=names, state=state)
+
+
+def _lease(take: bool) -> bool:
+    """Taken (or renewed) for this process unless another one holds it; given back (take False)."""
+    import os
+    import socket
+
+    from supagent.models import Meta
+
+    me, now = f"{socket.gethostname()}:{os.getpid()}", time.time()
+    try:
+        row = db.session.query(Meta).filter(Meta.key == HINTS_LEASE).with_for_update().first()
+        holder, _, until = (row.value or "").rpartition("|") if row is not None else ("", "", "")
+        try:
+            held = float(until or 0) > now
+        except ValueError:
+            held = False
+        if take:
+            if holder and holder != me and held:
+                db.session.rollback()
+                return False
+            if row is None:
+                db.session.add(Meta(key=HINTS_LEASE, value=f"{me}|{now + LEASE_S:.0f}"))
+            else:
+                row.value = f"{me}|{now + LEASE_S:.0f}"
+        elif row is not None and holder == me:
+            row.value = ""
+        db.session.commit()
+        return True
+    except Exception:  # pylint: disable=broad-except   (another process made the row at the same moment)
+        db.session.rollback()
+        return False
+
+
+def _wanted() -> set[str]:
+    """The names to explain: the approved values of the categories with no description (3 letters at least)."""
+    from supagent.knowledge.facets import editable
+    from supagent.models import Facet
+
+    rows = db.session.query(Facet.value, Facet.description).filter(Facet.status == "approved",
+                                                                  Facet.facet.in_(list(editable())))
+    return {v.lower() for v, d in rows if v and not (d or "").strip() and len(v) >= 3}
+
+
+def refresh_hints(extra: Any = (), pace: bool = False) -> dict[str, Any]:
+    """Read the texts for the sentences that say what each part is, into the copy every process reads: all the
+    names again when the texts changed, else only the names that are new (a value approved, renamed, its
+    description removed); nothing when neither. One process at a time. `pace`: when the texts changed, not
+    before 3 times the last reading's time (a platform whose documents change all the time)."""
+    names = _wanted() | {str(n).lower() for n in extra if n}
+    state = _documents_state()
+    snap = _snapshot()
+    known = snap.get("names") or {}
+    same = snap.get("state") == state
+    todo = {n for n in names if n not in known} if same else names
+    db.session.rollback()
+    if same and not todo:
+        return {"read": 0, "unchanged": True}
+    if pace and not same:
+        head = _head() or {}
+        if time.time() - float(head.get("at") or 0) < max(POKE_S, 3 * float(head.get("took") or 0)):
+            return {"read": 0, "later": True}
+    if not _lease(True):
+        return {"read": 0, "busy": True}
+    try:
+        t0 = time.time()
+        found, read = _scan(todo, names)
+        kept = {n: h for n, h in known.items() if n in names} if same else {}
+        kept.update(found)
+        _save(kept, state, time.time() - t0)
+        return {"read": read, "names": len(todo), "seconds": round(time.time() - t0, 2)}
+    finally:
+        _lease(False)
+
+
+def _job(app: Any) -> None:
+    with app.app_context():
+        try:
+            refresh_hints(pace=True)
+        except Exception:  # pylint: disable=broad-except   (the next look at the map tries again)
+            db.session.rollback()
+            log.warning("supagent map: the parts' sentences: not read", exc_info=True)
+        finally:
+            db.session.remove()
+
+
+def _poke(soon: bool) -> None:
+    """The job started in the background unless it runs or ran a moment ago (`soon`: names not read yet)."""
+    from flask import current_app
+
+    now = time.time()
+    with _LOCK:
+        t = _JOB["thread"]
+        if (t is not None and t.is_alive()) or now - _JOB["poked"] < (5.0 if soon else POKE_S):
+            return
+        _JOB["poked"] = now
+        t = threading.Thread(target=_job, args=(current_app._get_current_object(),),   # type: ignore[attr-defined]
+                             name="supagent-map-hints", daemon=True)
+        _JOB["thread"] = t
+    t.start()
+
+
+def forget_hints() -> None:
+    """The sentences kept removed (they are read again)."""
+    from supagent.models import Meta
+
+    db.session.query(Meta).filter(Meta.key.startswith(HINTS_PART, autoescape=True)).delete(synchronize_session=False)
+    db.session.query(Meta).filter(Meta.key.in_([HINTS_KEY, HINTS_LEASE])).delete(synchronize_session=False)
+    db.session.commit()
+    with _LOCK:
+        _SNAP.update(v=None, names={}, state=None)
+        _JOB["poked"] = 0.0
+
+
+def hints(values: dict[int, Any]) -> dict[int, list[tuple[str, str, str]]]:
+    """For the values with no description: the sentences of the documents, guides and Context pages that say what
+    they are {facet id: [(ref, title, sentence)]} (the 3 best each: the part as the sentence's subject, a document
+    before the AI-written Context). Read from the copy kept in the database; the texts are never read here (the job
+    in the background reads them when they change or when names are new, and the page shows them at its next
+    reading). SUPAGENT_MAP_HINTS_BACKGROUND = False: read here, at once (the tests)."""
+    from flask import current_app
+
+    by_name: dict[str, list[int]] = {}
+    for fid, v in values.items():
+        if not (v.description or "").strip() and len(v.value) >= 3:
+            by_name.setdefault(v.value.lower(), []).append(fid)
+    if not by_name:
+        return {}
+    if not current_app.config.get("SUPAGENT_MAP_HINTS_BACKGROUND", True):
+        refresh_hints(by_name)
+        known = _snapshot()["names"]
+    else:
+        known = _snapshot()["names"]
+        _poke(soon=any(n not in known for n in by_name))
+    return {fid: [tuple(h) for h in known[n]] for n, fids in by_name.items() for fid in fids  # type: ignore[misc]
+            if known.get(n)}
 
 
 def _visible_refs(refs: set[str]) -> set[str]:
