@@ -743,6 +743,8 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
 BITBUCKET_DC = re.compile(r"^(?P<ctx>.*?)/(?:projects/(?P<project>[^/]+)|users/(?P<user>[^/]+))/repos/(?P<repo>[^/]+)"
                           r"(?:/(?:browse|raw)(?:/(?P<path>.*?))?)?/?$")
 BITBUCKET_CLOUD = re.compile(r"^/(?P<ws>[^/]+)/(?P<repo>[^/]+)(?:/src(?:/(?P<ref>[^/]+)(?:/(?P<path>.*?))?)?)?/?$")
+# a repository's clone address (Data Center: https://host[/context]/scm/KEY/repo.git, ~user for a personal one)
+BITBUCKET_SCM = re.compile(r"^(?P<ctx>.*?)/scm/(?P<key>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$")
 
 
 def bitbucket_target(url: str) -> dict[str, Any] | None:
@@ -751,23 +753,32 @@ def bitbucket_target(url: str) -> dict[str, Any] | None:
     u = urlparse(url or "")
     if u.scheme not in ("http", "https") or not u.netloc:
         return None
-    netloc = u.netloc.lower()
+    netloc = u.netloc.rsplit("@", 1)[-1].lower()      # (a clone address may carry a user: user@host)
     q = lambda s: quote(str(s), safe="")  # noqa: E731
     if netloc in CLOUD_APIS:
         m = BITBUCKET_CLOUD.match(u.path or "")
         if m is None:
             return None
         ws, repo = unquote(m.group("ws")), unquote(m.group("repo"))
+        if repo.endswith(".git") and not m.group("ref"):
+            repo = repo[:-len(".git")]                  # its clone address: the repository
         return {"cloud": True, "api": f"{CLOUD_APIS[netloc]}/repositories/{q(ws)}/{q(repo)}/src",
                 "ref": unquote(m.group("ref") or ""), "path": unquote((m.group("path") or "").strip("/")),
-                "web": f"{u.scheme}://{u.netloc}/{q(ws)}/{q(repo)}", "name": f"{ws}/{repo}"}
+                "web": f"{u.scheme}://{netloc}/{q(ws)}/{q(repo)}", "name": f"{ws}/{repo}"}
     m = BITBUCKET_DC.match(u.path or "")
     if m is None:
-        return None
+        s = BITBUCKET_SCM.match(u.path or "")         # its clone address: the repository, its default branch
+        if s is None:
+            return None
+        key, repo = unquote(s.group("key")), unquote(s.group("repo"))
+        base = f"{u.scheme}://{netloc}{s.group('ctx').rstrip('/')}"
+        owner = f"users/{q(key[1:])}" if key.startswith("~") else f"projects/{q(key)}"
+        return {"cloud": False, "api": f"{base}/rest/api/1.0/projects/{q(key)}/repos/{q(repo)}", "at": "",
+                "path": "", "web": f"{base}/{owner}/repos/{q(repo)}", "name": f"{key}/{repo}"}
     user = unquote(m.group("user") or "")
     project = unquote(m.group("project") or "") or f"~{user}"
     repo = unquote(m.group("repo"))
-    base = f"{u.scheme}://{u.netloc}{m.group('ctx').rstrip('/')}"
+    base = f"{u.scheme}://{netloc}{m.group('ctx').rstrip('/')}"
     owner = f"projects/{q(project)}" if m.group("project") else f"users/{q(user)}"
     return {"cloud": False, "api": f"{base}/rest/api/1.0/projects/{q(project)}/repos/{q(repo)}",
             "at": (parse_qs(u.query).get("at") or [""])[0], "path": unquote((m.group("path") or "").strip("/")),
@@ -1019,7 +1030,7 @@ def _read_bitbucket(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
     t = bitbucket_target(doc.url or "")
     if t is None:
         raise DocError(f"{_where(doc.url or '')}: not the address of a Bitbucket repository (…/projects/KEY/repos/"
-                       "REPO/browse/folder, or bitbucket.org/WORKSPACE/REPO/src/BRANCH/folder)")
+                       "REPO/browse/folder, …/scm/KEY/REPO.git, or bitbucket.org/WORKSPACE/REPO/src/BRANCH/folder)")
     want, limit, files = _max_pages(doc), _limit(), files_of(doc)
     where = f" in {t['path']}" if t["path"] else ""
     title = f"{t['name']}{(' ' + t['path']) if t['path'] else ''}"
@@ -1071,7 +1082,7 @@ def _read_bitbucket(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
         found = [_one_file(t)]                          # the address of one file: that file
     else:
         lister: Callable[..., list[dict[str, Any]]] = _bitbucket_cloud_files if t["cloud"] else _bitbucket_dc_files
-        found = lister(t, sign, _Calls(80))             # listing and reading: each its own number of requests
+        found = lister(t, sign, _Calls(80 + want))      # listing and reading: each its own number of requests
     chosen = sorted((f for f in found if wanted_file(f["path"], files) or one), key=lambda f: doc_rank(f["path"]))
     if not chosen:
         kinds = "text or code" if files == "code" else "text (Markdown, text, HTML, YAML, JSON, CSV, SQL...)"

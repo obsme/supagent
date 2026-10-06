@@ -222,3 +222,25 @@ def test_a_repository_whose_server_says_no_commit_is_read_in_full(env, servers):
     asked = len(s.got)
     assert D.refresh(d)["status"] == "ok"
     assert any(r["path"].endswith("/files") for r in s.got[asked:])  # read in full again, as before 0.9.6.1
+
+
+@pytest.mark.parametrize("url,api,web,name", [
+    ("https://git.example.com/scm/OPS/runbooks.git", "https://git.example.com/rest/api/1.0/projects/OPS/repos/runbooks",
+     "https://git.example.com/projects/OPS/repos/runbooks", "OPS/runbooks"),
+    ("https://alice@git.example.com/bitbucket/scm/~alice/notes.git",
+     "https://git.example.com/bitbucket/rest/api/1.0/projects/~alice/repos/notes",
+     "https://git.example.com/bitbucket/users/alice/repos/notes", "~alice/notes"),
+    ("https://git.example.com/scm/OPS/runbooks", "https://git.example.com/rest/api/1.0/projects/OPS/repos/runbooks",
+     "https://git.example.com/projects/OPS/repos/runbooks", "OPS/runbooks"),
+    ("https://bob@bitbucket.org/acme/runbooks.git", "https://api.bitbucket.org/2.0/repositories/acme/runbooks/src",
+     "https://bitbucket.org/acme/runbooks", "acme/runbooks"),
+    ("https://bitbucket.org/acme/runbooks.git", "https://api.bitbucket.org/2.0/repositories/acme/runbooks/src",
+     "https://bitbucket.org/acme/runbooks", "acme/runbooks"),
+])
+def test_a_repositorys_clone_address_is_read_as_the_repository(app, url, api, web, name):
+    from supagent.knowledge.docs import bitbucket_target, detect_reader, origin
+
+    t = bitbucket_target(url)
+    assert detect_reader(url) == "bitbucket" and t is not None
+    assert (t["api"], t["web"], t["name"], t["path"]) == (api, web, name, "")
+    assert origin(url) == origin(web)                                 # the sign-in goes to that site

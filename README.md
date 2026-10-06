@@ -138,6 +138,11 @@ what a group's members may query stays what their roles give. The role **AI Agen
 it was (`grant --role agent`). `superset init` never gives these pages to Gamma or Alpha. What a user can query
 through the agent stays what Superset lets that user query.
 
+## Upgrade from 0.9.6.1 to 0.9.6.2
+
+`pip install` the new wheel on every host, restart. Nothing to run (tables v17). A Bitbucket repository's clone
+address is read as the repository. INSTALL.txt, *From 0.9.6.1 to 0.9.6.2*.
+
 ## Upgrade from 0.9.6 to 0.9.6.1
 
 `pip install` the new wheel on every host, restart. Nothing to run (tables v17). Fixes of the Context (pages complete,
@@ -1694,14 +1699,16 @@ searchable by everyone who can open the Data dictionary: use a token that only r
 * **Confluence** (Data Center / Server: `/display/SPACE/...`, `/pages/viewpage.action?pageId=`, `/spaces/SPACE/...`;
   Cloud: `/wiki/spaces/...`): the page and the pages under it, breadth first, or a whole space, through the REST
   API (the page's storage format, code macros and tables kept), up to the number of pages asked.
-* **Bitbucket** (Data Center: `/projects/P/repos/R/browse/...`; Cloud: `bitbucket.org/ws/repo/src/...`): the text
+* **Bitbucket** (Data Center: `/projects/P/repos/R/browse/...`, or its clone address `/scm/P/R.git` (0.9.6.2); Cloud:
+  `bitbucket.org/ws/repo/src/...` or `bitbucket.org/ws/repo.git`): the text
   files of a folder (Markdown, txt, rst, adoc, HTML, YAML, JSON, CSV, config, XML, SQL), README and docs first, each
   at most `docs.max_kb`, through the REST API. **All the code** (0.9.6.1, *A repository: read*): the source code too
   (Python, Java, Kotlin, Scala, Groovy, JavaScript, TypeScript, Go, Rust, C, C++, C#, Ruby, PHP, shell, PowerShell,
   Terraform, SQL, Dockerfile, Makefile, Jenkinsfile, build files...), 5,000 files at most a document, never the
   files that hold keys (`.env`, `*.pem`, `*.key`, `id_rsa`, `secrets.yaml`...) nor the vendored and built ones
-  (`node_modules`, `vendor`, `dist`, `build`, `*.min.js`, lock files); a password, token or key given a value in a
-  file, a URL's password, a private key and cloud or git tokens are masked (`***`) before anything is kept. **Read
+  (`node_modules`, `vendor`, `dist`, `build`, `*.min.js`, lock files). In every file a repository gives (its
+  documentation too), a password, token or key given a value, a URL's password, a private key and cloud or git
+  tokens are masked (`***`) before anything is kept. **Read
   again only as far as it changed** (0.9.6.1): the branch's last commit is kept with each file; the same commit,
   nothing is read; another one, only the files changed between the two commits (a deleted file removed), and the
   search makes again the pieces of those files only.

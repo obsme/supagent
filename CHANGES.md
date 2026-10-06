@@ -1,5 +1,23 @@
 # Changes
 
+## 0.9.6.2 — 6 October 2026
+
+The team's request of 6 October: a Bitbucket repository must connect easily.
+
+Not measured again: the agent's answering code is 0.9.6's (see 0.9.6). Checked before this release: the unit tests (994 passed), the addresses of the five forms (Data Center, a personal repository with a context path and a user, without .git, Cloud with and without a user) read as their repository and signed in to the same site.
+
+* **A repository's clone address** is read as the repository, its default branch: Data Center
+  `https://host/scm/KEY/repo.git` (a personal one `~user`), Cloud `https://bitbucket.org/ws/repo.git`, with or
+  without a `user@` in it.
+* **A big repository's folders are all listed**: the listing grows with the files asked (Cloud lists one folder a
+  request).
+* Corrections of 0.9.6.1's notes: the secrets written in a file are masked in every file a repository gives (its
+  documentation and text files too, not only with "all its code"); and its check at a new commit asked for the three
+  files that had changed: two were read and the third, deleted, was removed (not "three changed files read").
+
+Upgrade from 0.9.6.1 (or 0.9.6): the wheel on every host, restart; nothing to run (tables v17). INSTALL.txt, *From
+0.9.6.1 to 0.9.6.2*.
+
 ## 0.9.6.1 — 6 October 2026
 
 The team's reports of 6 October on 0.9.6: Context pages that stopped in the middle of a sentence and did not go on,
