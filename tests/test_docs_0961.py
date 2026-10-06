@@ -244,3 +244,19 @@ def test_a_repositorys_clone_address_is_read_as_the_repository(app, url, api, we
     assert detect_reader(url) == "bitbucket" and t is not None
     assert (t["api"], t["web"], t["name"], t["path"]) == (api, web, name, "")
     assert origin(url) == origin(web)                                 # the sign-in goes to that site
+
+
+def test_a_dsn_without_a_scheme_and_a_named_key_are_masked(ctx):
+    """(0.9.6.3) Go's MySQL DSN (user:password@tcp(host:port)/db) and a key held by a name that says so (SIGNING_KEY,
+    apiKey) given a literal; an e-mail address, an ssh address and a call are not secrets."""
+    from supagent.knowledge.docs import mask_secrets
+
+    cases = {'sql.Open("mysql", "app:S3cretPw9@tcp(db-1:3306)/orders")': 'sql.Open("mysql", "app:***@tcp(db-1:3306)/orders")',
+             'dsn = "u:pw12345@db-1:5432/x"': 'dsn = "u:***@db-1:5432/x"',
+             'const SIGNING_KEY = "abcdefgh12345678";': "const SIGNING_KEY = ***;",
+             'apiKey: "zzzzzzzzzzzz"': "apiKey: ***"}
+    for text, masked in cases.items():
+        assert mask_secrets(text)[0] == masked, text
+    for kept in ("email me at someone@example.com", "mailto:ops@example.com", "ssh git@host:repo.git",
+                 "cache_key = make_key(x)", 'primary_key = "id"'):
+        assert mask_secrets(kept)[0] == kept

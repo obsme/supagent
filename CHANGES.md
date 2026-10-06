@@ -1,5 +1,22 @@
 # Changes
 
+## 0.9.6.3 — 6 October 2026
+
+Two more kinds of secret masked in what the documents give, before anything is kept.
+
+Not measured again: the agent's answering code is 0.9.6's (see 0.9.6). Checked before this release: the unit tests (995 passed), the two test corpora of the documents' reading (no planted secret in the stored text nor in the search's pieces).
+
+* **A DSN without a URL scheme**: `user:password@tcp(host:port)/db` (Go's MySQL driver), `user:password@host:port/db`.
+* **A key held by a name that says so** (`SIGNING_KEY`, `apiKey`, `RATES_KEY`...) given a literal value.
+* An e-mail address, an ssh address, a call (`make_key(x)`) are not taken for secrets.
+* A document read before keeps its text until it is read again: read the repositories again (Documents and sites →
+  Read again).
+
+Found by a corpus written to test the reading of repositories (a lab's, kept out of the code): two of its four planted
+secrets stayed in the stored text with 0.9.6.2; none with 0.9.6.3.
+
+Upgrade from 0.9.6.2: the wheel on every host, restart; nothing to run (tables v17).
+
 ## 0.9.6.2 — 6 October 2026
 
 The team's request of 6 October: a Bitbucket repository must connect easily.

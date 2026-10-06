@@ -104,6 +104,12 @@ SECRETS = [
                 r"private[_-]?key|client[_-]?secret|credentials?)[\w.-]*[\"']?\s*(?:=>|:=|[:=])\s*)"
                 r"(\"[^\"\n$]{4,}\"|'[^'\n$]{4,}'|[A-Za-z0-9+/=_\-]{8,}(?![\w(.\[]))"), r"\1***"),
     (re.compile(r"\b([a-z][a-z0-9+.-]*://[^\s:/@]+):([^\s@/]+)@"), r"\1:***@"),
+    # a DSN without a scheme (Go's MySQL driver, ODBC): user:password@tcp(host:port)/db, user:password@host:port/db
+    (re.compile(r"(?<![\w/:.-])([A-Za-z_][\w.-]{0,63}):([^\s@/:\"'`(){}]{3,})@(?=tcp\(|unix\(|\(|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*"
+                r"(?::\d+)?[/?])"), r"\1:***@"),
+    # a key held by a name that says so (RATES_KEY, apiKey, signingKey...) and given a literal value
+    (re.compile(r"(?i)(\b[\w.-]*(?:_key|key)\b[\"']?\s*(?:=>|:=|[:=])\s*)(\"[^\"\n$]{8,}\"|'[^'\n$]{8,}'|"
+                r"`[^`\n$]{8,}`)"), r"\1***"),
     (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{16,}"), r"\1 ***"),
     (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|"
                 r"xox[baprs]-[A-Za-z0-9-]{10,})\b"), "***"),

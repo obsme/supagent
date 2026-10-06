@@ -138,6 +138,12 @@ what a group's members may query stays what their roles give. The role **AI Agen
 it was (`grant --role agent`). `superset init` never gives these pages to Gamma or Alpha. What a user can query
 through the agent stays what Superset lets that user query.
 
+## Upgrade from 0.9.6.2 to 0.9.6.3
+
+`pip install` the new wheel on every host, restart. Nothing to run (tables v17). Two more kinds of secret masked in the
+documents (a DSN without a URL scheme, a key named as such); read the repositories again. INSTALL.txt, *From 0.9.6.2
+to 0.9.6.3*.
+
 ## Upgrade from 0.9.6.1 to 0.9.6.2
 
 `pip install` the new wheel on every host, restart. Nothing to run (tables v17). A Bitbucket repository's clone
