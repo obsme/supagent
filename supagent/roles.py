@@ -39,24 +39,36 @@ class RolesError(Exception):
 
 
 def simple() -> bool:
-    """roles.simple: the roles are Admin, Editor and Viewer."""
-    from supagent import settings
+    """roles.simple: the roles are Admin, Editor and Viewer. Read on a connection of its own: it is asked during
+    Superset's role sync, whose changes the session holds (a first `superset init`, before supagent's tables exist,
+    must not lose them to a rollback)."""
+    import sqlalchemy as sa
 
     try:
-        return bool(settings.get(SETTING))
-    except Exception:  # pylint: disable=broad-except   (no settings table yet: `superset db upgrade` before init)
-        db.session.rollback()
+        with db.engine.connect() as conn:
+            value = conn.execute(sa.text("SELECT value FROM supagent_setting WHERE key = :k"), {"k": SETTING}).scalar()
+    except Exception:  # pylint: disable=broad-except   (no settings table yet: off)
         return False
+    if isinstance(value, str):
+        import json
+
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return False
+    return bool(value)
 
 
 def _viewer_data_all() -> bool:
-    from supagent import settings
+    import sqlalchemy as sa
 
     try:
-        return str(settings.get("roles.viewer_data") or "none") == "all"
-    except Exception:  # pylint: disable=broad-except
-        db.session.rollback()
+        with db.engine.connect() as conn:
+            value = conn.execute(sa.text("SELECT value FROM supagent_setting WHERE key = :k"),
+                                 {"k": "roles.viewer_data"}).scalar()
+    except Exception:  # pylint: disable=broad-except   (no settings table yet)
         return False
+    return "all" in str(value or "")
 
 
 def install(sm: Any) -> None:

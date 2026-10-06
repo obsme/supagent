@@ -97,7 +97,7 @@ def run(context: bool, categories: bool, links: bool, everything: bool = False, 
     from supagent.knowledge.backup import run_backup
     from supagent.knowledge.facets import forget_live
     from supagent.knowledge.freshness import touch
-    from supagent.models import Chunk, Classified, Facet
+    from supagent.models import Classified, Facet
 
     if not (context or categories or links):
         raise ResetError("say what to wipe: --context, --categories, --links")
@@ -121,11 +121,13 @@ def run(context: bool, categories: bool, links: bool, everything: bool = False, 
         if everything:
             settings.set_value("categories.about", None, by=by or "reset")
     for p in s["pages"]:
-        db.session.query(Chunk).filter(or_(Chunk.ref == f"context:{p.id}",
-                                           Chunk.ref.like(f"context:{p.id}#%"))).delete(synchronize_session=False)
         db.session.delete(p)
     touch()
     db.session.commit()
+    if s["pages"]:                                        # their pieces out of the search, its store and vectors too
+        from supagent.knowledge.index import sync
+
+        out["search pieces"] = sync(("context:",)).get("removed", 0)
     forget_live()
     if categories:
         sysmap.forget_hints()

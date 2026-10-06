@@ -1,5 +1,24 @@
 # Changes
 
+## 0.9.6.8 — 6 October 2026
+
+Two corrections of 0.9.6.6 and 0.9.6.7.
+
+Not measured again: the agent's answering code is 0.9.6's (see 0.9.6). Checked before this release: the unit tests (1010 passed) and both commands on a PostgreSQL copy of a lab's database (below).
+
+* `reset-knowledge` takes the Context pages it wipes out of the knowledge store and the vectors too (0.9.6.7 left them
+  there until the store's next sync: the search could still give them).
+* The three-roles setting is read without touching what Superset's role sync is doing: a first `superset init`, before
+  supagent's tables exist, could lose the sync's work with 0.9.6.6 and 0.9.6.7 (`superset supagent init` after it
+  repaired it).
+
+Both commands were run on a PostgreSQL copy of a lab's Superset database: `roles --apply` (Admin, Editor and Viewer;
+`superset init` made no Alpha nor Gamma again; Editor deletes nothing), `--undo` (every user's roles as before);
+`reset-knowledge --yes` (a backup, the learning's values, links and Context pages wiped, a person's values kept),
+`restore` (every count as before).
+
+Upgrade from 0.9.6.7: the wheel on every host, restart; nothing to run (tables v17).
+
 ## 0.9.6.7 — 6 October 2026
 
 A way to wipe what the learning made and make it again: the Context, the categories' values with their descriptions,

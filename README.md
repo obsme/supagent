@@ -145,6 +145,12 @@ then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with t
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
 
+## Upgrade from 0.9.6.7 to 0.9.6.8
+
+`pip install` the new wheel on every host, restart. Nothing to run (tables v17). reset-knowledge takes the wiped
+Context pages out of the knowledge store too; the three-roles setting no longer touches Superset's role sync.
+INSTALL.txt, *From 0.9.6.7 to 0.9.6.8*.
+
 ## Upgrade from 0.9.6.6 to 0.9.6.7
 
 `pip install` the new wheel on every host, restart. Nothing to run (tables v17). New: `superset supagent
