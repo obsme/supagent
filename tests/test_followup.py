@@ -649,3 +649,59 @@ def test_the_one_said_and_all_of_them_counted(world):  # noqa: F811
     assert a._which_one("How many tickets did the PAYMENTS_CARE team open?", total) is None    # named
     assert a._which_one("How many tickets did the teams open?", total) is None                # all of them
     assert "{noun}" in WHICH_NUDGE and "{values}" in WHICH_NUDGE
+
+
+def test_a_follow_up_reading_days_outside_the_chats_period_is_sent_back_once(monkeypatch):
+    """(0.9.7) After "...this morning", a follow-up whose queries read from three days before (another day's events
+    taken for this morning's): sent back once to keep the chat's period. Not when a query reads the period, when the
+    question asks for a comparison or what is usual, nor with the setting off."""
+    import datetime as dt
+
+    from supagent import agent as A, settings
+    from supagent.knowledge.period import period_window, window_reading
+
+    today = dt.date(2030, 1, 17)
+    window = period_window("How many requests failed this morning?", today)
+    assert window == (dt.datetime(2030, 1, 17), dt.datetime(2030, 1, 18))
+    assert period_window("And on 14 January?", today) == (dt.datetime(2030, 1, 14), dt.datetime(2030, 1, 15))
+    assert period_window("over the last hours", today) is None
+    wide = 'SELECT COUNT(*) FROM "calls" WHERE "ts" >= \'2030-01-14 00:00\' AND "failed" = true'
+    near = 'SELECT COUNT(*) FROM "calls" WHERE "ts" >= \'2030-01-17 00:00\' AND "ts" < \'2030-01-17 11:00\''
+    eve = 'SELECT COUNT(*) FROM "calls" WHERE "ts" >= \'2030-01-16 20:00\''           # the evening before: in
+    other = 'SELECT COUNT(*) FROM "calls" WHERE "ts" >= \'2030-01-16 09:00\' AND "ts" < \'2030-01-16 11:00\''
+    assert (window_reading(wide, window), window_reading(near, window), window_reading(eve, window)) == \
+        ("wider", "in", "in")
+    assert window_reading(other, window) is None                       # the day before, close by: not judged
+    real = settings.get
+    conf = {"agent.period_window_check": True}
+    monkeypatch.setattr(settings, "get", lambda k: conf[k] if k in conf else real(k))
+    monkeypatch.setattr(A, "now", lambda: dt.datetime(2030, 1, 17, 11, 0))
+    a = A.Agent.__new__(A.Agent)
+    a.chat_period = "How many requests failed this morning?"
+    done = lambda sql: {"tool": "execute_sql", "status": "done", "args": {"request": {"sql": sql}}}
+    assert a._period_widened("What do those requests share?", [done(wide)]) == "2030-01-14 00:00"
+    assert a._period_widened("What do those requests share?", [done(wide), done(near)]) is None   # in hand
+    assert a._period_widened("What do those requests share?", [done(wide), done(other)]) == "2030-01-14 00:00"
+    assert a._period_widened("Is that more than usual?", [done(wide)]) is None                    # a comparison
+    conf["agent.period_window_check"] = False
+    assert a._period_widened("What do those requests share?", [done(wide)]) is None
+    assert "{first}" in A.PERIOD_WIDENED_NUDGE and "{asked}" in A.PERIOD_WIDENED_NUDGE
+
+
+def test_a_follow_up_that_reads_wider_on_purpose_is_left_alone(monkeypatch):
+    """Its own recent past, a state, a summary: reading the days before the chat's period is what it asks."""
+    import datetime as dt
+
+    from supagent import agent as A, settings
+
+    real = settings.get
+    monkeypatch.setattr(settings, "get", lambda k: True if k == "agent.period_window_check" else real(k))
+    monkeypatch.setattr(A, "now", lambda: dt.datetime(2030, 1, 17, 11, 0))
+    a = A.Agent.__new__(A.Agent)
+    a.chat_period = "How many requests failed this morning?"
+    wide = [{"tool": "execute_sql", "status": "done", "args": {"request": {
+        "sql": 'SELECT COUNT(*) FROM "changes" WHERE "ts" >= \'2030-01-10 00:00\''}}}]
+    for q in ("Did anything change on that router recently?", "Is the queue overloaded?",
+              "Give me a two-line summary for the ticket."):
+        assert a._period_widened(q, wide) is None, q
+    assert a._period_widened("Which hosts did those requests run on?", wide) == "2030-01-10 00:00"

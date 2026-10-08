@@ -113,3 +113,37 @@ def test_a_share_of_rows_that_something_happened_to_is_counted_within_them():
     assert unlinked_share(q, [orders]) is None
     assert unlinked_share("What share of all the orders of that day is that?", [orders, refunds]) is None
     assert unlinked_share("Quelle part du chiffre d'affaires a été remboursée ?", [orders, refunds])
+
+
+def test_a_share_over_an_inner_join_keeps_only_the_rows_with_a_part():
+    """(0.9.7) The part and the whole joined, but by an INNER join: the whole is then only the rows that have a
+    part (the cancellations over the subscriptions that were cancelled: 100 %). Sent back once; a LEFT join from
+    the whole, an unqualified column, or a question that is not a share: nothing said."""
+    from supagent.knowledge.definitions import restricted_whole, unlinked_share
+
+    q = "What share of last month's subscriptions were cancelled?"
+    inner = ('SELECT ROUND(100.0 * SUM(c."FEE") / SUM(s."PRICE"), 2) AS pct FROM "cancellations" c JOIN '
+             '"subscriptions" s ON c."SUB_ID" = s."SUB_ID" WHERE s."START" >= \'2030-01-01\'')
+    left = ('SELECT 100.0 * SUM(CASE WHEN c."SUB_ID" IS NOT NULL THEN c."FEE" ELSE 0 END) / SUM(s."PRICE") FROM '
+            '"subscriptions" s LEFT JOIN "cancellations" c ON c."SUB_ID" = s."SUB_ID"')
+    loose = 'SELECT SUM("FEE") / SUM("PRICE") FROM "cancellations" JOIN "subscriptions" USING ("SUB_ID")'
+    assert restricted_whole(inner) == ("subscriptions", "cancellations")
+    said = unlinked_share(q, [inner])
+    assert said and "only the subscriptions rows that have a cancellations row" in said and "LEFT JOIN" in said
+    assert restricted_whole(left) is None and unlinked_share(q, [left]) is None
+    assert restricted_whole(loose) is None                              # which table each sum reads: not known
+    assert unlinked_share("How many subscriptions started last month?", [inner]) is None
+    both = 'SELECT SUM(o."QTY" * o."PRICE") / SUM(o."QTY") FROM "lines" o JOIN "items" i ON o."ITEM" = i."ITEM"'
+    assert restricted_whole(both) is None                               # one table on both sides: no part/whole
+
+
+def test_the_share_join_check_has_its_setting(app, monkeypatch):
+    from supagent import settings
+    from supagent.knowledge.definitions import unlinked_share
+
+    inner = ('SELECT ROUND(100.0 * SUM(c."FEE") / SUM(s."PRICE"), 2) AS pct FROM "cancellations" c JOIN '
+             '"subscriptions" s ON c."SUB_ID" = s."SUB_ID"')
+    real = settings.get
+    monkeypatch.setattr(settings, "get", lambda k: False if k == "agent.share_join_check" else real(k))
+    with app.app_context():
+        assert unlinked_share("What share of last month's subscriptions were cancelled?", [inner]) is None

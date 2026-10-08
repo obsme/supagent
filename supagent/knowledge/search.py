@@ -169,13 +169,36 @@ def page_of(ref: str, text: str | None) -> str:
     return f"{base} {m.group(1)}" if m else base
 
 
+UNCAPPED = {"glossary", "rule", "formula", "definition"}   # each section a term or a rule of its own: never capped
+
+
+def _terms_uncapped() -> bool:
+    try:
+        from supagent import settings
+
+        return bool(settings.get("search.terms_uncapped"))
+    except Exception:  # pylint: disable=broad-except   (no app: as the default)
+        return True
+
+
 def capped(found: list[dict[str, Any]], k: int, per: int = PER_PAGE) -> list[dict[str, Any]]:
-    """The first k pieces, at most `per` of one page."""
+    """The first k pieces, at most `per` of one page; the terms of a glossary and the rules of an entry are each a
+    piece of their own (0.9.8: the cap of a page let two terms of a team's glossary through, the definition that
+    said which orders are sold among those left out)."""
     out: list[dict[str, Any]] = []
     seen: dict[str, int] = {}
+    copies: set[tuple[str, str]] = set()
     for f in found:
-        key = page_of(f.get("ref") or "", f.get("text"))
-        if seen.get(key, 0) >= per:
+        ref = f.get("ref") or ""
+        key = page_of(ref, f.get("text"))
+        m = SOURCE_LINE.match(f.get("text") or "") if ref.startswith("doc:") and "#" in ref else None
+        if m:                         # (0.10.0) a page several documents read (a wiki's spaces linking to each other):
+            same = (m.group(1), ref.split("#", 1)[1].rsplit("-", 1)[-1])     # its section once, its page capped once
+            if same in copies:
+                continue
+            copies.add(same)
+            key = f"page {m.group(1)}"
+        if seen.get(key, 0) >= per and not (str(f.get("kind") or "") in UNCAPPED and _terms_uncapped()):
             continue
         seen[key] = seen.get(key, 0) + 1
         out.append(f)
@@ -222,6 +245,9 @@ def search(query: str, k: int | None = None, kinds: tuple[str, ...] | None = Non
     places lower (default: the Context, CONTEXT_PLACES); `skip`: kinds left out; `rerank`: the reranker orders the
     first ones again (rerank.url; the router, which must be quick, does without)."""
     from supagent.knowledge import rerank as R
+    from supagent.knowledge.index import refresh_map
+
+    refresh_map()                                       # (0.10) the System map's pieces in step with its last change
 
     k = int(k or settings.get("search.top_k"))
     if not (rerank and R.enabled()):
@@ -309,9 +335,13 @@ def knowledge_block(question: str, shown: set[str] | None = None, with_charts: b
         lower = {"context": CONTEXT_PLACES, **{kind: OBJECT_PLACES for kind in OBJECT_KINDS + SUPERSET_KINDS}}
         for kind, places in (prefer or {}).items():         # the router's kind of question: its knowledge first
             lower[kind] = lower.get(kind, 0) + places
-        found = search(question, k=top_k + len(shown),     # data objects, charts: "Where the data is" and the
-                       lower=lower,                          # tools give them; the room is for the team's words
-                       skip=() if with_charts else SUPERSET_KINDS)    # charts: for questions about them
+        from supagent.knowledge.judge import judged
+
+        found, verdict = judged(question, lambda q: search(  # weak (a word no piece holds, the judge's low score):
+            q, k=top_k + len(shown),                          # written again once by the LLM (search.rewrite)
+            lower=lower,                                      # data objects, charts: "Where the data is" and the
+            skip=() if with_charts else SUPERSET_KINDS),      # tools give them; the room is for the team's words
+            top_k + len(shown))                               # (charts: for questions about them)
     except Exception as ex:  # pylint: disable=broad-except
         log.warning("supagent search: %s", ex)
         db.session.rollback()
@@ -360,6 +390,10 @@ def knowledge_block(question: str, shown: set[str] | None = None, with_charts: b
     if read:
         lines[0] += (f"\n(Words of the question no piece of the knowledge holds were searched as the knowledge spells "
                      f"them: {said(read)}.)")
+    # (the words no piece holds are said by the search tool, not here: this block's room is for the pieces, and what it
+    # says counts as said by the knowledge when a query's conditions are checked)
+    if verdict.get("searched_also"):
+        lines[0] += "\n(The question was also searched as the AI wrote it again: a word of it matched nothing.)"
     for f in found:
         text = " ".join(excerpt(f["text"] or "", question, 450).split())
         about = [t.split(": ", 1)[1] for t in cats.get(f["ref"], []) if not t.startswith("aspect")][:3]

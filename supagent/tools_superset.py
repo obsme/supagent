@@ -269,7 +269,7 @@ class VirtualDatasetRequest(BaseModel):
     sql: str = Field(description="The query as it ran for the finding (a PromQL finding, on a promagg database: "
                                  "SELECT ts, <its labels>, value FROM promql('<the PromQL>') WHERE ts >= "
                                  "TIMESTAMP '<start>' AND ts < TIMESTAMP '<end>')")
-    name: str = Field(description="A short name for the new dataset, e.g. 'CPU busy % srv-amer-002'")
+    name: str = Field(description="A short name for the new dataset, e.g. 'CPU busy % web-01'")
 
 
 def _virtual_out(ds: Any, reused: bool = False) -> dict:

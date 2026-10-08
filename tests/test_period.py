@@ -697,6 +697,12 @@ def test_an_upper_bound_at_the_next_midnight_on_a_field_of_days_is_sent_back(wor
         back = refusal(q, "execute_sql", sql("\"RUN_DATE\" <= '2026-09-21 00:00'"), TODAY)
         assert back and "BETWEEN and <= include" in back
         assert refusal(q, "execute_sql", sql("\"RUN_DATE\" <= '2026-09-20'"), TODAY) is None     # the last day: right
+        alone = lambda w: _sql(f'SELECT COUNT(*) FROM "jobs" WHERE {w}')  # noqa: E731   (0.9.8: no other bound)
+        named = "How many jobs were run from 14 to 20 September?"             # its words name RUN_DATE
+        assert refusal(named, "execute_sql", alone("\"RUN_DATE\" BETWEEN '2026-09-14' AND '2026-09-20'"), TODAY) is None
+        assert refusal(named, "execute_sql", alone("\"RUN_DATE\" >= '2026-09-14' AND \"RUN_DATE\" <= '2026-09-20'"),
+                       TODAY) is None
+        assert refusal(named, "execute_sql", alone("\"RUN_DATE\" BETWEEN '2026-09-15' AND '2026-09-20'"), TODAY)
         assert refusal(q, "execute_sql", sql("\"ts\" <= '2026-09-21 00:00'"), TODAY) is None     # instants (ts)
     finally:
         db.session.delete(days)

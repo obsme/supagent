@@ -16,7 +16,7 @@ from superset.extensions import encrypted_field_factory
 
 from supagent.textsafe import SafeString, SafeText
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 
 def _now() -> dt.datetime:
@@ -624,9 +624,51 @@ class ItemUse(db.Model):  # type: ignore[name-defined]
     created_at = sa.Column(sa.DateTime, default=_now, index=True)
 
 
+class KUnit(db.Model):  # type: ignore[name-defined]
+    """One unit of the team's documents the agent understands (0.10): a page of a wiki or a site, a file of a
+    repository, an uploaded document: the part it belongs to, its outline (functions, classes, routes; headings), the
+    facts it states (KFact) and, later, its summary; analysed again only when its text changes."""
+
+    __tablename__ = "supagent_kunit"
+    __table_args__ = (sa.UniqueConstraint("doc_id", "ukey", name="uq_supagent_kunit"),)
+    id = sa.Column(sa.Integer, primary_key=True)
+    doc_id = sa.Column(sa.Integer, sa.ForeignKey("supagent_doc.id", ondelete="CASCADE"), index=True)
+    ukey = sa.Column(SafeString(512), nullable=False)        # its path in a repository, its page's id, its address
+    kind = sa.Column(SafeString(16))                         # page | file | document
+    title = sa.Column(SafeString(512))
+    url = sa.Column(SafeString(2000))
+    lang = sa.Column(SafeString(32))                         # python, java, yaml, markdown, wiki...
+    owner = sa.Column(SafeString(255))                       # the part it belongs to (a service, a tool), when known
+    chash = sa.Column(SafeString(40))                        # of its text: analysed again when it changes
+    outline = sa.Column(sa.JSON)                             # [{"kind": "function", "name": ..., "line": ...}, ...]
+    summary = sa.Column(SafeText)                            # what it is for (the LLM's, from its text only)
+    summary_hash = sa.Column(SafeString(40))
+    summarized_at = sa.Column(sa.DateTime)
+    analysed_at = sa.Column(sa.DateTime)
+
+
+class KFact(db.Model):  # type: ignore[name-defined]
+    """A fact a unit states (0.10): a part calls, reads from, sends to, runs on another, is another's other name; a
+    part emits a metric, writes an index, logs to it; with the line that says it, where it comes from (code, config,
+    doc, wiki, diagram, inferred, llm) and how sure it is."""
+
+    __tablename__ = "supagent_kfact"
+    id = sa.Column(sa.Integer, primary_key=True)
+    unit_id = sa.Column(sa.Integer, sa.ForeignKey("supagent_kunit.id", ondelete="CASCADE"), index=True)
+    subject = sa.Column(SafeString(255), index=True)
+    verb = sa.Column(SafeString(32))                         # calls | reads_from | sends_to | uses | runs_on | alias |
+    obj = sa.Column(SafeString(512), index=True)             #   emits | writes | logs_to | watched_by | mentions
+    obj_kind = sa.Column(SafeString(16))                     # part | host | index | metric
+    obj_ref = sa.Column(SafeString(128))                     # object:<id> | facet:<id>, when known
+    line = sa.Column(sa.Integer)
+    quote = sa.Column(SafeString(400))
+    source = sa.Column(SafeString(16))
+    confidence = sa.Column(sa.Float)
+
+
 TABLES = [Meta, Setting, Source, KObject, Relation, Run, Change, Conversation, Message, File, Example, Document,
           Entry, EntryVersion, Recipe, QueryStat, Memory, Doc, Chunk, Association, Usage, ContextPage, LLMCall,
-          Route, Facet, Tag, Link, Classified, ItemUse, Note, ChartScan]
+          Route, Facet, Tag, Link, Classified, ItemUse, Note, ChartScan, KUnit, KFact]
 
 
 def _add_missing_columns(engine: sa.engine.Engine) -> list[str]:

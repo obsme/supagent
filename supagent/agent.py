@@ -1290,6 +1290,20 @@ PERIOD_KEPT_NUDGE = ("(Check before answering: this message goes on from the cha
                      "this check.)")
 
 
+# a follow-up that reads wider on purpose: it names its own recent past ("did anything change recently?"), or asks how
+# something is ("is the database overloaded?"), not what happened in the chat's period
+OWN_RECENCY = re.compile(r"\b(?:recent\w*|lately|latest|so far|ever|history|historically|r[ée]cemment|derni[eè]rement)\b",
+                         re.I)
+STATE_ASKED = re.compile(r"^\W*(?:is|are|was|were|est-ce|y a-t-il)\s+(?:the|this|that|these|those|it|they|there|our|any|"
+                         r"le|la|les|ce|il)\b", re.I)
+PERIOD_WIDENED_NUDGE = ("(Check before answering: this message goes on from the chat, which asked about a period this "
+                        "message does not change (\"{asked}\"); the queries of this answer read from {first}, outside it. "
+                        "Keep the chat's period unless the user widens it: run them again with it. If the question is "
+                        "about another period (how things usually are, a comparison), say so in one line and keep your "
+                        "answer. Then write the whole answer for the user as if for the first time: they see neither "
+                        "the one above nor this check.)")
+
+
 def chat_period(question: str, earlier: list[str]) -> str | None:
     """The latest earlier question of the chat that names a period, when this one names none (it goes on with it)."""
     from supagent.knowledge.period import has_period
@@ -1487,6 +1501,25 @@ def without_extrapolation(answer: str, unknown: list[str]) -> tuple[str, list[st
     return trimmed, [u for u in unknown if u not in names or u in left]
 
 
+POINTS_BACK = re.compile(r"(?i)\b(the answer above|answer above|above answer|as (stated|said|shown) above|see above|"
+                         r"previous answer|earlier answer|my answer above|la r[ée]ponse ci-dessus|ci-dessus|"
+                         r"r[ée]ponse pr[ée]c[ée]dente)\b")
+
+
+def restore_earlier(answer: str, messages: list[dict], since: int) -> str:
+    """A last message that only points back to an answer written earlier in the turn (beside a tool call, before a
+    nudge): that earlier answer kept in front of it, else the person sees "the answer above" with nothing above."""
+    if len(answer) > 600 or not POINTS_BACK.search(answer):
+        return answer
+    for m in reversed(messages[since:-1]):
+        if m.get("role") != "assistant":
+            continue
+        text = re.sub(r"<think>.*?</think>", "", str(m.get("content") or ""), flags=re.S).strip()
+        if len(text) >= max(200, 2 * len(answer)):
+            return text + "\n\n" + answer
+    return answer
+
+
 def missing_count(question: str, answer: str) -> bool:
     """The question asks how many / how much and the answer has no number but shares (and no "none")."""
     if not HOW_MANY.search(question or "") or asks_back(answer) or NONE_SAID.search(answer or ""):
@@ -1561,6 +1594,48 @@ def shortened(messages: list[dict], chars: int, keep: int) -> int:
     return n
 
 
+SHOWN_SQL_NUDGE = ("(Check before answering: your answer shows a query as the one behind its figures, and no call ran "
+                   "it: the queries run were different. Call execute_sql with the query you show and answer from its "
+                   "result, or show the queries that were run. Then write the whole answer for the user as if for the "
+                   "first time: they see neither the one above nor this check, so never mention it, apologise or say "
+                   "what changed.)")
+SQL_BLOCK = re.compile(r"```(?:sql)?[ \t]*\n\s*((?:WITH|SELECT)\b.*?)```", re.I | re.S)
+TEMPLATE = re.compile(r"<[a-z][\w ]{0,30}>|\{\w+\}|:\w+\b|\?\s*(?:,|\)|$)", re.I)    # a template, not a run
+
+
+def _setting_on(key: str) -> bool:
+    """A check's setting, on when it cannot be read (no app: a check called outside a request)."""
+    try:
+        return bool(settings.get(key))
+    except Exception:  # pylint: disable=broad-except
+        return True
+
+
+def shown_not_run(answer: str, trace: list[dict]) -> bool:
+    """The answer shows a query (not a template) that no call of this answer ran: its figures then came from other
+    queries (0.9.8: a joined query shown as "the SQL query run", the figures of two separate ones)."""
+    import difflib
+
+    def norm(sql: str) -> str:
+        return re.sub(r"\s+", " ", re.sub(r"--[^\n]*", " ", sql or "")).strip().rstrip(";").lower()
+
+    ran = []
+    for t in trace:
+        if (t.get("called") or t.get("tool")) not in QUERY_TOOLS or t.get("status") != "done":
+            continue
+        req = (t.get("args") or {}).get("request") or t.get("args") or {}
+        if isinstance(req, dict) and req.get("sql"):
+            ran.append(norm(str(req["sql"])))
+    if not ran:
+        return False
+    for block in SQL_BLOCK.findall(answer or ""):
+        if TEMPLATE.search(block):
+            continue
+        if max(difflib.SequenceMatcher(None, norm(block), x).ratio() for x in ran) < 0.9:
+            return True
+    return False
+
+
 def unsupported_answer(answer: str, trace: list[dict], question: str = "") -> str | None:
     """A reminder when an answer was written without the tools: no tool called at all, or
     results shown (a JSON block, "SQL run", a table of numbers) with no query run, or a query written
@@ -1574,6 +1649,9 @@ def unsupported_answer(answer: str, trace: list[dict], question: str = "") -> st
     if WRITTEN_SQL.search(answer or "") and not done & set(QUERY_TOOLS) and \
             (_has_data(answer) or CLAIMED_RESULT.search(answer or "") or (question and not WANTS_QUERY.search(question))):
         return WRITTEN_SQL_NUDGE                       # the query in the text, its figures made up, or no figure at all
+    if WRITTEN_SQL.search(answer or "") and done & set(QUERY_TOOLS) and not (question and WANTS_QUERY.search(question)) \
+            and shown_not_run(answer, trace) and _setting_on("agent.shown_sql_check"):
+        return SHOWN_SQL_NUDGE                         # a query shown as run that no call ran
     if not trace:
         return NO_TOOL_NUDGE
     if RESULT_CLAIM.search(answer or "") and not done & set(QUERY_TOOLS):
@@ -1628,6 +1706,8 @@ def echoes(answer: str, previous: str) -> bool:
 
 UNSUPPORTED_NOTE = ("\n\n(Check: no query ran in this answer: numbers or rows shown here do not come from the "
                     "data. Ask again to have them read from the data.)")
+SHOWN_SQL_NOTE = ("\n\n(Check: the query shown here was not run in this answer: its figures come from other queries. "
+                  "Ask again to have it run.)")
 
 
 def unsupported_note(answer: str, trace: list[dict], question: str = "") -> str:
@@ -1636,6 +1716,8 @@ def unsupported_note(answer: str, trace: list[dict], question: str = "") -> str:
     if nudge in (NO_QUERY_NUDGE, WRITTEN_SQL_NUDGE) or (nudge == NO_TOOL_NUDGE and (RESULT_CLAIM.search(answer or "") or len(
             TABLE_WITH_NUMBERS.findall(answer or "")) >= 2)):
         return UNSUPPORTED_NOTE
+    if nudge == SHOWN_SQL_NUDGE:
+        return SHOWN_SQL_NOTE
     return ""
 
 
@@ -2166,11 +2248,12 @@ class Agent:
             log.warning("supagent: the team's words: not given", exc_info=True)
         self.people_words = text                        # the memory, the rules, the glossary: what people said
         try:                                            # the parts the question names, and for an investigation
-            from supagent.knowledge.brief import brief_block   # what they depend on and where they are in the data
+            from supagent.knowledge.brief import brief_block, connection_question   # what they depend on, where
 
-            # (the whole picture for an investigation and a question of how the system works; for any other
-            # question only what it names: a follow-up on a server's load needs no map of the platform)
-            text += brief_block(question, full=self._investigating(question) or bool(self._route_intents() & {"system"}))
+            # (the whole picture for an investigation, a question of how the system works or of how parts are
+            # connected; for any other question only what it names: a follow-up on a server's load needs no map)
+            text += brief_block(question, full=self._investigating(question) or bool(self._route_intents() & {"system"})
+                                or connection_question(question))   # (and a question of how parts are connected)
         except Exception:  # pylint: disable=broad-except
             log.warning("supagent: the system around the question: not given", exc_info=True)
         try:
@@ -2689,7 +2772,7 @@ class Agent:
                     #                                    names or times the previous answer does not hold)
                 if nudge:                              # once: an answer from the tools, not from the summary
                     nudged = True
-                    if (nudge == WRITTEN_SQL_NUDGE or (nudge in (NO_TOOL_NUDGE, NO_QUERY_NUDGE) and
+                    if (nudge in (WRITTEN_SQL_NUDGE, SHOWN_SQL_NUDGE) or (nudge in (NO_TOOL_NUDGE, NO_QUERY_NUDGE) and
                                                          (self.asks_new or getattr(self, "new_fields", None)))) \
                             and not forced and settings.get("agent.force_tool"):
                         forced = force_tool = True     # a query written, not run, or a follow-up that asks for
@@ -2809,6 +2892,14 @@ class Agent:
                     messages.append({"role": "user", "content": PERIOD_KEPT_NUDGE.format(
                         tables=", ".join(lost[:3]), asked=self.chat_period[:200])})
                     continue
+                widened = None if period_kept or asks_back(answer) else self._period_widened(question, trace)
+                if widened:                            # once: a follow-up reading days outside the chat's period
+                    period_kept = True
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (the chat's period widened: from %s)", widened)
+                    messages.append({"role": "user", "content": PERIOD_WIDENED_NUDGE.format(
+                        first=widened, asked=self.chat_period[:200])})
+                    continue
                 if not buckets_asked and not asks_back(answer) and figure_from_buckets(question, trace):
                     buckets_asked = True               # once: a rate of the day read from its hours
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
@@ -2899,6 +2990,7 @@ class Agent:
                 note += self._marks(answer, trace, conditions_only=True)
                 if cut is not None:
                     note += LOOP_NOTE
+                answer = restore_earlier(answer, messages, asked_at)   # "the answer above": the answer above, kept
                 self._keep_ledger(trace)
                 return (answer + claims_check(answer, trace) + honesty_note(answer, trace) + note +
                         self._other_reading(answer, trace)), trace
@@ -3295,6 +3387,38 @@ class Agent:
             log.warning("supagent: the check of the chat's period failed", exc_info=True)
             return None
 
+    def _period_widened(self, question: str, trace: list[dict]) -> str | None:
+        """The first day this follow-up's queries read, when the chat asked about a period of days this message does
+        not change and its queries read from days before it, none starting inside it (agent.period_window_check;
+        0.9.7: "this morning" then queries from three days before, another day's incident read as this one); not
+        when the question asks for a comparison or what is usual."""
+        if not getattr(self, "chat_period", None) or not settings.get("agent.period_window_check"):
+            return None
+        try:
+            from supagent.knowledge.period import COMPARED, _literals, period_window, window_reading
+
+            q = question or ""
+            if COMPARED.search(q) or OWN_RECENCY.search(q) or STATE_ASKED.match(q) or SUMMARY_ASKED.search(q):
+                return None                             # a comparison, its own recent past, a state, a summary
+            window = period_window(self.chat_period, now().date())
+            if window is None:
+                return None
+            firsts, inside = [], False
+            for t in trace:
+                if (t.get("called") or t.get("tool")) != "execute_sql" or t.get("status") != "done":
+                    continue
+                req = (t.get("args") or {}).get("request") or t.get("args") or {}
+                sql = str(req.get("sql") if isinstance(req, dict) else "")
+                how = window_reading(sql, window)
+                if how == "wider":
+                    firsts.append(min(_literals(sql)))
+                elif how == "in":
+                    inside = True                       # a query that reads the period: it is in hand
+            return f"{min(firsts):%Y-%m-%d %H:%M}" if firsts and not inside else None
+        except Exception:  # pylint: disable=broad-except   (never an answer lost for a check)
+            log.warning("supagent: the check of the chat's window failed", exc_info=True)
+            return None
+
     def _keep_or_drop(self, history: list[dict] | None, answer: str):
         """A question back on a follow-up that offers to keep the question before's conditions or to drop them
         (knowledge.resolve.keep_or_drop): the words it repeats, or None at the start of a conversation."""
@@ -3386,11 +3510,13 @@ class Agent:
                        self._counted_samples(name, args, question),
                        None if getattr(self, "open_question", False) else
                        condition_refusal(getattr(self, "support", None), name, args)]
-            from supagent.knowledge.sqllint import duplicate_refusal, extreme_refusal, or_and_refusal, per_day_refusal
+            from supagent.knowledge.sqllint import (duplicate_refusal, extreme_refusal, or_and_refusal,
+                                                    outer_join_refusal, per_day_refusal)
             from supagent.knowledge.values import refusal as value_refusal
 
             reasons.append(duplicate_refusal(name, args))      # two columns, one aggregate: a condition lost
             reasons.append(or_and_refusal(name, args))         # a OR b AND c: c on b only
+            reasons.append(outer_join_refusal(name, args))     # a LEFT JOIN undone by a WHERE on its optional side
             reasons.append(per_day_refusal(question, name, args))   # an average per day as AVG over the records
             reasons.append(extreme_refusal(name, args))        # MAX(...) AS min_...: the other extreme
             if not getattr(self, "open_question", False):    # an investigation looks values up: none is news

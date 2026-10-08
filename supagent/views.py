@@ -1899,8 +1899,10 @@ class AdminView(BaseView):
                 title, text, _links = html_to_text(text)
                 d.title = d.title or title or body.get("name")
             d.title = d.title or body.get("name") or "document"
-            d.content, d.status = text, "ok"
-            d.content_hash = hashlib.sha256(text.encode()).hexdigest()[:40]
+            from supagent.knowledge.docs import mask_secrets
+
+            d.content, d.status = mask_secrets(text)[0], "ok"          # an upload's secrets masked too (0.10)
+            d.content_hash = hashlib.sha256(d.content.encode()).hexdigest()[:40]
             d.fetched_at = dt.datetime.utcnow()
         db.session.add(d)
         db.session.commit()

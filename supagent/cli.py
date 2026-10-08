@@ -527,6 +527,28 @@ def ask(question: str, user: str, steps: bool, pipeline: str | None) -> None:
     click.echo(answer)
 
 
+@supagent.command(help="Read what the documents and the code state (the units whose text changed), and show it")
+@click.option("--show", is_flag=True, help="Print the relations and the links to the data found, with their sources")
+@click.option("--propose", "do_propose", is_flag=True, help="Propose them for the categories and the System map (To "
+              "review), compared with what exists")
+@with_appcontext
+def understand(show: bool, do_propose: bool) -> None:
+    from supagent.knowledge import understand as U
+
+    click.echo(json.dumps(U.run(reason="cli"), default=str))
+    if do_propose:
+        from supagent.knowledge.proposals import propose
+
+        click.echo("proposed: " + json.dumps(propose(), default=str))
+    if show:
+        g = U.export()
+        for r in sorted(g["relations"], key=lambda x: (x["from"], x["kind"], x["to"])):
+            click.echo(f"{r['from']} {r['kind']} {r['to']}  [{', '.join(r['sources'])}; {r['units']} unit(s)]  "
+                       f"{r['quote'][:100]}")
+        for r in sorted(g["data_links"], key=lambda x: (x["part"], x["kind"], x["object"])):
+            click.echo(f"{r['part']} {r['kind']} {r['object_kind']} {r['object']}  [{', '.join(r['sources'])}]")
+
+
 @supagent.command(help="Update the searchable knowledge: pieces that changed, then their vectors")
 @click.option("--refresh-docs", is_flag=True, help="Also fetch the sites that are due")
 @with_appcontext
@@ -557,15 +579,25 @@ def classify(minutes: int, limit: int) -> None:
                   "parts of the system they state, and propose them for the System map (To review), now")
 @click.option("--minutes", default=15, show_default=True, type=int)
 @click.option("--limit", default=200, show_default=True, type=int, help="Texts read at most")
-@click.option("--again", is_flag=True, help="Read every text again (after many new category values)")
+@click.option("--again", is_flag=True, help="Read every text again (after many new category values); with --explain: "
+              "write again the explanations the AI wrote alone (an admin's words stay), continuing where the last "
+              "one stopped")
+@click.option("--explain", "do_explain", is_flag=True, help="Instead: write the short and long explanations of the "
+              "links that lack them, the approved ones first (--limit links at most), with the LLM (0.10.1)")
+@click.option("--kinds", default="", help="With --explain --again: these kinds of link only, comma separated (e.g. "
+              "runs_on,monitors: the ones an older prompt explained as flows)")
 @with_appcontext
-def interactions(minutes: int, limit: int, again: bool) -> None:
+def interactions(minutes: int, limit: int, again: bool, do_explain: bool, kinds: str) -> None:
     from supagent.knowledge.facets import review_counts
-    from supagent.knowledge.interactions import run
+    from supagent.knowledge.interactions import explain, run
     from supagent.llm import LLM, llm_task
 
     with llm_task("interactions"):
-        out = run(LLM(), seconds=minutes * 60.0, limit=limit, again=again)
+        if do_explain:
+            out = explain(LLM(), seconds=minutes * 60.0, limit=limit, again=again,
+                          kinds=tuple(k.strip() for k in kinds.split(",") if k.strip()) or None)
+        else:
+            out = run(LLM(), seconds=minutes * 60.0, limit=limit, again=again)
     out["waiting_for_review"] = review_counts()
     click.echo(json.dumps(out, indent=2, default=str))
 

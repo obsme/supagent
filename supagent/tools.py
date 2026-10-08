@@ -1126,15 +1126,28 @@ def search_knowledge(query: str, kind: str | None = None, limit: int = 8) -> dic
                 kinds = ("guide",)
             from supagent.knowledge.search import excerpt
 
-            found = search(query, k=max(1, min(int(limit or 8), 20)), kinds=kinds)
+            from supagent.knowledge.judge import judged
+
+            lim = max(1, min(int(limit or 8), 20))
+            found, verdict = judged(query, lambda q: search(q, k=lim, kinds=kinds), lim)   # weak: written again once
             out = {"query": query, "results": [{**f, "text": excerpt(f["text"] or "", query)} for f in found]}
             from supagent.knowledge.spelling import correct, said
 
             read = correct(query)          # the words no piece holds, read as the knowledge spells them (cached)
+            notes = []
             if read["changes"]:
                 out["searched_for"] = read["query"]
                 out["spelling"] = read["changes"]
-                out["note"] = f"searched with {said(read['changes'])} (no piece holds the word as typed)"
+                notes.append(f"searched with {said(read['changes'])} (no piece holds the word as typed)")
+            if verdict.get("unknown"):
+                out["no_piece_holds"] = verdict["unknown"]
+                notes.append("no piece holds " + ", ".join(f"'{w}'" for w in verdict["unknown"][:5]) +
+                             ": if misspelled, search again with the right spelling or another word")
+            if verdict.get("searched_also"):
+                out["searched_also"] = verdict["searched_also"]
+                notes.append(f"searched also as '{verdict['searched_also']}'")
+            if notes:
+                out["note"] = "; ".join(notes)
             return out
     except Exception as ex:  # pylint: disable=broad-except
         return {"error": f"{type(ex).__name__}: {str(ex)[:500]}"}
@@ -1670,7 +1683,7 @@ def promql_query(expr: str, start: str | None = None, end: str | None = None, st
                  database: str | int | None = None, max_series: int = 50) -> dict:
     """Run a PromQL expression on the metrics database and return each series (labels,
     min / max / avg / last and up to 60 points). `start` / `end`: local times like
-    "2026-09-24 02:00" or "now-6h" (end alone or start == end: one instant). `step` like "5m"
+    "2030-01-15 02:00" or "now-6h" (end alone or start == end: one instant). `step` like "5m"
     (default: about 200 points). Use for questions SQL cannot express (ratios of two metrics,
     offsets, label_replace...); the SQL tables of the same database cover the usual cases.
     A query of a few series over at most two days also says what each was over the same window of the
@@ -1789,7 +1802,7 @@ def check_health(start: str, end: str, entities: list[str] | None = None, checks
     window and list every breach: check, server / application, from, to, minutes, worst value, and
     whether the same breach also happened in this window on the previous days (earlier_days;
     usual: true = on most of them: it does not single out this window). The new ones come first.
-    `start` / `end`: local times ("2026-09-24 02:00"); `entities`: only these servers,
+    `start` / `end`: local times ("2030-01-15 02:00"); `entities`: only these servers,
     applications or pools (label values, e.g. ["web-01"]); a part the system map says is made of
     others (a pool and its servers) is checked with them, each breach found that way saying via which;
     `checks`: only these checks."""
@@ -1978,7 +1991,7 @@ def compare_to_usual(promql: str, start: str, end: str, weeks: int = 4, database
     """Is a metric unusual for this time? The average of a PromQL expression over start-end
     compared with the same window of each of the previous `weeks` weeks (median and median
     absolute deviation, per series): verdict normal, high, low (or unknown without 3 earlier
-    weeks), with the numbers. `start` / `end`: local times ("2026-09-24 02:00"), at most 7 days
+    weeks), with the numbers. `start` / `end`: local times ("2030-01-15 02:00"), at most 7 days
     apart. For "is it unusual / abnormal / higher than usual" questions.
     against: reference days to give each series on too (its average over the same window then):
     ["yesterday", "1 week ago", "3 weeks ago", "2 months ago", "2026-06-15"]; the team's own reference
@@ -3201,7 +3214,7 @@ def compare_groups(table: str, start: str, end: str, group_by: list[str] | None 
     sum of B, for its values in full.
     where: the scope as SQL conditions, without the time: "ENV" = 'PROD' AND "APP" IN ('A', 'B'); a business-date
     label (POSITION_LABEL = 'D-1') is moved to each earlier day by itself. start / end: local times
-    ("2026-09-24 00:00"): from the start of what is looked at (today's rows: from midnight today) to now.
+    ("2030-01-15 00:00"): from the start of what is looked at (today's rows: from midnight today) to now.
     against: reference days to compare with besides the usual, when the question names them or to see how old a
     change is: ["yesterday", "1 week ago", "3 weeks ago", "2 months ago", "2026-06-15"] (weeks and months: the
     same weekday; the team's own reference days are compared when none is given).
@@ -3574,7 +3587,7 @@ def compare_logs(table: str, start: str, end: str, where: str = "", days: int = 
     where: the scope as SQL conditions, without the time: "APPLICATION" IN ('A', 'B'), "HOST" = 'srv-1' (a
     business-date label is moved to each earlier day by itself). levels: the levels to read (default: all but
     INFO and DEBUG, when the table has a level field). against: reference days to count each pattern on too
-    ("1 week ago", "4 weeks ago", "2026-06-15"). start / end: local times ("2026-09-24 00:00")."""
+    ("1 week ago", "4 weeks ago", "2026-06-15"). start / end: local times ("2030-01-15 00:00")."""
     began = time.time()
     try:
         with _as_user():

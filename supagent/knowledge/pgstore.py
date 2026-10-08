@@ -3,7 +3,10 @@ once and the ranks fused:
 
   words     BM25 (pg_textsearch: a rare word counts more than a common one), else PostgreSQL's full-text
             search, on the words of each piece (names cut at _ and at capitals, light stems, EN and FR)
-  spelling  pg_trgm: a name or a value typed with a typo or in part (BILLING_APY, payrol, cpu secs)
+  spelling  pg_trgm: a name or a value typed with a typo or in part (BILLING_APY, payrol, cpu secs), the names
+            the documents and the code write too (custom_icu_anbalyzer: their config keys, settings, functions); the words
+            of the pieces as written (surf_<v>, a trigram GiST index): the nearest ones to a word of a question no
+            piece holds, for reading it as the knowledge spells it (spelling.py: two slips, a key far away)
   meaning   pgvector: the vectors of the embedding model (embed.model) in an HNSW index; they stay in
             PostgreSQL, not in the memory of every process, however many pieces there are
 
@@ -29,6 +32,7 @@ import re
 import threading
 import time
 import unicodedata
+from collections import Counter
 from typing import Any, Iterable, Iterator
 
 from sqlalchemy import create_engine, event, text
@@ -44,7 +48,19 @@ CANDIDATES = 60            # pieces each way of searching gives to the fusion
 BM25_POOL = 1000           # BM25's best pieces before the permission filter (a filter inside the scan of
                            # pg_textsearch 0.5 may leave fewer than asked)
 RRF = 60
-WAYS = {"words": 1.0, "meaning": 1.0, "spelling": 0.6}      # weight of each way in the fusion
+WAYS = {"words": 1.0, "meaning": 1.0, "spelling": 0.6}      # weight of each way in the fusion (ranks: RRF)
+FUSION = "mixed"           # how the ways' lists are fused: "cc" (their scores, each list's scaled to 0..1, weighted:
+                           # CC_WAYS; a piece found by one way only keeps the strength it was found with), "rrf" (ranks:
+                           # a piece in two lists beats the best piece by words found by words only), "mixed": a
+                           # question written as a sentence by ranks, a list of keywords or a name by scores (0.10, on
+                           # 2,300 pages: cc found the right first page of keyword and name questions far more often,
+                           # rrf kept natural questions better: mixed keeps both)
+CC_WAYS = {"words": 1.0, "meaning": 0.3, "spelling": 0.4}     # a list of keywords, a name: the words first
+CC_MEANING_SENTENCE = 0.8   # the meaning's weight for a question written as a sentence (3 words or more, one of them a
+                            # function word: "how do I ...", "what is ..."), where the words alone say less (None: as
+                            # CC_WAYS). Measured with a small embedding model (keywords 0.3 best of 0.3-1.0; sentences
+                            # the same from 0.5 to 0.8): to measure again with the model in use
+CC_PLACE = 0.015           # "cc": a place lower (search's `lower`) is this much less
 SPELLING_MIN = 0.5         # pg_trgm word similarity of a word (or a name) of the question and a name or a value
                            # (BILLNG ~ BILLING: 0.57)
 NAMES_PER_WORD = 8
@@ -57,6 +73,13 @@ SAFE_TEXTSEARCH = (0, 6, 1)     # 0.5.0: Block-Max WAND may skip matches (fixed 
                                 # the library (pg_textsearch #247, seen on 18.3): never a transaction from here
 EXTENSIONS = ("vector", "pg_trgm", "pg_textsearch")
 STOP_EXTRA = {"total", "count", "number", "value", "values", "data", "metric", "metrics", "index", "field"}
+NEAR_CANDIDATES = 30       # the words of the pieces nearest to a word of a question (trigram distance), for spelling.py
+IDENTS_PER_PIECE = 200     # the names a piece writes (config keys, settings, functions, metrics...) among the names of the
+                           # near-spelling search, at most (0: none)
+IDENT_MATCHES = 30         # the pieces writing a name typed in a question (exactly or nearly), at most
+IDENT_IN_TEXT = re.compile(r"(?<![\w./:-])(?:[A-Za-z][A-Za-z0-9]*(?:[_.\-][A-Za-z0-9]+)+|[a-z]+(?:[A-Z][a-z0-9]+)+)"
+                           r"(?![\w(/-])(?!:\S)")      # a key before ": value" counts, host:port or a URL does not
+SURFACE_LETTERS = (4, 40)  # the words of the pieces kept as written: letters only, this many
 
 
 class StoreError(Exception):
@@ -82,6 +105,13 @@ def words(s: str) -> list[str]:
     from supagent.knowledge.describe import STOP, stem
 
     return [stem(w) for w in _split_names(s).split() if w not in STOP and (len(w) > 1 or w.isdigit())]
+
+
+def surface(s: str) -> set[str]:
+    """The words of a text as written (names cut, accents out, lower case), letters only, SURFACE_LETTERS long: what
+    a word of a question no piece holds is compared with (near_words)."""
+    lo, hi = SURFACE_LETTERS
+    return {w for w in _split_names(s).split() if lo <= len(w) <= hi and w.isalpha()}
 
 
 def terms_text(title: str, body: str, extra: str = "") -> str:
@@ -150,7 +180,8 @@ def _on_connect(store_schema: str) -> Any:
         if row and _version(row[0]) < (0, 5, 1):
             cur.execute("SET pg_textsearch.enable_bmw = off")      # 0.5.0 could skip valid matches
         for sql in ("SET statement_timeout = '15s'", "SET hnsw.ef_search = 100",
-                    "SET hnsw.iterative_scan = relaxed_order", f"SET pg_trgm.word_similarity_threshold = {SPELLING_MIN}"):
+                    "SET hnsw.iterative_scan = relaxed_order", f"SET pg_trgm.word_similarity_threshold = {SPELLING_MIN}",
+                    f"SET pg_trgm.similarity_threshold = {SPELLING_MIN}"):
             cur.execute(sql)
         cur.close()
     return setup
@@ -437,7 +468,8 @@ def _create_tables(con: Connection, v: int, dims: int | None) -> None:
     con.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema()}"))
     con.execute(text(f"CREATE TABLE IF NOT EXISTS {_q('state')} (id int PRIMARY KEY, version int NOT NULL, "
                      "dims int, model text, bm25 text, built_at timestamptz, synced_at timestamptz, info jsonb)"))
-    con.execute(text(f"DROP TABLE IF EXISTS {_q(f'doc_{v}')}, {_q(f'name_{v}')}, {_q(f'word_{v}')}"))
+    con.execute(text(f"DROP TABLE IF EXISTS {_q(f'doc_{v}')}, {_q(f'name_{v}')}, {_q(f'word_{v}')}, "
+                     f"{_q(f'surf_{v}')}"))
     con.execute(text(f"CREATE TABLE {_q(f'doc_{v}')} (id bigserial PRIMARY KEY, ref text NOT NULL UNIQUE, "
                      "kind text NOT NULL, source_id int, database_id int, scope text NOT NULL DEFAULT 'team', "
                      "user_id int, title text NOT NULL DEFAULT '', body text NOT NULL DEFAULT '', "
@@ -447,6 +479,63 @@ def _create_tables(con: Connection, v: int, dims: int | None) -> None:
                      "norm text NOT NULL, what text NOT NULL, doc_ref text, source_id int, database_id int, "
                      "parent text, field text)"))
     con.execute(text(f"CREATE TABLE {_q(f'word_{v}')} (word text PRIMARY KEY, ndoc int NOT NULL)"))
+    con.execute(text(SURF_TABLE.format(t=_q(f"surf_{v}"))))
+
+
+SURF_TABLE = "CREATE TABLE {t} (word text PRIMARY KEY, stem text NOT NULL, ndoc int NOT NULL)"
+
+
+def _fill_surface(con: Connection, v: int, counts: Counter, add: bool = False) -> int:
+    """The words of the pieces as written, with their stems and how many pieces hold each (`add`: added to the counts,
+    a sync: they only grow until the next build, as the store's list of words)."""
+    from supagent.knowledge.describe import stem
+
+    t = _q(f"surf_{v}")
+    rows = [{"word": w, "stem": stem(w), "ndoc": n} for w, n in counts.items()]
+    for i in range(0, len(rows), 1000):
+        part = rows[i:i + 1000]
+        con.execute(text(f"INSERT INTO {t} (word, stem, ndoc) SELECT * FROM unnest(CAST(:w AS text[]), "
+                         "CAST(:s AS text[]), CAST(:n AS int[])) ON CONFLICT (word) DO UPDATE SET ndoc = "
+                         + (f"{t}.ndoc + EXCLUDED.ndoc" if add else "EXCLUDED.ndoc")),
+                    {"w": [r["word"] for r in part], "s": [r["stem"] for r in part], "n": [r["ndoc"] for r in part]})
+    return len(rows)
+
+
+def idents(text_: str) -> list[str]:
+    """The names a text writes (snake_case, kebab-case, dotted.keys, camelCase): two parts at least, one of them a word
+    of three letters or more, 6 to 120 characters; IDENTS_PER_PIECE at most."""
+    out = []
+    for m in IDENT_IN_TEXT.finditer(text_ or ""):
+        name = m.group(0).strip("._-")
+        parts = [x for x in re.split(r"[_.\-]|(?<=[a-z0-9])(?=[A-Z])", name) if x]
+        if 6 <= len(name) <= 120 and len(parts) >= 2 and any(len(x) >= 3 and x.isalpha() for x in parts):
+            out.append(name)
+    return list(dict.fromkeys(out))[:IDENTS_PER_PIECE]
+
+
+def _ident_rows(r: dict[str, Any]) -> list[dict[str, Any]]:
+    if not IDENTS_PER_PIECE or r.get("kind") in ("chat", "route"):
+        return []
+    return [_name(x, "ident", r["ref"], r.get("source_id"), r.get("database_id"), None, None)
+            for x in idents(f"{r.get('title') or ''}\n{r.get('body') or ''}")]
+
+
+def _surface_of(rows: Iterable[dict[str, Any]], counts: Counter, con: Connection | None = None,
+                names: str | None = None) -> Iterator[dict[str, Any]]:
+    """The rows as they go by: the words of each piece (not the chats, not the routes) counted once per piece; with
+    `con` and the table of `names`, the names each piece writes added to it (in batches, between the pieces')."""
+    batch: list[dict[str, Any]] = []
+    for r in rows:
+        if r.get("kind") not in ("chat", "route"):
+            counts.update(surface(f"{r.get('title') or ''} {r.get('body') or ''}"))
+            if con is not None and names:
+                batch += _ident_rows(r)
+                if len(batch) >= 2000:
+                    _insert(con, names, NAME_COLUMNS, batch)
+                    batch = []
+        yield r
+    if batch and con is not None and names:
+        _insert(con, names, NAME_COLUMNS, batch)
 
 
 def _insert(con: Connection, table: str, columns: tuple[str, ...], rows: Iterable[dict[str, Any]],
@@ -515,6 +604,7 @@ def _create_indexes(con: Connection, v: int, caps: dict[str, Any], dims: int | N
         con.execute(text(sql))
     if caps.get("pg_trgm"):
         con.execute(text(f"CREATE INDEX name_{v}_trgm ON {name} USING gin (norm gin_trgm_ops)"))
+        con.execute(text(f"CREATE INDEX surf_{v}_trgm ON {_q(f'surf_{v}')} USING gist (word gist_trgm_ops)"))
     if caps.get("vector") and dims:
         con.execute(text(f"CREATE INDEX doc_{v}_hnsw ON {doc} USING hnsw (embedding halfvec_cosine_ops)"))
     bm25 = "builtin"
@@ -526,6 +616,7 @@ def _create_indexes(con: Connection, v: int, caps: dict[str, Any], dims: int | N
             log.warning("supagent store: no BM25 index: %s", str(ex)[:300])
     con.execute(text(f"ANALYZE {doc}"))
     con.execute(text(f"ANALYZE {name}"))
+    con.execute(text(f"ANALYZE {_q(f'surf_{v}')}"))
     return bm25
 
 
@@ -572,14 +663,17 @@ def rebuild(embed: bool = True) -> dict[str, Any]:
         v = int((st or {}).get("version") or 0) + 1
         _create_tables(con, v, dims)
         cast = f"halfvec({dims})" if dims else None
-        docs = _insert(con, _q(f"doc_{v}"), DOC_COLUMNS,
-                       (r for rows in (_chunk_rows(model if dims else None), _chat_rows(), _route_rows())
-                        for r in rows), cast)
-        names = _insert(con, _q(f"name_{v}"), NAME_COLUMNS, _name_rows())
+        seen: Counter = Counter()
+        docs = _insert(con, _q(f"doc_{v}"), DOC_COLUMNS, _surface_of(
+            (r for rows in (_chunk_rows(model if dims else None), _chat_rows(), _route_rows()) for r in rows), seen,
+            con, _q(f"name_{v}")), cast)
+        n_idents = con.execute(text(f"SELECT count(*) FROM {_q(f'name_{v}')}")).scalar()
+        names = _insert(con, _q(f"name_{v}"), NAME_COLUMNS, _name_rows()) + int(n_idents or 0)
         n_words = _fill_words(con, v)
+        n_surface = _fill_surface(con, v, seen)
         bm25 = _create_indexes(con, v, caps, dims)
-        info = {"docs": docs, "names": names, "words": n_words, "seconds": round(time.time() - t0, 1), "caps": caps,
-                "names_stamp": names_stamp}
+        info = {"docs": docs, "names": names, "words": n_words, "surface": n_surface,
+                "seconds": round(time.time() - t0, 1), "caps": caps, "names_stamp": names_stamp}
         con.execute(text(f"INSERT INTO {_q('state')} (id, version, dims, model, bm25, built_at, synced_at, info) "
                          "VALUES (1, :v, :d, :m, :b, now(), now(), CAST(:i AS jsonb)) ON CONFLICT (id) DO UPDATE SET "
                          "version = :v, dims = :d, model = :m, bm25 = :b, built_at = now(), synced_at = now(), "
@@ -595,7 +689,7 @@ def rebuild(embed: bool = True) -> dict[str, Any]:
 
 def _drop_old(con: Connection, keep: int) -> None:
     """The versions not in use (a search still reading one: dropped at the next sync)."""
-    rows = con.execute(text("SELECT tablename FROM pg_tables WHERE schemaname = :s AND tablename ~ '^(doc|name|word)_[0-9]+$'"),
+    rows = con.execute(text("SELECT tablename FROM pg_tables WHERE schemaname = :s AND tablename ~ '^(doc|name|word|surf)_[0-9]+$'"),
                        {"s": schema()}).scalars().all()
     for t in rows:
         if int(t.split("_")[1]) == keep:
@@ -694,22 +788,35 @@ def sync(prefixes: tuple[str, ...] | None = None, chats: bool = True, names: boo
             for r in _chat_rows(only=changed):
                 compare(r, False)
         gone = [ref for ref in have if ref not in keep]
+        name_t = _q(f"name_{v}")
         for i in range(0, len(gone), 500):
             con.execute(text(f"DELETE FROM {doc} WHERE ref = ANY(:refs)"), {"refs": gone[i:i + 500]})
+            con.execute(text(f"DELETE FROM {name_t} WHERE what = 'ident' AND doc_ref = ANY(:refs)"),
+                        {"refs": gone[i:i + 500]})
         out["removed"] = len(gone)
         for i in range(0, len(todo), INSERT_ROWS):
             part = todo[i:i + INSERT_ROWS]
             con.execute(text(f"DELETE FROM {doc} WHERE ref = ANY(:refs)"), {"refs": [r["ref"] for r in part]})
             _insert(con, doc, DOC_COLUMNS, part, cast)
+            con.execute(text(f"DELETE FROM {name_t} WHERE what = 'ident' AND doc_ref = ANY(:refs)"),
+                        {"refs": [r["ref"] for r in part]})
+            _insert(con, name_t, NAME_COLUMNS, [x for r in part for x in _ident_rows(r)])
         if not con.execute(text("SELECT to_regclass(:t)"), {"t": f"{schema()}.word_{v}"}).scalar():
             con.execute(text(f"CREATE TABLE {_q(f'word_{v}')} (word text PRIMARY KEY, ndoc int NOT NULL)"))
             out["words"] = _fill_words(con, v)          # a store built before 0.9.6: its words now
         elif todo:
             _fill_words(con, v, [r["ref"] for r in todo if r["kind"] not in ("chat", "route")])
+        if not con.execute(text("SELECT to_regclass(:t)"), {"t": f"{schema()}.surf_{v}"}).scalar():
+            out["surface"] = _surface_now(con, v, built)  # a store built before 0.10: its words as written now
+        elif todo:
+            got: Counter = Counter()
+            for _r in _surface_of(todo, got):
+                pass
+            _fill_surface(con, v, got, add=True)
         now_stamp = stamp()
         if names and info.get("names_stamp") != now_stamp:
             name = _q(f"name_{v}")
-            con.execute(text(f"DELETE FROM {name}"))
+            con.execute(text(f"DELETE FROM {name} WHERE what <> 'ident'"))
             out["names"] = _insert(con, name, NAME_COLUMNS, _name_rows())
             con.execute(text(f"UPDATE {_q('state')} SET info = jsonb_set(coalesce(info, '{{}}'::jsonb), "
                              "'{names_stamp}', to_jsonb(CAST(:s AS text))) WHERE id = 1"), {"s": now_stamp})
@@ -717,6 +824,55 @@ def sync(prefixes: tuple[str, ...] | None = None, chats: bool = True, names: boo
     if dims and chats:
         out["embedded"] = embed_pending()
     forget_state()
+    return out
+
+
+def _surface_now(con: Connection, v: int, caps: dict[str, Any]) -> int:
+    """The table of the words as written for a store built before it existed, from the pieces it holds."""
+    con.execute(text(SURF_TABLE.format(t=_q(f"surf_{v}"))))
+    got: Counter = Counter()
+    last = 0
+    while True:                                    # by pages of pieces (autocommit: no cursor kept open)
+        rows = con.execute(text(f"SELECT id, title, body FROM {_q(f'doc_{v}')} WHERE kind NOT IN ('chat', 'route') "
+                                "AND id > :last ORDER BY id LIMIT 500"), {"last": last}).all()
+        if not rows:
+            break
+        for row in rows:
+            got.update(surface(f"{row.title or ''} {row.body or ''}"))
+        last = rows[-1].id
+    n = _fill_surface(con, v, got)
+    if caps.get("pg_trgm"):
+        con.execute(text(f"CREATE INDEX surf_{v}_trgm ON {_q(f'surf_{v}')} USING gist (word gist_trgm_ops)"))
+    con.execute(text(f"ANALYZE {_q(f'surf_{v}')}"))
+    return n
+
+
+def near_words(typed: list[str], n: int = NEAR_CANDIDATES) -> dict[str, list[tuple[str, str, int, float]]]:
+    """For each word (lower case, letters only), the words of the pieces nearest to it by their trigrams (pg_trgm's
+    distance, through the GiST index), with the same first letter and a length within two: {typed: [(word, stem,
+    pieces holding it, similarity)]}; {} without the store, its table of words or pg_trgm. Which of them a word is
+    read as (two slips at most, held by a piece the user may see) is spelling.py's choice."""
+    st = state()
+    e = engine()
+    lo, hi = SURFACE_LETTERS
+    typed = [w for w in dict.fromkeys(typed) if isinstance(w, str) and w.isalpha() and lo <= len(w) <= hi]
+    if not st or e is None or not typed:
+        return {}
+    info = st.get("info") if isinstance(st.get("info"), dict) else json.loads(st.get("info") or "{}")
+    if not (info.get("caps") or {}).get("pg_trgm"):
+        return {}
+    v = int(st["version"])
+    with e.connect() as con:
+        if not con.execute(text("SELECT to_regclass(:t)"), {"t": f"{schema()}.surf_{v}"}).scalar():
+            return {}
+        rows = con.execute(text(
+            f"SELECT t.w, s.word, s.stem, s.ndoc, similarity(s.word, t.w) AS sim FROM unnest(CAST(:ws AS text[])) "
+            f"AS t(w) CROSS JOIN LATERAL (SELECT x.word, x.stem, x.ndoc FROM {_q(f'surf_{v}')} x "
+            f"WHERE left(x.word, 1) = left(t.w, 1) AND length(x.word) BETWEEN length(t.w) - 2 AND length(t.w) + 2 "
+            f"ORDER BY x.word <-> t.w LIMIT :n) s"), {"ws": typed, "n": int(n)}).all()
+    out: dict[str, list[tuple[str, str, int, float]]] = {}
+    for r in rows:
+        out.setdefault(r.w, []).append((r.word, r.stem, int(r.ndoc), float(r.sim)))
     return out
 
 
@@ -945,15 +1101,28 @@ def _by_spelling(con: Connection, v: int, query: str, params: dict[str, Any]) ->
     if not toks:
         return [], {}
     doc, name = _q(f"doc_{v}"), _q(f"name_{v}")
+    # the names the documents write are for a name typed (custom_icu_anbalyzer), near the whole name (not a part of
+    # it: /api/checkout is not checkout_orders_total); not for the words of a question (aggregation would find each
+    # name holding aggregations; a misspelled word is read by spelling.py and found by words)
+    # (a name typed exactly as a document writes it counts too: refreshInterval is two common words for BM25, one
+    # name of a few pages)
+    itoks = [t for t in toks if " " in t]
+    perm = ("AND (x.source_id IS NULL OR x.source_id = ANY(:sources)) "
+            "AND (x.database_id IS NULL OR x.database_id = ANY(:dbs)) ")
     rows = con.execute(text(
         f"SELECT n.tok, n.name, n.what, n.field, n.s, d.id FROM unnest(CAST(:toks AS text[])) AS t(tok) "
         f"CROSS JOIN LATERAL (SELECT t.tok, x.name, x.what, x.field, x.doc_ref, word_similarity(t.tok, x.norm) AS s "
-        f"  FROM {name} x WHERE t.tok <% x.norm AND x.doc_ref IS NOT NULL "
-        f"  AND position(' ' || t.tok || ' ' IN ' ' || x.norm || ' ') = 0 "
-        f"  AND (x.source_id IS NULL OR x.source_id = ANY(:sources)) "
-        f"  AND (x.database_id IS NULL OR x.database_id = ANY(:dbs)) "
+        f"  FROM {name} x WHERE t.tok <% x.norm AND x.doc_ref IS NOT NULL AND x.what <> 'ident' "
+        f"  AND position(' ' || t.tok || ' ' IN ' ' || x.norm || ' ') = 0 {perm}"
         f"  ORDER BY word_similarity(t.tok, x.norm) DESC LIMIT :per) n "
-        f"JOIN {doc} d ON d.ref = n.doc_ref"), {**params, "toks": toks, "per": NAMES_PER_WORD}).all()
+        f"JOIN {doc} d ON d.ref = n.doc_ref "
+        f"UNION ALL "
+        f"SELECT n.tok, n.name, n.what, n.field, n.s, d.id FROM unnest(CAST(:itoks AS text[])) AS t(tok) "
+        f"CROSS JOIN LATERAL (SELECT t.tok, x.name, x.what, x.field, x.doc_ref, similarity(t.tok, x.norm) AS s "
+        f"  FROM {name} x WHERE x.norm % t.tok AND x.what = 'ident' AND x.doc_ref IS NOT NULL {perm}"
+        f"  ORDER BY similarity(t.tok, x.norm) DESC LIMIT :per_ident) n "
+        f"JOIN {doc} d ON d.ref = n.doc_ref"), {**params, "toks": toks, "itoks": itoks, "per": NAMES_PER_WORD,
+                                                "per_ident": IDENT_MATCHES}).all()
     best: dict[int, float] = {}
     matched: dict[int, list[dict]] = {}
     for r in rows:
@@ -1023,13 +1192,27 @@ def search(query: str, k: int, kinds: tuple[str, ...] | None = None, lower: dict
             {**params, "ids": ids}).all()}
     scores: dict[int, float] = {}
     ranks: dict[int, dict[str, int]] = {}
+    weights = dict(CC_WAYS)
+    fusion = FUSION
+    if FUSION == "mixed":                                 # a sentence by ranks, keywords and names by scores
+        fusion = "rrf" if _sentence(query) else "cc"
+    elif FUSION == "cc" and CC_MEANING_SENTENCE is not None and _sentence(query):
+        weights["meaning"] = float(CC_MEANING_SENTENCE)
     for way, got in found.items():
+        scaled = _scaled(way, got) if fusion == "cc" else {}
         for rank, (i, _s) in enumerate(got):
             r = rows.get(i)
             if r is None:
                 continue
-            scores[i] = scores.get(i, 0.0) + WAYS[way] / (RRF + rank + lower.get(r.kind or "", 0))
+            if fusion == "cc":
+                scores[i] = scores.get(i, 0.0) + weights.get(way, 0.0) * scaled.get(i, 0.0)
+            else:
+                scores[i] = scores.get(i, 0.0) + WAYS[way] / (RRF + rank + lower.get(r.kind or "", 0))
             ranks.setdefault(i, {})[way] = rank
+    if fusion == "cc":                                    # a kind counted as found places lower
+        for i in scores:
+            places = lower.get(rows[i].kind or "", 0) if i in rows else 0
+            scores[i] -= CC_PLACE * places
     cos = dict(found.get("meaning") or [])
     out = []
     for i, score in sorted(scores.items(), key=lambda x: -x[1]):
@@ -1046,6 +1229,30 @@ def search(query: str, k: int, kinds: tuple[str, ...] | None = None, lower: dict
         if len(out) >= k:
             break
     return out
+
+
+def _sentence(query: str) -> bool:
+    """A question written as a sentence (not a list of keywords, not a name): 3 words or more, one a function word."""
+    from supagent.knowledge.describe import STOP
+
+    ws = re.findall(r"[^\W\d_]+", (query or "").lower())
+    return len(ws) >= 3 and any(w in STOP for w in ws) and not IDENTIFIER.search(query or "")
+
+
+def _scaled(way: str, got: list[tuple[int, float]]) -> dict[int, float]:
+    """A way's scores scaled to 0..1 for the "cc" fusion: by words, as a share of the best one (BM25 has no upper
+    bound; 0 is no match); by meaning, from the floor of the closeness (VECTOR_FLOOR: 0) to the closest (1); the near
+    spellings' similarity as it is (0..1)."""
+    if not got:
+        return {}
+    if way == "words":
+        top = max(s for _i, s in got) or 1.0
+        return {i: max(0.0, s) / top for i, s in got}
+    if way == "meaning":
+        top = max(s for _i, s in got)
+        span = max(top - VECTOR_FLOOR, 1e-6)
+        return {i: min(1.0, max(0.0, (s - VECTOR_FLOOR) / span)) for i, s in got}
+    return {i: min(1.0, max(0.0, s)) for i, s in got}
 
 
 def neighbors(question: str, user_id: int | None, k: int = 20) -> dict[str, float]:

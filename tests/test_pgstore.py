@@ -446,8 +446,9 @@ def test_a_misspelled_word_is_read_as_the_knowledge_spells_it(store):
         spelling._CACHE.clear()
         got = spelling.correct("Secnods the CPUs spent in each mode")
         assert got["changes"] == [{"typed": "Secnods", "read": "seconds"}]
-        top = search("Secnods the CPUs spent", 3)
-        assert top[0]["title"] == "metric node_cpu_seconds_total" and "words" in top[0]["via"]
+        top = search("Secnods the CPUs spent", 3)                 # two metrics say "Seconds the CPUs spent": both first
+        assert {t["title"] for t in top[:2]} == {"metric node_cpu_seconds_total", "metric node_cpu_guest_seconds_total"}
+        assert all("words" in t["via"] for t in top[:2])
         assert spelling.correct("job duration histogrma")["changes"][0]["read"] == "histogram"
         assert ("cpu", "spent") in pgstore.side_by_side([("cpu", "spent"), ("cpu", "billing")])
         assert ("cpu", "billing") not in pgstore.side_by_side([("cpu", "spent"), ("cpu", "billing")])
@@ -499,4 +500,55 @@ def test_a_word_written_now_is_known_now_and_an_old_store_gets_its_words(store):
         assert out.get("words", 0) > 20 and pgstore.word_counts(["flamingo"]) == {"flamingo": 1}
     finally:
         db.session.query(Entry).filter(Entry.title == "Spelling words").delete()
+        db.session.commit()
+
+
+def test_two_slips_are_read_by_the_words_as_written(store):
+    """(0.10) The words of the pieces as written, in a trigram GiST index: a word two slips from one of them (no single
+    slip reads it) is read as it, kept in step with the pieces; a store built before it gets the table at its next
+    sync."""
+    from sqlalchemy import text
+
+    from superset.extensions import db
+
+    from supagent.knowledge import pgstore, spelling
+    from supagent.knowledge.index import sync
+    from supagent.models import Entry
+    from supagent.security import acting_as
+
+    db.session.add(Entry(title="Near words", classification="rule", enabled=True, version=1,
+                         content="The flamingo cluster restarts every night after the reconciliation; its "
+                                 "flamingo_restart_window: 30 minutes."))
+    db.session.commit()
+    try:
+        sync(("entry:",))
+        near = pgstore.near_words(["flamnigoo", "reconcilaiton"])
+        assert ("flamingo", "flamingo", 1) in [c[:3] for c in near["flamnigoo"]]
+        assert any(c[0] == "reconciliation" for c in near["reconcilaiton"])
+        with acting_as("admin"):
+            spelling._CACHE.clear()
+            got = spelling.correct("flamnigoo cluster")              # a letter swapped and one too many: two slips
+            assert got["changes"] == [{"typed": "flamnigoo", "read": "flamingo"}]
+            assert spelling.correct("flamingo cluster")["changes"] == []
+            from supagent.knowledge.search import search             # a name the piece writes, typed with a typo:
+            hit = search("flamingo_restrat_window", 5)                # the near spelling of the names finds it
+            mine = next(h for h in hit if "flamingo_restart_window" in (h["text"] or ""))
+            assert "spelling" in mine["via"]
+            assert any(x["name"] == "flamingo_restart_window" and x["what"] == "ident" for x in mine["spelled"])
+            exact = next(h for h in search("flamingoRestartWindow", 5) if "flamingo_restart_window" in (h["text"] or ""))
+            assert "spelling" in exact["via"] and exact["spelled"][0]["similarity"] == 1.0   # the same name, typed
+            #                                                                                  another way
+        v = int(pgstore.state(fresh=True)["version"])
+        with pgstore.engine().connect() as con:                   # a store built before 0.10: no words as written
+            con.execute(text(f"DROP TABLE {pgstore._q(f'surf_{v}')}"))
+        assert pgstore.near_words(["flamnigoo"]) == {}
+        out = pgstore.sync(prefixes=("entry:",), chats=False)
+        assert out.get("surface", 0) > 20 and "flamnigoo" in pgstore.near_words(["flamnigoo"])
+        with pgstore.engine().connect() as con:                   # the nearest words through the GiST index
+            plan = "\n".join(r[0] for r in con.execute(text(
+                f"EXPLAIN SELECT word FROM {pgstore._q(f'surf_{v}')} WHERE left(word, 1) = 'f' "
+                f"ORDER BY word <-> 'flamnigoo' LIMIT 30")))
+        assert "surf_" in plan and ("Index Scan" in plan or "Seq Scan" in plan)
+    finally:
+        db.session.query(Entry).filter(Entry.title == "Near words").delete()
         db.session.commit()

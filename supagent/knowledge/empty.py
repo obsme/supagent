@@ -91,7 +91,36 @@ def _loose(v: str) -> str:
     return re.sub(r"\d+", lambda m: str(int(m.group())), re.sub(r"[\s_.\-/]+", "-", v.strip().lower()))
 
 
-def _value_hint(column: str, wanted: list[str], stats: dict, backend: str) -> str | None:
+def _elsewhere_on() -> bool:
+    """agent.value_elsewhere (0.9.7): a value missing from its field is looked for in the query's other fields."""
+    try:
+        from supagent import settings
+
+        return bool(settings.get("agent.value_elsewhere"))
+    except Exception:  # pylint: disable=broad-except   (no app: as the default)
+        return True
+
+
+def _holders(w: str, others: list[tuple[str, str, dict]] | None) -> list[tuple[str, str]]:
+    """(field, the value as it is written there) for the other fields of the query's tables whose learned values
+    hold `w` (exactly, else in another case): a value named with the wrong field ("STATUS = 'TIMEOUT'" where
+    TIMEOUT is an ERROR_CATEGORY), three at most."""
+    out: list[tuple[str, str]] = []
+    for name, _table, st in others or []:
+        known, _complete = _values(st)
+        if not known:
+            continue
+        exact = w if w in known else next((k for k in known if k.lower() == w.lower()), None)
+        if exact is not None and name not in [n for n, _v in out]:
+            out.append((name, exact))
+    return out[:3]
+
+
+def _value_hint(column: str, wanted: list[str], stats: dict, backend: str,
+                others: list[tuple[str, str, dict]] | None = None) -> str | None:
+    """Why the values a filter asks of `column` match nothing: written otherwise in it, held by another field of
+    the query's tables (`others`: (name, table, stats)), the closest of its values, or not a value at all (said
+    only when its learned list is complete)."""
     known, complete = _values(stats)
     if not known:
         return None
@@ -105,6 +134,13 @@ def _value_hint(column: str, wanted: list[str], stats: dict, backend: str) -> st
         same = lower.get(w.lower()) or loose.get(_loose(w))
         if same:
             parts.append(f"'{w}' is written '{same}'")
+            continue
+        held = _holders(w, [o for o in others or [] if o[0] != column]) if _elsewhere_on() else []
+        if held:
+            where = " or ".join(f'"{n}"' for n, _v in held)
+            parts.append((f"'{w}' is not a value of \"{column}\"; it is a value of {where}" if complete else
+                          f"'{w}' is a value of {where}") + " (" + "; ".join(
+                f'filter on "{n}" = \'{v}\'' for n, v in held) + ")")
             continue
         close = difflib.get_close_matches(w, known, n=3, cutoff=0.6)
         if close:
@@ -162,13 +198,14 @@ def why_empty(database: Any, sql: str, counted: bool = False) -> str:
         db.session.rollback()
         return ""
     hints: list[str] = []
+    fields = [(o.name, o.parent, o.stats or {}) for o in objs if o.kind in ("field", "label") and o.parent in tables]
     for table in tables:
         top = next((o for o in objs if o.kind in ("index", "metric") and o.name == table), None)
         columns = {o.name: o for o in objs if o.kind in ("field", "label") and o.parent == table}
         for col, wanted in equal.items():
             o = columns.get(col)
             if o is not None:
-                h = _value_hint(col, wanted, o.stats or {}, backend)
+                h = _value_hint(col, wanted, o.stats or {}, backend, fields)
                 if h:
                     hints.append(h)
         if top is None:
@@ -209,12 +246,17 @@ def why_empty(database: Any, sql: str, counted: bool = False) -> str:
         return ""
     if counted:
         before = [h for h in hints if "the time window is before it" in h or "the time window is after it" in h]
-        hints = [h for h in hints if "is not a value" in h or "is written" in h]   # a 0 is an answer otherwise
+        hints = [h for h in hints if "is not a value" in h or "is written" in h or "is a value of" in h]
+        #                                                 (a 0 is an answer otherwise)
         if before and not hints:                        # a sum of 0 for a day before the data: no data, not 0
             return ("Nothing matched (0). From the data dictionary: " + "; ".join(before[:2]) + ". Say that the data "
                     "does not cover that period (it starts later, or stopped), rather than a figure of 0.")
         if not hints:
             return ""
+        if any("is a value of" in h or "is written" in h for h in hints):   # the value is there, filtered wrongly:
+            return ("Nothing matched (0). From the data dictionary: " + "; ".join(hints[:4]) + ". Run the query "
+                    "again with the value as the data holds it (the field and the spelling above), rather than a "
+                    "count of 0 or saying that it does not exist.")
         return ("Nothing matched (0). From the data dictionary: " + "; ".join(hints[:4]) + ". Say that the value "
                 "does not exist in the data, rather than a count of 0.")
     return "No rows. From the data dictionary: " + "; ".join(hints[:4]) + "."

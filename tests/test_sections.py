@@ -139,3 +139,15 @@ def test_web_and_confluence_headings_stay_headings(ctx):
     assert title == "Runbook" and text == "# Restart\nPlan it.\n## Before\nDrain the node."
     assert [w for w, _t in split_sections(text)] == ["Restart"]          # short sections go together
     assert storage_to_text("<h3>Rollback</h3><p>Steps</p>") == "### Rollback\nSteps"
+
+
+def test_the_terms_of_a_glossary_are_never_capped():
+    """(0.9.8) A team's glossary is one entry with a section per term: the cap of two pieces of a page let two terms
+    through and left out the one that said which orders are sold."""
+    from supagent.knowledge.search import capped
+
+    found = [{"ref": f"entry:9#term-{i}", "kind": "glossary", "text": f"term {i}"} for i in range(4)] + \
+        [{"ref": f"doc:1#{i}", "kind": "doc", "text": "Source: https://x/a.md\n..."} for i in range(4)]
+    got = [f["ref"] for f in capped(found, 8)]
+    assert [r for r in got if r.startswith("entry:9")] == [f"entry:9#term-{i}" for i in range(4)]   # every term
+    assert len([r for r in got if r.startswith("doc:1")]) == 2                                      # a page: two

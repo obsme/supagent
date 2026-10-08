@@ -131,6 +131,70 @@ def split_sections(text: str, size: int | None = None, overlap: int = OVERLAP) -
     return out
 
 
+CODE_LANGS = {"python", "java", "kotlin", "scala", "groovy", "javascript", "typescript", "go", "rust", "csharp", "ruby",
+              "php", "shell", "powershell"}
+
+
+def split_code(text: str, symbols: list[dict[str, Any]], size: int = PART_CHARS) -> list[tuple[str, str]]:
+    """A source file cut at its declarations (0.10): its top-level functions, classes and methods (from its outline),
+    the lines before the first one (its imports, its constants) a part of their own; small neighbours go together
+    while they fit in `size`, a long one is cut as split_text cuts; each part named by the symbols it holds."""
+    lines = (text or "").split("\n")
+    starts = []
+    for sym in symbols or []:
+        ln = int(sym.get("line") or 0)
+        if sym.get("kind") in ("function", "class") and 1 <= ln <= len(lines):
+            indent = len(lines[ln - 1]) - len(lines[ln - 1].lstrip())
+            while ln > 1 and lines[ln - 2].lstrip().startswith(("@", "#", "//", "/*", "*", '"""')):
+                ln -= 1                                  # its decorators and the comment above it go with it
+            if indent <= 4:
+                starts.append((ln, sym["name"]))
+    starts = sorted(dict(sorted(starts, reverse=True)).items()) if starts else []
+    if not starts:
+        return [("", p) for p in split_text(text, size)]
+    blocks: list[tuple[str, str]] = []
+    if starts[0][0] > 1:
+        head = "\n".join(lines[:starts[0][0] - 1]).strip()
+        if head:
+            blocks.append(("", head))
+    for i, (ln, name) in enumerate(starts):
+        end = starts[i + 1][0] - 1 if i + 1 < len(starts) else len(lines)
+        body = "\n".join(lines[ln - 1:end]).rstrip()
+        if body.strip():
+            blocks.append((name, body))
+    out: list[tuple[str, str]] = []
+    cur_names: list[str] = []
+    cur: list[str] = []
+    for name, body in blocks:
+        if len(body) > size:
+            if cur:
+                out.append((", ".join(cur_names), "\n\n".join(cur)))
+                cur, cur_names = [], []
+            out += [(name, part) for part in split_text(body, size)]
+            continue
+        if cur and sum(len(x) + 2 for x in cur) + len(body) > size:
+            out.append((", ".join(cur_names), "\n\n".join(cur)))
+            cur, cur_names = [], []
+        cur.append(body)
+        if name:
+            cur_names.append(name)
+    if cur:
+        out.append((", ".join(cur_names), "\n\n".join(cur)))
+    return out
+
+
+def _unit_context(doc_id: int) -> dict[str, Any]:
+    """The units of a document as understood (0.10): their part and summary, by their key."""
+    try:
+        from supagent.models import KUnit
+
+        return {u.ukey: {"owner": u.owner, "summary": u.summary, "lang": u.lang, "symbols": (u.outline or {}).get("symbols")}
+                for u in db.session.query(KUnit).filter(KUnit.doc_id == doc_id)}
+    except Exception:  # pylint: disable=broad-except   (an older schema: the pieces as before)
+        db.session.rollback()
+        return {}
+
+
 # --------------------------------------------------------------------------- #
 # the pieces
 # --------------------------------------------------------------------------- #
@@ -267,12 +331,29 @@ def _doc_pieces() -> Iterator[dict[str, Any]]:
             for i, (where, part) in enumerate(split_sections(d.content or "")):
                 yield {"ref": f"doc:{d.id}#{i}", "kind": "doc", "title": _titled(name, where, category), "text": part}
             continue
+        units = _unit_context(d.id)
+        meta = {str(p.get("url") or ""): p for p in (d.pages or []) if isinstance(p, dict)}
         for url, title, text in pages:
             named = f"{name} \u203a {title}" if title and title != name else name
             key = hashlib.sha1((url or title).encode("utf-8")).hexdigest()[:10]
-            for j, (where, part) in enumerate(split_sections(text)):   # named after its page (0.9.6.1): a page
-                yield {"ref": f"doc:{d.id}#{key}-{j}", "kind": "doc",      # changed makes again its pieces only
-                       "title": _titled(named, where, category), "text": f"Source: {url}\n{part}" if url else part}
+            m = meta.get(url) or {}
+            u = units.get(str(m.get("path") or m.get("id") or url)) or {}
+            head = text.split("\n", 1)[1] if text.startswith(f"# {title}\n") else text
+            # what the piece is part of, said in its text (the search reads it with the piece: its words and meaning)
+            about = []
+            if m.get("path"):
+                about.append(f"File {m['path']}" + (f" ({u['lang']})" if u.get("lang") and u["lang"] != "text" else "")
+                             + (f" of {name}" if name else "") + (f", the code of {u['owner']}" if u.get("owner") else ""))
+            elif u.get("owner"):
+                about.append(f"About {u['owner']}")
+            if u.get("summary"):
+                about.append(str(u["summary"]).strip().split("\n")[0][:300])
+            context = (". ".join(about) + ".\n") if about else ""
+            parts = split_code(head, u.get("symbols") or []) if u.get("lang") in CODE_LANGS else split_sections(text)
+            for j, (where, part) in enumerate(parts):           # named after its page (0.9.6.1): a page changed
+                yield {"ref": f"doc:{d.id}#{key}-{j}", "kind": "doc",      # makes again its pieces only
+                       "title": _titled(named, where, category),
+                       "text": (f"Source: {url}\n" if url else "") + context + part}
 
 
 def _titled(name: str, where: str, category: str = "") -> str:
@@ -301,6 +382,93 @@ def _context_pieces() -> Iterator[dict[str, Any]]:
         for i, (where, part) in enumerate(split_sections(p.content or "")):
             yield {"ref": f"context:{p.id}#{i}", "kind": "context", "title": _titled(f"{label}: {p.title}", where),
                    "text": part}
+
+
+_MAP_CHANGED = [True]        # (0.10) a value or a link of the map changed since its pieces were written (at start: yes)
+
+
+def _mark_map(session: Any, _ctx: Any, _instances: Any) -> None:
+    """Before a flush: a value or a link of the System map added, changed or removed marks the map's pieces stale."""
+    try:
+        from supagent.models import Facet, Link
+
+        if any(isinstance(o, (Facet, Link)) for o in (*session.new, *session.dirty, *session.deleted)):
+            _MAP_CHANGED[0] = True
+    except Exception:  # pylint: disable=broad-except
+        pass
+
+
+try:
+    from sqlalchemy import event as _event
+    from sqlalchemy.orm import Session as _Session
+
+    _event.listen(_Session, "before_flush", _mark_map)
+except Exception:  # pylint: disable=broad-except
+    log.warning("supagent: the map's search pieces are refreshed at the indexing only", exc_info=True)
+
+
+def refresh_map() -> dict[str, Any] | None:
+    """(0.10) The map's search pieces written again when a value or a link changed (an approval, an edit on the map,
+    a learning run): before the next search, at once, for the map's pieces only (a few thousand at most)."""
+    if not _MAP_CHANGED[0]:
+        return None
+    _MAP_CHANGED[0] = False
+    try:
+        out = sync(("map:",))
+        embed_few(out)
+        return out
+    except Exception as ex:  # pylint: disable=broad-except   (the next indexing writes them)
+        db.session.rollback()
+        _MAP_CHANGED[0] = True
+        log.warning("supagent: the map's search pieces: %s", str(ex)[:300])
+        return None
+
+
+def _map_pieces() -> Iterator[dict[str, Any]]:
+    """(0.10) The System map in the search: each approved value of a category, with its description, its other names,
+    the category it is drawn inside, what it is part of, and every approved link it has, both ways, with the link's
+    short and long explanations, so that a search for a part, or for how parts connect, finds the map's own words."""
+    from supagent.knowledge.facets import PART_OF, inside, part_of_map
+    from supagent.models import Facet, Link
+
+    values = {f.id: f for f in db.session.query(Facet).filter(Facet.status == "approved")}
+    if not values:
+        return
+    nest = inside()
+    parents = part_of_map()
+    links: dict[int, list[tuple[Any, int, bool]]] = {}
+    for x in db.session.query(Link).filter(Link.status == "approved", Link.kind != PART_OF,
+                                           Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%")).order_by(Link.id):
+        try:
+            a, b = int(x.a_ref.split(":", 1)[1]), int(x.b_ref.split(":", 1)[1])
+        except (ValueError, IndexError):
+            continue
+        if a in values and b in values and a != b:
+            links.setdefault(a, []).append((x, b, True))
+            links.setdefault(b, []).append((x, a, False))
+    for fid, f in values.items():
+        cat = f.facet
+        lines = [f"{cat} {f.value}" + (f" (a {cat} inside a {nest[cat]})" if nest.get(cat) else "")]
+        if (f.description or "").strip():
+            lines.append(f.description.strip())
+        others = [str(x) for x in (f.synonyms or []) if str(x).strip()]
+        if others:
+            lines.append("Also called: " + ", ".join(others[:20]))
+        ups = [values[i].value for i in parents.get(fid, []) if i in values]
+        if ups:
+            lines.append("Part of: " + ", ".join(ups[:20]))
+        downs = [values[i].value for i, ps in parents.items() if fid in ps and i in values]
+        if downs:
+            lines.append("Has as parts: " + ", ".join(sorted(downs)[:40]))
+        for x, other, out in links.get(fid, [])[:80]:
+            o = values[other]
+            verb = str(x.kind).replace("_", " ")
+            head = f"{f.value} {verb} {o.value}" if out else f"{o.value} {verb} {f.value}"
+            if x.both_ways:
+                head += " (both ways)"
+            words = " ".join(t for t in ((x.note or "").strip(), (x.detail or "").strip()) if t)
+            lines.append(f"- {head}" + (f": {words}" if words else ""))
+        yield {"ref": f"map:{fid}", "kind": "map", "title": f"System map: {cat} {f.value}", "text": "\n".join(lines)}
 
 
 def _filters_text(params: dict) -> str:
@@ -414,7 +582,7 @@ def _mcp_pieces() -> Iterator[dict[str, Any]]:
 
 KINDS = (("object:", _object_pieces), ("entry:", _entry_pieces), ("recipe:", _recipe_pieces),
          ("memory:", _memory_pieces), ("doc:", _doc_pieces), ("context:", _context_pieces),
-         ("superset:", _superset_pieces), ("mcp:", _mcp_pieces), ("note:", _note_pieces))
+         ("superset:", _superset_pieces), ("mcp:", _mcp_pieces), ("note:", _note_pieces), ("map:", _map_pieces))
 
 
 def pieces(prefixes: tuple[str, ...] | None = None) -> Iterator[dict[str, Any]]:
@@ -569,7 +737,21 @@ def embed_pending(limit: int | None = None) -> dict[str, Any]:
 
 
 def index_knowledge() -> dict[str, Any]:
-    out: dict[str, Any] = {"sync": sync()}
+    out: dict[str, Any] = {}
+    try:                                       # what the documents state (0.10): the units whose text changed
+        from supagent.knowledge import understand
+
+        if settings.get("knowledge.understand"):
+            out["understand"] = understand.run(reason="index")
+            if settings.get("knowledge.propose"):    # what they state, proposed for the categories and the map
+                from supagent.knowledge.proposals import propose
+
+                out["proposed"] = propose()
+    except Exception as ex:  # pylint: disable=broad-except   (the search's pieces go on)
+        db.session.rollback()
+        log.warning("supagent: the documents' facts: %s", ex)
+        out["understand"] = {"error": str(ex)[:300]}
+    out["sync"] = sync()
     try:
         out["embed"] = embed_pending()
     except Exception as ex:  # pylint: disable=broad-except

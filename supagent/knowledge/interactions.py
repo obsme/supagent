@@ -247,22 +247,42 @@ def run(llm: Any, seconds: float = 600.0, limit: int = 50, again: bool = False) 
     return out
 
 
+# (0.10.1) the explanations' own words: what each kind of link is (the reading's TOOL keeps SHORT_SAYS, LONG_SAYS)
+EXPLAIN_SHORT_SAYS = ("what the interaction is, in a few words, from the first part's side and in this interaction's "
+                      "own terms: for a flow (calls, reads from, sends data to, depends on, triggers) what it waits "
+                      "for, reads, sends or uses; for runs on, what the first part is or does on that place (its kind "
+                      "or role, as known); for monitors, what it watches")
+EXPLAIN_LONG_SAYS = ("what an investigation does when it follows this interaction, in two or three sentences: what to "
+                     "check on the second part, in the same window and for the same perimeter (a flow: its runs, its "
+                     "health, its delivery, its errors; a place the first runs on: the place's health, resources, "
+                     "restarts, network; a part the first monitors: whether it is still seen), and what a problem there "
+                     "does to the first part (late, slower, failing, blind); what the text says only, about these two "
+                     "parts only")
 EXPLAIN_TOOL = {"type": "function", "function": {
     "name": "explanations",
     "description": "The explanations of the interactions given, by their number.",
     "parameters": {"type": "object", "properties": {"explanations": {"type": "array", "items": {
         "type": "object", "properties": {
             "n": {"type": "integer", "description": "the number of the interaction"},
-            "short": {"type": "string", "description": SHORT_SAYS},
-            "long": {"type": "string", "description": LONG_SAYS}},
+            "short": {"type": "string", "description": EXPLAIN_SHORT_SAYS},
+            "long": {"type": "string", "description": EXPLAIN_LONG_SAYS}},
         "required": ["n", "short", "long"]}}}, "required": ["explanations"]}}}
 EXPLAIN_SYSTEM = ("You explain the interactions of an architecture map to the people and the agent who investigate "
                   "problems on it. For each interaction (a first part, how it interacts, a second part, what is known "
                   "of both and the text that states it, when there is one), write a short explanation (a few words, "
-                  "from the first part's side: what it waits for, reads, sends, uses) and a long one (two or three "
-                  "sentences: what to check on the second part when an investigation follows this interaction, in "
-                  "the same window and for the same perimeter, and what a problem there does to the first part). "
-                  "Only what is known: no figure, no name that is not given. Call explanations once.")
+                  "from the first part's side) and a long one (two or three sentences: what to check on the second "
+                  "part when an investigation follows this interaction, in the same window and for the same "
+                  "perimeter, and what a problem there does to the first part). By kind: a flow (calls, reads from, "
+                  "sends data to, depends on, triggers): what the first waits for, reads, sends or uses from the "
+                  "second; runs on: the second is the place the first runs on (a server, a host, a group of servers, "
+                  "a cluster): what the first is or does there, and the place's health, resources and restarts to "
+                  "check; monitors: what the first watches on the second, and that a gap in the first's data may "
+                  "mean the second is no longer seen rather than down. Each interaction is explained on its own, "
+                  "from its two parts only: never name a part that is not one of its two parts (the other "
+                  "interactions of the list are not about it). Say what the first part is or does in its own terms (its "
+                  "kind or role, from what is known of it); never copy the wording of these instructions nor of "
+                  "another interaction's explanation. Only what is known: no figure, no name that is not given. Call "
+                  "explanations once.")
 
 
 def _context_lines(names: list[str], pages: list[tuple[str, str]], chars: int = 600) -> str:
@@ -291,10 +311,51 @@ def unexplained(limit: int = 200) -> list[Any]:
     return q.limit(limit).all()
 
 
-def explain(llm: Any, seconds: float = 300.0, limit: int = 200) -> dict[str, Any]:
+AGAIN_KEY = "explain_again_after"   # (0.10.1) supagent_meta: the last link whose AI explanations were written again
+
+
+def _again_key(kinds: tuple[str, ...] | None) -> str:
+    return AGAIN_KEY + (":" + ",".join(sorted(kinds)) if kinds else "")      # (a pass per set of kinds)
+
+
+def written_by_the_ai(limit: int = 200, kinds: tuple[str, ...] | None = None) -> list[Any]:
+    """(0.10.1) The interactions between parts whose explanations the AI wrote alone (explained_by "llm": never an
+    admin's words, nor a link an admin and the AI explained together), after the last one written again, by id;
+    `kinds`: of these kinds only (runs_on, monitors: the ones an older prompt explained as flows)."""
+    from supagent.models import Link, Meta
+
+    row = db.session.get(Meta, _again_key(kinds))
+    after = int(row.value) if row is not None and str(row.value or "").isdigit() else 0
+    q = (db.session.query(Link).filter(Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%"), Link.kind != "part_of",
+                                       Link.status.in_(("approved", "proposed")), Link.explained_by == "llm",
+                                       Link.id > after))
+    if kinds:
+        q = q.filter(Link.kind.in_(list(kinds)))
+    return q.order_by(Link.id).limit(limit).all()
+
+
+def _again_after(link_id: int | None, kinds: tuple[str, ...] | None = None) -> None:
+    from supagent.models import Meta
+
+    key = _again_key(kinds)
+    row = db.session.get(Meta, key)
+    if link_id is None:
+        if row is not None:
+            db.session.delete(row)
+    elif row is None:
+        db.session.add(Meta(key=key, value=str(link_id)))
+    else:
+        row.value = str(link_id)
+    db.session.commit()
+
+
+def explain(llm: Any, seconds: float = 300.0, limit: int = 200, again: bool = False,
+            kinds: tuple[str, ...] | None = None) -> dict[str, Any]:
     """The short and long explanations of the interactions that lack them (see the module), EXPLAIN_BATCH at a
     time, until `seconds`; the next run continues. What an admin wrote is kept: only an empty one is filled
-    (and the link says the AI wrote a part of it)."""
+    (and the link says the AI wrote a part of it). `again` (0.10.1): the explanations the AI wrote alone are
+    written again in place (an older prompt explained every kind as a flow), batch by batch, each kept as it was
+    when the LLM gives nothing for it; the next run with `again` continues after the last one, until all are done."""
     from supagent.knowledge.brief import _graph
     from supagent.knowledge.stopping import check
     from supagent.knowledge.sysmap import INTERACTIONS
@@ -302,8 +363,13 @@ def explain(llm: Any, seconds: float = 300.0, limit: int = 200) -> dict[str, Any
 
     t0 = time.time()
     out: dict[str, Any] = {"explained": 0, "calls": 0}
-    todo = unexplained(limit)
+    todo = written_by_the_ai(limit, kinds) if again else unexplained(limit)
+    if again:
+        out["written_again"] = 0
     if not todo:
+        if again:
+            _again_after(None, kinds)
+            out["done"] = True
         return out
     facets = {f.id: f for f in db.session.query(Facet).filter(
         Facet.id.in_({int(r.split(":", 1)[1]) for x in todo for r in (x.a_ref, x.b_ref) if r.split(":", 1)[1].isdigit()}))}
@@ -347,6 +413,11 @@ def explain(llm: Any, seconds: float = 300.0, limit: int = 200) -> dict[str, Any
             x = batch[n - 1]
             short = " ".join(str(e.get("short") or "").split())[:SHORT_CHARS]
             long_ = " ".join(str(e.get("long") or "").split())[:LONG_CHARS]
+            if again:                         # (only the AI's own: both written again, else both kept)
+                if short and long_ and x.explained_by == "llm":
+                    x.note, x.detail = short, long_
+                    out["written_again"] += 1
+                continue
             changed = False
             if short and not x.note:
                 x.note, changed = short, True
@@ -358,7 +429,13 @@ def explain(llm: Any, seconds: float = 300.0, limit: int = 200) -> dict[str, Any
                 x.explained_by = who if who == "llm" or who.endswith(" and the AI") else f"{who} and the AI"
                 out["explained"] += 1
         db.session.commit()
-    if out["explained"]:
+        if again:
+            _again_after(max(x.id for x in batch), kinds)
+    if again and "left" not in out and "error" not in out:
+        if len(todo) < limit:                 # every one written again: the next --again starts from the first
+            _again_after(None, kinds)
+            out["done"] = True
+    if out["explained"] or out.get("written_again"):
         from supagent.knowledge.freshness import touch
 
         touch()

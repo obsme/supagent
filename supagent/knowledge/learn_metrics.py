@@ -57,7 +57,7 @@ RE2_SPECIAL = re.compile(r"([\\.+*?()|\[\]{}^$])")
 def name_regex(names: list[str]) -> str:
     """An alternation of metric names for a PromQL regex matcher, inside a double-quoted string:
     RE2 metacharacters escaped (a dot in "http.server.duration"), then every backslash doubled for
-    the string (PromQL refuses "\." as an unknown escape sequence)."""
+    the string (PromQL refuses "\\." as an unknown escape sequence)."""
     rx = "|".join(RE2_SPECIAL.sub(r"\\\1", n) for n in names)
     return rx.replace("\\", "\\\\").replace('"', '\\"')
 

@@ -46,7 +46,7 @@ Examples:
   {"question": "How many jobs of a given application failed on a given day?", "title": "Failed jobs per application", "reusable": true, "same_as": null}
   "why is job 202609253742945492 failing?" ->
   {"question": "Why did a given job fail, with its error details?", "title": "Failed job details", "reusable": true, "same_as": null}
-  earlier "failed jobs by application yesterday", last "and only on srv-emea-001?" ->
+  earlier "failed jobs by application yesterday", last "and only on web-01?" ->
   {"question": "Failed jobs by application on a given day for a given server", "title": "Failed jobs by server", "reusable": true, "same_as": null}
 Write in the language of the user's messages. Answer with the JSON only."""
 MONTH = (r"(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|"

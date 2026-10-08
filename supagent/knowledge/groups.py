@@ -296,7 +296,7 @@ def clock(value: str) -> dt.datetime:
     try:
         return dt.datetime.fromisoformat(str(value).strip().replace("T", " ")).replace(tzinfo=None)
     except ValueError as ex:
-        raise GroupsError(f'not a time: {value!r} (write "2026-09-24 02:00")') from ex
+        raise GroupsError(f'not a time: {value!r} (write "2030-01-15 02:00")') from ex
 
 
 def lit(t: dt.datetime) -> str:

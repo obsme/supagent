@@ -46,8 +46,7 @@ def test_one_slip_is_read_as_the_known_word(ctx, typed, expected):
 def test_known_short_names_and_first_letters_stay(ctx):
     assert read("refund payment gateway", WORDS)["changes"] == []        # known as typed
     assert read("rfnd tkt", WORDS)["changes"] == []                       # under 5 letters: too many neighbours
-    assert read("node_cpu_secnds_total", WORDS)["changes"] == []          # a name: its own near-spelling search
-    assert read("paymentGatewy", WORDS)["changes"] == []                  # camelCase: a name
+    assert read("paymentGatewy", WORDS)["changes"] == []                  # camelCase: one word, nothing one slip away
     assert read("rickets", WORDS)["changes"] == []                        # the first letter is never the slip
     assert read("zzzzzzzz", WORDS)["changes"] == []                       # nothing near: searched as typed
 
@@ -163,3 +162,89 @@ def test_a_slip_in_the_stem_is_read_in_the_stem(ctx):
     assert got["changes"] == [{"typed": "paymnets", "read": "payments"}]
     got = read("deducing", {"deduce": 4})                                     # the stemmer's deduc: deduce
     assert got["changes"] == [{"typed": "deducing", "read": "deduce"}]
+
+
+def near_look(words: dict[str, int], near: dict[str, list]):
+    """The knowledge with its words as written too: the nearest ones to each word asked (as the store's trigram index
+    gives them, nearest first)."""
+    from supagent.knowledge.spelling import Lookup
+
+    return Lookup(lambda stems: {s for s in stems if s in words},
+                  lambda stems: {s: words[s] for s in stems if s in words},
+                  lambda pairs: set(), lambda ws: {w: near[w] for w in ws if w in near})
+
+
+def test_two_slips_read_as_the_nearest_written_word(ctx):
+    """(0.10) A word no single slip reads: the word of the pieces as written near it (pg_trgm), two slips at most for a
+    word of 7 letters or more, one for a shorter one (a key far away), the same first letter, held by a piece the user
+    may see; the fewest slips first, then the one most pieces hold."""
+    from supagent.knowledge.spelling import read as r, slips
+
+    assert slips("aggrergatioon", "aggregation") == 2 and slips("ttansefrred", "transferred") == 2
+    assert slips("aggrrergatioonn", "aggregation") is None and slips("form", "from") == 1
+    words = {"aggreg": 30, "transferr": 4, "deploy": 20, "aggregate": 9, "tradeoff": 2}
+    near = {"aggrergatioon": [("aggregate", "aggregate", 9, 0.41), ("aggregation", "aggreg", 30, 0.53)],
+            "ttansefrred": [("tradeoffs", "tradeoff", 2, 0.21), ("transferred", "transferr", 4, 0.26)],
+            "deplxy": [("deploy", "deploy", 20, 0.4)], "dwplxy": [("deploy", "deploy", 20, 0.2)],
+            "aggrrergatioonn": [("aggregation", "aggreg", 30, 0.5)],
+            "gransferred": [("transferred", "transferr", 4, 0.8)],
+            "hiddenword": [("hiddenwork", "hiddenwork", 3, 0.7)]}
+    look = near_look(words, near)
+    got = r("aggrergatioon errors", look)
+    assert got["query"] == "aggregation errors" and got["changes"] == [{"typed": "aggrergatioon", "read": "aggregation"}]
+    assert r("files ttansefrred twice", look)["query"] == "files transferred twice"
+    assert r("deplxy failed", look)["query"] == "deploy failed"              # one slip, a key far away: read
+    assert r("dwplxy failed", look)["changes"] == []                         # two slips in 6 letters: as typed
+    assert r("aggrrergatioonn", look)["changes"] == []                       # three slips: as typed
+    assert r("gransferred", look)["changes"] == []                           # another first letter: never
+    assert r("hiddenword", look)["changes"] == []                            # no piece the user may see holds it
+    assert r("aggrergatioon", near_look(words, {}))["changes"] == []         # nothing near: as typed
+
+
+def test_without_the_written_words_one_slip_only(ctx):
+    from supagent.knowledge.spelling import read as r
+
+    assert r("ttansefrred files", look({"transferr": 4}))["changes"] == []  # no store: the slips one away only
+
+
+def test_maybe_misspelled_only_when_near_a_written_word(ctx):
+    """(0.10) "unknown": a word no piece holds that is near a word of the pieces (two slips at most) but not read as
+    it; a real word the pieces never use, near nothing, is nothing to correct."""
+    from supagent.knowledge.spelling import read as r
+
+    near = {"according": [], "dwplxy": [("deploy", "deploy", 20, 0.2)],
+            "ttansefrred": [("transferred", "transferr", 4, 0.26)]}
+    look = near_look({"deploy": 20, "transferr": 4}, near)
+    got = r("According to dwplxy logs", look)
+    assert got["changes"] == [] and got["unknown"] == ["dwplxy"]          # 6 letters, two slips: maybe misspelled
+    assert r("ttansefrred files", look)["unknown"] == []                  # read: not unknown
+
+
+def test_two_typing_slips_only(ctx, monkeypatch):
+    """(0.10) NEAR_TYPING (on): a word read two slips away only through two typing slips (as edits1 reads one: a key next to
+    the right one, a letter typed twice, one missing, two swapped), not any two changes: a real word the pieces never
+    use (communist) is not read as a word of theirs (community)."""
+    from supagent.knowledge import spelling
+    from supagent.knowledge.spelling import read as r
+
+    near = {"communist": [("community", "community", 40, 0.5)],
+            "ttansefrred": [("transferred", "transferr", 4, 0.26)]}
+    look = near_look({"community": 40, "transferr": 4}, near)
+    monkeypatch.setattr(spelling, "NEAR_TYPING", False)
+    assert r("communist party", look)["changes"][0]["read"] == "community"       # any two changes
+    monkeypatch.setattr(spelling, "NEAR_TYPING", True)                          # (the default)
+    got = r("communist party", look)
+    assert got["changes"] == [] and got["unknown"] == ["communist"]
+    assert r("ttansefrred files", look)["query"] == "transferred files"         # two typing slips: read
+
+
+def test_the_words_inside_a_typed_name(ctx, monkeypatch):
+    """(0.10) READ_NAMES (on): a word inside a name typed with a slip is read as the others (the name itself is still
+    searched as typed by the near spelling of the names); off: names are left as typed."""
+    from supagent.knowledge import spelling
+
+    words = {"second": 30, "node": 40, "cpu": 50, "total": 60}
+    got = read("node_cpu_secnds_total", words)
+    assert got["query"] == "node_cpu_seconds_total" and got["changes"] == [{"typed": "secnds", "read": "seconds"}]
+    monkeypatch.setattr(spelling, "READ_NAMES", False)
+    assert read("node_cpu_secnds_total", words)["changes"] == []

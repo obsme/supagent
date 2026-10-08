@@ -179,8 +179,8 @@ answer), or an earlier step (q1). Never add a condition nobody gave: no status, 
 your own. The team's rules are applied by code: do not repeat them, and never ask about one: a question that \
 names what a rule leaves out (in UAT) lifts it, and code sees that.
 
-Period: from the question ("on 23 September" = 2026-09-23 00:00 to 2026-09-24 00:00; "the week of 14 to 20 \
-September" = 2026-09-14 00:00 to 2026-09-21 00:00; hours of a day as said), its source the question's words, on \
+Period: from the question ("on 15 January" = 2030-01-15 00:00 to 2030-01-16 00:00; "the week of 7 to 13 \
+January" = 2030-01-07 00:00 to 2030-01-14 00:00; hours of a day as said), its source the question's words, on \
 every step. Two periods to compare: one step for each. A day after now may have data: the table's time range says.
 
 Measures: an index counts documents (count), or sums, averages, min, max a field; a counter metric: increase (how \

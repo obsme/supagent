@@ -242,3 +242,15 @@ def test_the_logs_of_the_inputs_are_read_by_the_system(app, monkeypatch):
     with app.app_context():
         quiet = A.Agent._upstream_logs(found, {"start": "2026-09-07 00:00", "end": "2026-09-08 04:40"})
     assert "nothing new over the window" in quiet and "no free slot" not in quiet
+
+
+def test_a_question_of_connections_gets_the_interactions_and_a_server_what_runs_on_its_group(system):  # noqa: F811
+    """(0.10) A question about how parts are connected (where, runs on, depends, down...) is answered from the map's
+    interactions; a server says what runs on the groups it is part of."""
+    from supagent.knowledge.brief import brief_block, connection_question
+
+    assert connection_question("What runs on srv-1?") and connection_question("Where do the invoices go?")
+    assert connection_question("Si la base tombe, quel service est touché ?")
+    assert not connection_question("How many invoices yesterday?")
+    block = brief_block("What runs on srv-1?", full=True)
+    assert "What runs on it through its groups" in block and "Invoicing" in block and "grid-a" in block

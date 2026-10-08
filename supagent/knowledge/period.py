@@ -270,6 +270,37 @@ def day_ranges(question: str, today: dt.date) -> list[tuple[dt.datetime, dt.date
     return out
 
 
+TODAY_PART = re.compile(r"\bthis (?:morning|afternoon|evening)\b|\btonight\b|\bce (?:matin|soir)\b|"
+                        r"\bcet apr[èe]s-midi\b", re.I)
+
+
+def period_window(text: str, today: dt.date) -> tuple[dt.datetime, dt.datetime] | None:
+    """[start, end) of the days a question's period covers: its named days, its spans of days, a part of today ("this
+    morning"); None when its period is not a set of days (the last hours, the week before...)."""
+    spans = ranges_named(text, today)
+    days = days_named(text, today)
+    if not days and TODAY_PART.search(text or ""):
+        days = [today]
+    starts = [a for a, _b in spans] + [dt.datetime(d.year, d.month, d.day) for d in days]
+    ends = [b for _a, b in spans] + [dt.datetime(d.year, d.month, d.day) + dt.timedelta(days=1) for d in days]
+    return (min(starts), max(ends)) if starts else None
+
+
+def window_reading(sql: str, window: tuple[dt.datetime, dt.datetime]) -> str | None:
+    """How a query's dates stand to a chat's window of days: "in" when it starts inside it, or at most half a day
+    before (the evening before a morning); "wider" when it starts more than a day before it (it reads the days before
+    as well: another day's events counted as this one's); None otherwise (no date written, or another day close by)."""
+    lits = _literals(sql)
+    if not lits:
+        return None
+    lo = min(lits)
+    if window[0] - dt.timedelta(hours=12) <= lo < window[1]:
+        return "in"
+    if lo < window[0] - dt.timedelta(days=1):
+        return "wider"
+    return None
+
+
 def has_period(question: str, today: dt.date) -> bool:
     return bool(days_named(question, today) or PERIOD_WORDS.search(question or ""))
 
@@ -723,6 +754,11 @@ def refusal(question: str, tool: str, args: dict, today: dt.date | None = None,
         low, high = min(lits), max(lits)
         if (high.hour, high.minute) == (23, 59):        # "... AND '20 23:59(:59)'": the end of the 20th, which is
             high = dt.datetime(high.year, high.month, high.day) + dt.timedelta(days=1)   # the span's own end
+        elif (high.hour, high.minute) == (0, 0) and any(       # BETWEEN ... AND '20' (or <= '20') on a field of
+                (m.group(1) or m.group(3)) in day_fields and    # days: the 20th whole, the span's own end (0.9.8:
+                dt.date.fromisoformat(m.group(2) or m.group(4)) == high.date()   # sent back six times, the calls
+                for m in INCLUSIVE_END.finditer(sql)):          # of the answer used up)
+            high = high + dt.timedelta(days=1)
         day = dt.timedelta(days=1)                      # the span with a boundary a few hours off, not another span
         near = [sp for sp in spans if abs(low - sp[0]) <= day and abs(high - sp[1]) <= day]
         if near and not any(low == a and high == b for a, b in spans):

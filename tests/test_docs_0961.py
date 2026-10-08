@@ -260,3 +260,20 @@ def test_a_dsn_without_a_scheme_and_a_named_key_are_masked(ctx):
     for kept in ("email me at someone@example.com", "mailto:ops@example.com", "ssh git@host:repo.git",
                  "cache_key = make_key(x)", 'primary_key = "id"'):
         assert mask_secrets(kept)[0] == kept
+
+
+def test_a_connection_strings_password_and_a_secret_default_are_masked(ctx):
+    """(0.10) A connection string's password with any character up to the next ; (ADO.NET, Npgsql, ODBC), a secret
+    given as the default of an environment lookup; an address given as a default stays."""
+    from supagent.knowledge.docs import mask_secrets
+
+    for text, masked in [
+        ('"Main": "Server=s1;Database=x;User Id=u;Password=Q!w2e3r4;Encrypt=True"',
+         '"Main": "Server=s1;Database=x;User Id=u;Password=***;Encrypt=True"'),
+        ("ConnectTimeout=30;Pwd=a#b%c;Database=x", "ConnectTimeout=30;Pwd=***;Database=x"),
+        ('TOKEN = os.environ.get("API_TOKEN", "tok_live_ABCDEF123")', 'TOKEN = os.environ.get("API_TOKEN", "***")'),
+        ("pw = ENV.fetch('DB_PASSWORD', 'hunter2hunter')", "pw = ENV.fetch('DB_PASSWORD', \"***\")"),
+    ]:
+        assert mask_secrets(text)[0] == masked, text
+    for kept in ['url = os.environ.get("RATES_URL", "https://api.example")', "Password=***;"]:
+        assert mask_secrets(kept)[0] == kept

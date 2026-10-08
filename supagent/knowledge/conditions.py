@@ -119,7 +119,7 @@ class Support:
         except (TypeError, ValueError):
             names.append(str(content or "")[:20000])
         words = [w for w in " ".join(names).lower().split()          # (its numbers left out: a token that is only a
-                 if not re.fullmatch(r"[-+(]?\d[\d,.]*%?[)]?[,.;:]?", w)]   #  number; xe-0/0/2 is a name)
+                 if not re.fullmatch(r"[-+(]?\d[\d,.]*%?[)]?[,.;:]?", w)]   #  number; ge-1/0/7 is a name)
         self.text += "\n" + " ".join(words)
 
     def add_result(self, content: str, query: str = "") -> None:

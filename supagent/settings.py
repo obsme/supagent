@@ -143,6 +143,19 @@ SPECS: list[Spec] = [
     Spec("agent.inputs_walk", True, "bool", "Investigations: when compare_groups finds the rows late before they "
          "were ready, the inputs of the parts in its scope (two steps up the system map: what they depend on, read "
          "from, receive data from) are given with its result"),
+    Spec("agent.shown_sql_check", True, "bool", "An answer that shows a query as the one behind its figures, when no "
+         "call ran it (its figures came from other queries), is sent back once to run it or show the ones run"),
+    Spec("agent.outer_join_check", True, "bool", "A query whose WHERE puts a condition on the table a LEFT JOIN keeps "
+         "optional (the rows without a match dropped, as by an inner join) is sent back before it runs, with the two "
+         "ways to write it; sent again unchanged, it runs"),
+    Spec("agent.value_elsewhere", True, "bool", "A query that found nothing for a value its field does not hold: "
+         "the other fields of its tables that hold it are named (\"filter on that field\"), and the answer is asked "
+         "for the query again, not for a count of 0"),
+    Spec("agent.share_join_check", True, "bool", "A share computed over an inner join of the part's table and the "
+         "whole's (the whole kept only its rows that have a part) is sent back once"),
+    Spec("agent.period_window_check", True, "bool", "A follow-up that names no period goes on with the chat's: when "
+         "its queries read from more than a day before the chat's days and none starts inside them, the answer is "
+         "sent back once to keep them (not when the question asks for a comparison or what is usual)"),
     Spec("agent.with_parts", True, "bool", "Investigations: a part named to check_health or records_about that "
          "the system map says is made of other parts (a pool and its servers, a cluster and its nodes; 16 at most) is "
          "looked at with them: their health breaches (said as found through it) and their records (changes, "
@@ -347,6 +360,8 @@ SPECS: list[Spec] = [
     Spec("search.enabled", True, "bool", "Give the agent the knowledge relevant to each question (dictionary, "
          "notes, rules, learned answers, memories, documents)"),
     Spec("search.top_k", 6, "int", "Pieces of knowledge given with each question"),
+    Spec("search.terms_uncapped", True, "bool", "The terms of a glossary and the rules of an entry are each a piece of "
+         "their own in a search's results (the cap of two pieces per page applies to pages and notes only)"),
     Spec("search.spelling", True, "bool", "Read a searched word that no piece of the knowledge holds (a letter missing, "
          "one too many, two swapped, a space inside a word, two words run together) as the known word one edit away; "
          "the search says what it read otherwise"),
@@ -395,6 +410,18 @@ SPECS: list[Spec] = [
     Spec("rerank.weight", 1.0, "float", "How much the reranker's order counts against the search's (1: as much; "
          "2: twice as much)"),
     Spec("rerank.max_chars", 1500, "int", "Characters of each piece the reranker reads (about 512 tokens)"),
+    Spec("rerank.judge_floor", "", "str", "The reranker as the search's judge: a best piece scored under this (the "
+         "reranker's own scale, e.g. 0.2) makes the search weak (search.rewrite); empty: the reranker does not judge"),
+    Spec("search.rewrite", "weak", "choice", "The agent's help for a weak search (a word near the knowledge's words "
+         "that nothing reads, or the judge's low score): weak = the LLM writes the question again once (spelling fixed, "
+         "names kept, a few other words) and both searches are fused (about 5% of questions; on 2,300 documentation "
+         "pages, questions with two words two slips away found 80% -> 82%, none lost); off = never",
+         choices=("off", "weak")),
+    Spec("search.rewrite_seconds", 4.0, "float", "Seconds the LLM may take to write a weak search again (later: the "
+         "first search alone)"),
+    Spec("search.judge_meaning_floor", "", "str", "Without a reranker: the closest of the first pieces by meaning under "
+         "this cosine (the embedding model's scale, e.g. 0.45 for bge-m3) makes the search weak (search.rewrite); "
+         "empty: not used"),
     Spec("embed.query_instruction", "", "str", "Text put before a question when it is embedded, for models trained "
          "with one (Qwen3-Embedding: 'Instruct: Given a question about the data, retrieve the metrics, tables and "
          "knowledge that answer it\\nQuery:'); empty: the question alone"),
@@ -405,6 +432,23 @@ SPECS: list[Spec] = [
          "say otherwise: Documents and sites, Edit); off: the connection is encrypted but the site is not checked"),
     Spec("docs.ca_bundle", "", "str", "CA file (PEM, a path on every Superset host) to trust for the documents' sites, "
          "e.g. the company's root CA (empty: the system's CAs; a document can give its own)"),
+    Spec("knowledge.understand", True, "bool", "Read what the documents and the code state (0.10), without an LLM: "
+         "the services a repository calls, the databases it writes and reads, the metrics it registers, the indices "
+         "a shipper writes, a diagram's arrows, a page's sentences and tables; each fact with the line that says it, "
+         "for the System map, the Context and the agent (only the units whose text changed are read again)"),
+    Spec("knowledge.understand_catalog", True, "bool", "The catalog's guides, notes, rules, definitions and glossaries "
+         "read with the documents (0.10): the links between parts they state"),
+    Spec("knowledge.understand_llm", False, "bool", "The LLM reads the wiki's pages and the prose documents too (0.10): "
+         "the links between parts they state in words the rules do not read, each kept only with the page's own words "
+         "that state it (ranked below code, configuration and diagrams); off: the rules alone"),
+    Spec("knowledge.llm_units", 200, "int", "Pages and documents the LLM reads per learning run at most (the others at "
+         "the next run; a page is read again only when its text changes)"),
+    Spec("knowledge.llm_seconds", 120, "int", "Seconds the LLM may take to read one page"),
+    Spec("knowledge.propose", True, "bool", "Propose what the documents and the code state (0.10) for the "
+         "categories and the System map, each waiting in To review with where it was read: the parts they name (a "
+         "service an application, a database, a cache or a tool a component, a host a server), the links between "
+         "them, a part's indices and metrics; compared with what exists (stated again: confirmed; the other way round "
+         "or no longer stated: removal proposed); nothing a person made or refused is changed"),
     Spec("docs.max_kb", 2048, "int", "Largest page or file read (KB)"),
     # ---- memory learned from the chats
     Spec("memory.enabled", True, "bool", "Learn preferences, rules and facts from the chats"),

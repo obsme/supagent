@@ -84,7 +84,7 @@ CODE_FILES = (".py", ".pyi", ".java", ".kt", ".kts", ".scala", ".groovy", ".grad
               ".exs", ".erl", ".clj", ".hs", ".ml", ".sh", ".bash", ".zsh", ".ksh", ".ps1", ".psm1", ".bat", ".cmd",
               ".tf", ".tfvars", ".hcl", ".proto", ".graphql", ".gql", ".css", ".scss", ".less", ".toml", ".j2",
               ".jinja", ".tpl", ".tmpl", ".dockerfile", ".cfg", ".ini", ".conf", ".properties", ".xml", ".sql",
-              ".yaml", ".yml", ".json")
+              ".yaml", ".yml", ".json", ".service", ".timer", ".socket", ".env.example")
 CODE_NAMES = {"dockerfile", "containerfile", "makefile", "jenkinsfile", "vagrantfile", "procfile", "gemfile",
               "rakefile", "build", "workspace", "cmakelists.txt"}
 SKIP_DIRS = {"node_modules", "vendor", "dist", "build", "target", "out", "bin", "obj", ".git", "__pycache__",
@@ -92,6 +92,10 @@ SKIP_DIRS = {"node_modules", "vendor", "dist", "build", "target", "out", "bin", 
              ".terraform", ".next", ".nuxt"}
 SKIP_FILE = re.compile(r"(\.min\.(js|css)|\.map|\.lock|(^|/)(package-lock\.json|npm-shrinkwrap\.json|"
                        r"pnpm-lock\.yaml|go\.sum))$", re.I)
+# (0.10) Ansible's files without an extension: the inventories (hosts, inventory, hosts.example...) and the variables
+# of groups and hosts (group_vars/<group>, host_vars/<host>, or a folder of them)
+ANSIBLE_FILE = re.compile(r"(^|/)((hosts|inventory)([._-][\w.-]*)?|(group|host)_vars/[^/.]+(/[^/.]+)?|"
+                          r"inventor(y|ies)/([^/]+/)*[^/.]+)$", re.I)
 # files that hold keys or passwords by their nature: never read
 KEY_FILE = re.compile(r"(^|/)(\.env(\.[\w.-]+)?|[^/]*\.(pem|key|p12|pfx|jks|keystore|crt|cer|der|kdbx|ovpn)|"
                       r"id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|"
@@ -110,10 +114,103 @@ SECRETS = [
     # a key held by a name that says so (RATES_KEY, apiKey, signingKey...) and given a literal value
     (re.compile(r"(?i)(\b[\w.-]*(?:_key|key)\b[\"']?\s*(?:=>|:=|[:=])\s*)(\"[^\"\n$]{8,}\"|'[^'\n$]{8,}'|"
                 r"`[^`\n$]{8,}`)"), r"\1***"),
+    # a connection string's password (ADO.NET, Npgsql, ODBC: Password=...; Pwd=...): any character up to the next ;
+    (re.compile(r"(?i)((?:^|[;\"'])\s*(?:password|pwd)=)(?!\*\*\*)([^;\"'\s]{3,})", re.M), r"\1***"),
+    # a secret given as the default of an environment lookup: os.environ.get("API_TOKEN", "..."), getenv, ENV.fetch
+    (re.compile(r"(?i)(\b(?:getenv|environ\.get|env\.get|ENV\.fetch|System\.getenv|process\.env\.\w+\s*\?\?)"
+                r"\(?\s*[\"'][\w.-]*(?:password|passwd|pwd|secret|token|key|credential)[\w.-]*[\"']\s*,\s*)"
+                r"([\"'][^\"'\n]{4,}[\"'])"), r'\1"***"'),
     (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{16,}"), r"\1 ***"),
     (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|"
                 r"xox[baprs]-[A-Za-z0-9-]{10,})\b"), "***"),
 ]
+# (0.10) the names of a secret in configuration (an Ansible variable, an INI or .env key, a YAML key): any value they
+# are given is masked, however short (upassword: abc, auth_pass: "1ce24b6e", ansible_ssh_pass=x, password=12345)
+SECRET_WORD = re.compile(r"(?i)(password|passwd|passphrase|pwd|secret|token|credentials?|api[_-]?key|apikey|"
+                         r"access[_-]?key|private[_-]?key|(?:^|[_.-])pass(?:$|[_.-]))")
+# ... but not the name of a file, an address, a length or a reference that holds or describes it
+NOT_SECRET_NAME = re.compile(r"(?i)(?:^|[_.-]|(?<=[a-z]))(name|names|file|files|path|dir|ref|url|uri|length|policy|"
+                             r"type|mode|version|enabled|required|min|max|expiry|ttl|id|hash|algorithm|header|field|"
+                             r"env|source)$")
+NOT_A_VALUE = re.compile(r"(?i)^(true|false|yes|no|on|off|null|none|nil|~|str|int|bytes|string|bool|boolean|"
+                         r"optional|secretstr|any|undefined|required)$")
+# (0.10) a secret written in a sentence, in the languages teams write in: its label, a few words, a separator, the
+# value ("Mot de passe de l'administrateur : ...", "Passwort für Grafana: ...", "the API key is ...")
+PROSE_SECRET = re.compile(
+    r"(?i)(?P<head>\b(?:pass(?:word|wd|phrase)|pwd|secret|token|api[ _-]?key|access[ _-]?key|private[ _-]?key|"
+    r"mot de passe|mdp|passwort|kennwort|zugangsdaten|contrase[ñn]a|clave|senha|wachtwoord|parola d['’]ordine|"
+    r"has[łl]o|l[öo]senord|salasana|jeton|cl[ée] (?:d['’])?api|cl[ée] secr[èe]te)\b"
+    r"(?P<gap>[^\n:=.!?;|]{0,60}?)(?:\s*[:=]\s*|\s+(?:is|est|ist|es|è|é|era|was|war|vaut)\s+))"
+    r"(?P<value>\"[^\"\n]{3,}\"|'[^'\n]{3,}'|`[^`\n]{3,}`|[^\s\"'`<>|]{3,})")
+# the words around a secret's label that make it describe the secret, not give it (its expiry, its file...)
+NOT_SECRET_GAP = re.compile(r"(?i)\b(name|names|file|files|path|dir|ref|url|uri|length|policy|type|mode|version|"
+                            r"expiry|expires|ttl|id|hash|algorithm|header|field|rotation|age|lifetime|size|count|"
+                            r"format|location|endpoint|nom|fichier|chemin|longueur|durée|dauer|datei|pfad|länge)\b")
+
+
+def _prose_secret(m: re.Match) -> str:
+    """The value of a secret written in a sentence masked when it looks like a credential: a digit or a symbol in
+    it, or long and of mixed case; a plain word ("stored", "rotated"), a reference or a placeholder is kept."""
+    raw = m.group("value")
+    quoted = raw[:1] in "\"'`"
+    v = raw.strip("\"'`")
+    tail = "" if quoted else re.search(r"[.,;:!?)\]]*$", v).group(0)
+    v = v[:len(v) - len(tail)] if tail else v
+    if not v or v.startswith(("***", "<", "${", "{{", "$(", "%(", "/", "~", "./")) or "://" in v or \
+            NOT_A_VALUE.match(v) or v.lower().startswith(("vault", "env:", "secret/")) or \
+            NOT_SECRET_GAP.search(m.group("gap") or "") or re.search(r"[(\[{]", v):
+        return m.group(0)                                    # (a call, an index, a structure: code, not a value)
+    looks = bool(re.search(r"\d", v)) or bool(re.search(r"[^\w\s]", v)) or \
+        (len(v) >= 12 and bool(re.search(r"[a-z]", v)) and bool(re.search(r"[A-Z]", v)))
+    if not looks:
+        return m.group(0)
+    return m.group("head") + ("***" if not quoted else raw[0] + "***" + raw[0]) + tail
+
+
+CONFIG_LINE = re.compile(r"(?m)^(?P<head>[ \t]*#?[ \t]*(?:-[ \t]+)?[\"']?(?P<key>[A-Za-z_][\w.-]*)[\"']?[ \t]*"
+                         r"(?:=>|:=|[:=])[ \t]*)(?P<value>\"[^\"\n]*\"|'[^'\n]*'|[^\s#\"'][^\s#]*)(?=[ \t]*(?:#.*)?$)")
+INLINE_PAIR = re.compile(r"(?<![\w.$-])(?P<head>(?P<key>[A-Za-z_][\w.-]*)=)(?P<value>\"[^\"\n]*\"|'[^'\n]*'|"
+                         r"[^\s\"',;&)]+)")
+
+
+def _literal(value: str, inline: bool) -> bool:
+    """A secret's value written as it is (not a reference to it, not a type, not an expression)."""
+    v = value.strip().strip("\"'")
+    if not v or v.startswith(("***", "{{", "${", "$(", "%(", "<", "!", "lookup(", "vault")) or NOT_A_VALUE.match(v):
+        return False
+    if re.search(r"[(\[{]", v):
+        return False                                   # a call, an index, a structure: code
+    if inline and re.fullmatch(r"[A-Z][A-Z0-9_]+", v):
+        return False                                   # an environment variable's name (password=PGPASSWORD)
+    return True
+
+
+def _secret_value(m: re.Match, inline: bool = False) -> str:
+    key = m.group("key")
+    if not SECRET_WORD.search(key) or NOT_SECRET_NAME.search(key) or not _literal(m.group("value"), inline):
+        return m.group(0)
+    return m.group("head") + "***"
+
+
+def _secret_maps(text: str) -> tuple[str, int]:
+    """The values under a key that names secrets and holds a map (app_secrets:\\n  prod: 9bf8...): masked."""
+    out, depth, n = [], None, 0
+    for line in text.split("\n"):
+        ind = len(line.expandtabs()) - len(line.expandtabs().lstrip(" "))
+        if depth is not None:
+            if line.strip() and ind <= depth:
+                depth = None
+            else:
+                m = re.match(r"^([ \t]*(?:-[ \t]+)?[\"']?[\w.-]+[\"']?[ \t]*:[ \t]*)(\S.*?)[ \t]*$", line)
+                if m and not m.group(2).startswith(("{{", "***", "#", "|", ">", "&", "*")) and \
+                        _literal(m.group(2), False):
+                    line, n = m.group(1) + "***", n + 1
+        if depth is None:
+            m = re.match(r"^([ \t]*)(?:-[ \t]+)?[\"']?([A-Za-z_][\w.-]*)[\"']?[ \t]*:[ \t]*(?:#.*)?$", line)
+            if m and SECRET_WORD.search(m.group(2)) and not NOT_SECRET_NAME.search(m.group(2)):
+                depth = len(m.group(1).expandtabs())
+        out.append(line)
+    return "\n".join(out), n
 MAX_CHANGES = 3000              # files changed between two reads of a repository at most (more: read in full)
 _VERIFY: contextvars.ContextVar[Any] = contextvars.ContextVar("supagent_doc_verify", default=True)
 HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")
@@ -175,34 +272,96 @@ class _Text(HTMLParser):
 
 class _Storage(_Text):
     """Confluence's storage format: XHTML with its macros (ac:, ri:). A code macro's text (CDATA) is kept, the
-    macros' parameters (language, colour, ...) are not."""
+    macros' parameters (language, colour, ...) are not. What the page refers to is kept too (0.10): the pages it links
+    to (by title and space, `pages`), its images (`images`: their alternative text, title and file) and the diagrams
+    its macros draw (`diagrams`: draw.io and Gliffy by their attachment's name, Mermaid and PlantUML by their source);
+    a link with no text of its own reads as the page it names, an image as its alternative text."""
 
     BLOCKS = {"ac:structured-macro", "ac:plain-text-body", "ac:rich-text-body", "ac:task", "ac:layout-section",
               "ac:layout-cell"}
+    DIAGRAMS = {"drawio": "draw.io", "drawio-sketch": "draw.io", "inc-drawio": "draw.io", "gliffy": "Gliffy",
+                "plantuml": "PlantUML", "plantumlrender": "PlantUML", "mermaid": "Mermaid", "mermaid-macro": "Mermaid",
+                "mermaid-cloud": "Mermaid"}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pages: list[tuple[str, str | None]] = []
+        self.images: list[dict[str, str]] = []
+        self.diagrams: list[dict[str, str]] = []
+        self._link: dict[str, Any] | None = None
+        self._image: dict[str, str] | None = None
+        self._macros: list[dict[str, Any]] = []
+        self._param: str | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        a = {k: v or "" for k, v in attrs}
+        if tag == "ac:structured-macro":
+            self._macros.append({"name": a.get("ac:name", "").lower(), "params": {}, "body": []})
         if tag == "ac:parameter":
+            self._param = a.get("ac:name", "")
             self._skip += 1
             return
+        if tag == "ac:link":
+            self._link = {"page": None, "text": False}
+        elif tag == "ri:page" and self._link is not None and a.get("ri:content-title"):
+            self._link["page"] = (a["ri:content-title"], a.get("ri:space-key") or None)
+        elif tag in ("ac:plain-text-link-body", "ac:link-body") and self._link is not None:
+            self._link["text"] = True
+        elif tag == "ac:image":
+            self._image = {"alt": a.get("ac:alt", ""), "title": a.get("ac:title", ""), "file": ""}
+        elif tag in ("ri:attachment", "ri:url") and self._image is not None:
+            self._image["file"] = a.get("ri:filename") or a.get("ri:value") or ""
         if tag in self.BLOCKS:
             self.parts.append("\n")
         super().handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "ac:parameter":
+            self._param = None
             self._skip = max(0, self._skip - 1)
             return
+        if tag == "ac:link" and self._link is not None:
+            if self._link["page"]:
+                self.pages.append(self._link["page"])
+                if not self._link["text"]:
+                    self.parts.append(self._link["page"][0])     # the page's title is the link's text
+            self._link = None
+        elif tag == "ac:image" and self._image is not None:
+            img, self._image = self._image, None
+            self.images.append(img)
+            said = img["alt"] or img["title"]
+            self.parts.append(f" [image {img['file']}: {said}] " if said else f" [image {img['file']}] ")
+        elif tag == "ac:structured-macro" and self._macros:
+            m = self._macros.pop()
+            kind = self.DIAGRAMS.get(m["name"])
+            if m["name"] == "code" and str(m["params"].get("language", "")).lower() in ("mermaid", "plantuml"):
+                kind = "Mermaid" if m["params"]["language"].lower() == "mermaid" else "PlantUML"
+            if kind:
+                name = m["params"].get("diagramName") or m["params"].get("name") or m["params"].get("title") or ""
+                self.diagrams.append({"kind": kind, "name": str(name), "source": "".join(m["body"])})
         if tag in self.BLOCKS:
             self.parts.append("\n")
         super().handle_endtag(tag)
 
+    def handle_data(self, data: str) -> None:
+        if self._param is not None and self._macros:
+            self._macros[-1]["params"][self._param] = self._macros[-1]["params"].get(self._param, "") + data
+        super().handle_data(data)
+
+    def _cdata(self, text: str) -> None:
+        if self._macros and self._macros[-1]["name"] in ("code", "plantuml", "plantumlrender", "mermaid",
+                                                         "mermaid-macro", "mermaid-cloud"):
+            self._macros[-1]["body"].append(text)
+        if not self._skip:
+            self.parts.append(text)
+
     def unknown_decl(self, data: str) -> None:
-        if data[:6].upper() == "CDATA[" and not self._skip:
-            self.parts.append(data[6:])
+        if data[:6].upper() == "CDATA[":
+            self._cdata(data[6:])
 
     def handle_comment(self, data: str) -> None:      # a Python that reads CDATA as a comment outside SVG
-        if data[:7].upper() == "[CDATA[" and not self._skip:
-            self.parts.append(data[7:].rstrip("]"))
+        if data[:7].upper() == "[CDATA[":
+            self._cdata(data[7:].rstrip("]"))
 
 
 def _lines(parts: list[str]) -> str:
@@ -220,10 +379,17 @@ def html_to_text(html: str) -> tuple[str, str, list[str]]:
 
 def storage_to_text(xhtml: str) -> str:
     """The text of a Confluence page's body in the storage format (code macros and table cells kept)."""
+    return read_storage(xhtml)["text"]
+
+
+def read_storage(xhtml: str) -> dict[str, Any]:
+    """A Confluence page's body in the storage format: its text, and what it refers to: the pages it links to
+    ((title, space or None)), the addresses of its plain links, its images and its diagrams."""
     p = _Storage()
     p.feed(xhtml or "")
     p.close()
-    return _lines(p.parts)
+    return {"text": _lines(p.parts), "pages": list(dict.fromkeys(p.pages)), "links": list(dict.fromkeys(p.links)),
+            "images": p.images, "diagrams": p.diagrams}
 
 
 def _decode(body: bytes, ctype: str) -> str:
@@ -329,7 +495,24 @@ def mask_secrets(text: str) -> tuple[str, int]:
     for rx, by in SECRETS:
         text, k = rx.subn(by, text)
         n += k
-    return text, n
+    changed = [0]
+
+    def line_value(m: re.Match, inline: bool = False) -> str:
+        out = _secret_value(m, inline)
+        changed[0] += out != m.group(0)
+        return out
+
+    text = CONFIG_LINE.sub(line_value, text)                 # a secret's name given a value, however short
+    text = INLINE_PAIR.sub(lambda m: line_value(m, True), text)
+    text, k = _secret_maps(text)
+
+    def prose(m: re.Match) -> str:
+        out = _prose_secret(m)
+        changed[0] += out != m.group(0)
+        return out
+
+    text = PROSE_SECRET.sub(prose, text)                     # (0.10) one written in a sentence, in any language
+    return text, n + changed[0] + k
 
 
 def _hidden(doc: Doc) -> list[str]:
@@ -669,80 +852,166 @@ def _confluence_url(item: dict[str, Any], base: str | None, t: dict[str, Any]) -
     return f"{t['web']}/pages/viewpage.action?pageId={item.get('id')}"
 
 
+CONFLUENCE_HREF = [   # a link to a page of the same Confluence: (kind, pattern on the address's path)
+    ("id", re.compile(r"/pages/viewpage\.action/?$")),
+    ("id", re.compile(r"/spaces/[^/]+/pages/(?P<id>\d+)(?:/|$)")),
+    ("title", re.compile(r"/display/(?P<space>[^/]+)/(?P<title>[^/?#]+)/?$")),
+]
+DIAGRAM_ATTACHMENT = {"draw.io": (".drawio", ".xml", ""), "Gliffy": (".gliffy", ".json", "")}
+
+
+def _href_target(href: str, page_url: str, web: str) -> tuple[str, ...] | None:
+    """A plain link of a page that names another page of the same Confluence: ("id", id) or ("title", title, space)."""
+    url = urljoin(page_url, href or "")
+    if origin(url) != origin(web) or not urlparse(url).path.startswith(urlparse(web).path.rstrip("/")):
+        return None
+    u = urlparse(url)
+    for kind, rx in CONFLUENCE_HREF:
+        m = rx.search(u.path)
+        if not m:
+            continue
+        if kind == "id":
+            pid = m.groupdict().get("id") or (parse_qs(u.query).get("pageId") or [""])[0]
+            return ("id", pid) if pid.isdigit() else None
+        return ("title", unquote_plus(m.group("title")), unquote(m.group("space")))
+    return None
+
+
 def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
-    """A page and the pages under it (breadth first), or a space's pages, through the REST API, up to max_pages."""
+    """A page and every page it leads to, or a space's pages and every page they lead to (0.10), through the REST API,
+    breadth first, up to max_pages: the pages under a page and the pages its links name (by title, in its space or
+    another one, and by their address on the same Confluence), down to the last one. Each page keeps the pages it links
+    to, its images (their alternative text) and the diagrams it draws (draw.io and Gliffy read from their attachments,
+    Mermaid and PlantUML from their source), their text added to the page's."""
+    from supagent.knowledge import diagrams as G
+
     t = confluence_target(doc.url or "")
     if t is None:
         raise DocError(f"{_where(doc.url or '')}: not the address of a Confluence page or space (…/display/SPACE/Page, "
                        "…/spaces/SPACE/pages/ID/…, …/pages/viewpage.action?pageId=ID, …/display/SPACE)")
     want, limit = _max_pages(doc), _limit()
-    calls = _Calls(want * 3 + 40)
-    pages: Pages = []
+    calls = _Calls(want * 4 + 40)
+    pages: list[tuple[str, str, str, dict[str, Any]]] = []
     skipped = 0
+    q = lambda s: quote(str(s), safe="")  # noqa: E731
+    expand = "expand=body.storage,version,space"
 
     def get(path: str) -> dict[str, Any]:
         calls.spend()
         return _json(t["api"] + path, sign, "Confluence")
 
-    def add(item: dict[str, Any], base: str | None) -> None:
-        nonlocal skipped
-        storage = ((item.get("body") or {}).get("storage") or {}).get("value")
-        text = storage_to_text(storage or "")
-        if len(text.encode()) > limit:
-            skipped += 1
-            return
-        pages.append((_confluence_url(item, base, t), str(item.get("title") or f"page {item.get('id')}"), text))
+    by_title: dict[tuple[str, str], str] = {}        # (space, title) -> id, of the pages met
+    items: dict[str, tuple[dict[str, Any], str | None]] = {}
 
-    q = lambda s: quote(str(s), safe="")  # noqa: E731
+    def fetch(key: tuple[str, ...]) -> str | None:
+        """A page by its id or by its title and space: its id (its body kept in items), None when there is none."""
+        if key[0] == "id":
+            if key[1] not in items:
+                item = get(f"/content/{q(key[1])}?{expand}")
+                items[key[1]] = (item, (item.get("_links") or {}).get("base"))
+            return key[1]
+        title, space = key[1], key[2]
+        if (space, title) in by_title:
+            return by_title[(space, title)]
+        data = get(f"/content?spaceKey={q(space)}&title={q(title)}&{expand}")
+        results = [r for r in data.get("results") or [] if isinstance(r, dict) and r.get("id")]
+        if not results:
+            return None
+        item = results[0]
+        items[str(item["id"])] = (item, (data.get("_links") or {}).get("base"))
+        by_title[(space, title)] = str(item["id"])
+        return str(item["id"])
+
+    def diagram_text(page_id: str, found: list[dict[str, str]]) -> tuple[str, list[list[str]]]:
+        """The diagrams of a page as text and arrows (draw.io and Gliffy from the page's attachments)."""
+        texts, edges = [], []
+        files = None
+        for d in found[:10]:
+            got = None
+            try:
+                if d["kind"] in ("Mermaid", "PlantUML") and d.get("source"):
+                    got = G.mermaid(d["source"], d["name"]) if d["kind"] == "Mermaid" else G.plantuml(d["source"], d["name"])
+                elif d["kind"] in DIAGRAM_ATTACHMENT and d.get("name"):
+                    if files is None:
+                        listed = get(f"/content/{q(page_id)}/child/attachment?limit=100")
+                        files = {str(r.get("title") or ""): r for r in listed.get("results") or [] if isinstance(r, dict)}
+                    att = next((files[d["name"] + ext] for ext in DIAGRAM_ATTACHMENT[d["kind"]]
+                                if d["name"] + ext in files), None)
+                    href = str(((att or {}).get("_links") or {}).get("download") or "")
+                    if href:
+                        calls.spend()
+                        raw = _get(urljoin(t["web"] + "/", href.lstrip("/")), sign, limit).text()
+                        got = G.drawio(raw, d["name"]) if d["kind"] == "draw.io" else G.gliffy(raw, d["name"])
+            except (ValueError, DocError, requests.exceptions.RequestException) as ex:
+                if "asked to sign in" in str(ex):
+                    raise
+                log.info("supagent: document %s: the diagram %s of page %s not read: %s", doc.id, d.get("name"),
+                         page_id, str(ex)[:200])
+            if got and got["text"]:
+                texts.append(got["text"])
+                edges += got["edges"]
+        return "\n".join(texts), edges
+
+    queue: deque[tuple[str, ...]] = deque()
+    seen: set[str] = set()
     title = ""
     try:
         if t["kind"] == "space":
             title, start = f"Confluence space {t['space']}", 0
-            while len(pages) < want:
-                data = get(f"/content?spaceKey={q(t['space'])}&type=page&expand=body.storage,version"
-                           f"&limit={CONFLUENCE_LIST}&start={start}")
-                results = [r for r in data.get("results") or [] if isinstance(r, dict)]
+            while len(queue) < want:
+                data = get(f"/content?spaceKey={q(t['space'])}&type=page&{expand}&limit={CONFLUENCE_LIST}&start={start}")
+                results = [r for r in data.get("results") or [] if isinstance(r, dict) and r.get("id")]
                 base = (data.get("_links") or {}).get("base")
                 for item in results:
-                    if len(pages) < want:
-                        add(item, base)
+                    items[str(item["id"])] = (item, base)
+                    queue.append(("id", str(item["id"])))
                 if len(results) < CONFLUENCE_LIST or not (data.get("_links") or {}).get("next"):
                     break
                 start += len(results)
-            return pages, title, skipped
-        first, first_base = None, None
-        if t["kind"] == "title":
-            data = get(f"/content?spaceKey={q(t['space'])}&title={q(t['title'])}&expand=body.storage,version,space")
-            results = [r for r in data.get("results") or [] if isinstance(r, dict)]
-            if not results:
+        elif t["kind"] == "title":
+            if fetch(("title", t["title"], t["space"])) is None:
                 raise DocError(f"no page titled {t['title']!r} in the Confluence space {t['space']}")
-            first, first_base = results[0], (data.get("_links") or {}).get("base")
-            root = str(first.get("id") or "")
+            queue.append(("title", t["title"], t["space"]))
         else:
-            root = str(t["id"])
-        queue, seen = deque([root]), set()
+            queue.append(("id", str(t["id"])))
         while queue and len(pages) < want:
-            pid = queue.popleft()
-            if pid in seen:
+            key = queue.popleft()
+            pid = fetch(key)
+            if pid is None or pid in seen:
                 continue
             seen.add(pid)
-            if first is not None and str(first.get("id")) == pid:
-                item, base = first, first_base
+            item, base = items[pid]
+            space = str((item.get("space") or {}).get("key") or (key[2] if key[0] == "title" else t.get("space") or ""))
+            url = _confluence_url(item, base, t)
+            read = read_storage(((item.get("body") or {}).get("storage") or {}).get("value") or "")
+            dtext, dedges = diagram_text(pid, read["diagrams"]) if read["diagrams"] else ("", [])
+            text = read["text"] + (f"\n\n{dtext}" if dtext else "")
+            linked: list[tuple[str, ...]] = [("title", ti, sp or space) for ti, sp in read["pages"]]
+            linked += [x for x in (_href_target(h, url, t["web"]) for h in read["links"]) if x]
+            meta = {"id": pid, "space": space, "version": (item.get("version") or {}).get("number"),
+                    "links": [x[1] if x[0] == "id" else f"{x[2]}:{x[1]}" for x in linked][:200],
+                    **({"diagram_edges": dedges[:200]} if dedges else {}),
+                    **({"images": [{k: v for k, v in i.items() if v} for i in read["images"]][:50]} if read["images"]
+                       else {})}
+            if len(text.encode()) > limit:
+                skipped += 1
             else:
-                item = get(f"/content/{q(pid)}?expand=body.storage,version,space")
-                base = (item.get("_links") or {}).get("base")
-            add(item, base)
+                pages.append((url, str(item.get("title") or f"page {pid}"), text, meta))
             title = title or str(item.get("title") or "")
             start = 0
-            while len(pages) + len(queue) < want:          # the pages under it, until enough wait to be read
-                data = get(f"/content/{q(pid)}/child/page?limit={CHILDREN_LIST}&start={start}")
+            while t["kind"] != "space" and len(pages) + len(queue) < want:   # the pages under it (a space's are all
+                data = get(f"/content/{q(pid)}/child/page?limit={CHILDREN_LIST}&start={start}")   # listed), then its links
                 results = [r for r in data.get("results") or [] if isinstance(r, dict)]
-                queue.extend(str(r["id"]) for r in results if r.get("id") and str(r["id"]) not in seen)
+                queue.extend(("id", str(r["id"])) for r in results if r.get("id") and str(r["id"]) not in seen)
                 if len(results) < CHILDREN_LIST or not (data.get("_links") or {}).get("next"):
                     break
                 start += len(results)
+            queue.extend(x for x in linked if not (x[0] == "id" and x[1] in seen))
     except _OutOfCalls:
         log.info("supagent: document %s: Confluence requests used up, %d page(s) read", doc.id, len(pages))
+    for i, (url, ti, text, meta) in enumerate(pages):      # the links by title as the ids they turned out to be
+        meta["links"] = list(dict.fromkeys(by_title.get(tuple(x.split(":", 1)), x) if ":" in x and not x.isdigit()
+                                           else x for x in meta["links"]))
     return pages, title or (f"Confluence space {t['space']}" if t.get("space") else "Confluence"), skipped
 
 
@@ -793,7 +1062,7 @@ def bitbucket_target(url: str) -> dict[str, Any] | None:
 
 def is_text_file(path: str) -> bool:
     name = path.rsplit("/", 1)[-1].lower()
-    return name.endswith(TEXT_FILES) or (name.startswith("readme") and "." not in name)
+    return name.endswith(TEXT_FILES) or (name.startswith("readme") and "." not in name) or bool(ANSIBLE_FILE.search(path))
 
 
 def wanted_file(path: str, files: str = "docs") -> bool:
@@ -1146,7 +1415,8 @@ def _join(found: list) -> tuple[str, list[dict[str, Any]]]:
             at += 2                                     # the blank line between two pages
         pages.append({"url": url, "title": title, "chars": len(block), "at": at,
                       **{k: v for k, v in (more[0] if more and isinstance(more[0], dict) else {}).items()
-                         if k in ("path", "commit", "scope")}})
+                         if k in ("path", "commit", "scope", "id", "space", "version", "links", "diagram_edges",
+                                  "images")}})
         texts.append(block)
         at += len(block)
     return "\n\n".join(texts), pages
@@ -1162,6 +1432,7 @@ def refresh(doc: Doc) -> dict[str, Any]:
         token = _VERIFY.set(tls_of(doc))            # the site's certificate: checked, with a CA file, or not
         read = {"web": _read_web, "confluence": _read_confluence, "bitbucket": _read_bitbucket}[reader]
         found, title, skipped = read(doc, sign)
+        found = [(u, ti, mask_secrets(tx)[0], *more) for u, ti, tx, *more in found]   # every page's secrets (0.10)
         content, pages = _join(found)
         h = hashlib.sha256(content.encode()).hexdigest()[:40]
         changed = h != doc.content_hash

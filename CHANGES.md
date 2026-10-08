@@ -1,5 +1,104 @@
 # Changes
 
+## 0.10.0 — 8 October 2026
+
+The knowledge release: the search finds what the documents, the code, the catalog, the data dictionary and the System
+map say, misspelled or not; the documents and the repositories are read for what they state (who calls whom, what
+runs where, which database, where the logs go) and proposed for the categories and the System map with their evidence;
+the System map, with its links' explanations, is searched like the rest. 0.9.7's checks of the agent's work (never
+released) are in it too.
+
+Measured before release on 7 and 8 October 2026 (the same LLM as before, the lab's questions; the held-out sets never looked at while building, totals only): the agent on the held-out questions 73 of 75 and 71 of 75 right in two runs, 1 and 3 wrong without a warning (0.9.6's first held-out run: 70 of 75, 3); on the main suite 149 of 156 and 147 of 156 in two runs, 5 and 5 wrong without a warning (0.9.6: 6 and 6); on a fourth set of harder general questions (development material), one run: 13 of 16 (3 wrong without a warning); the investigation scenarios were not run on this build. The knowledge search on 2,311 public documentation pages, 3,169 held-out queries, with production's embedding model (bge-m3), the right page first / among the ten first: clean questions .667 / .917 (before 0.10: .523 / .843), a word with two typing slips .514 / .820 (.182 / .483), a name with a typo .637 / .868 (.302 / .577), a name with other separators .687 / .918 (.374 / .725), three misspelled words .617 / .928 (.400 / .844). No planted secret kept or searched on eight test corpora (every secret line masked). The upgrade rehearsed on a copy of a lab's database: 0.9.6 to 0.10.0 (tables v17 to v18 in 8 s, every setting kept), back to 0.9.6.9 with and without its init, forward again, the backup restored identical.
+
+Changed after that measurement, in the learning and in the search, not in the agent's code (the agent reads what they
+give: the links' explanations through the System map's pieces and its brief, the search's pieces): the explanations of the links (supagent/knowledge/interactions.py: each kind explained as what it is; supagent/cli.py: interactions --explain [--again]), checked on two development corpora, the same links explained by the old and the new prompt and judged by a rule written before reading them: the parts that run on a place right 31 of 31 against about 12 of 31, and 28 of 28 (five short explanations weak) against 21 of 28; the flows no worse, fewer other parts named; --again run with the LLM on a copy, an admin's words kept. The same page read by several documents (supagent/knowledge/search.py, the cap of a search's pieces): no piece shared in the measured environment, so the figures above are unchanged; on a development wiki of three spaces, five searches' distinct pages among the first six 2, 2, 2, 6, 4 -> 6, 6, 6, 6, 6, the page each one is about kept. Unit tests: 1113 passed.
+
+Known gaps, measured on a fresh set read once (six public repositories and a wiki of three spaces never seen before,
+totals): the links between parts that the repositories' configuration states are read well (67 of 78 found; 71% of the
+links read are right); the relations the pages and the code state, scored one by one, much less (29% found, 42% of
+those read right; 13% and 26% with the right kind of link); where each part runs 2 of 12 (8 of them Compose services
+deployed by an Ansible play, not read yet); an inventory's hosts in their groups 10 of 11. On classic Ansible projects
+never seen before (held-out set, totals): where each role runs 19 of 25 found, 86% of what is read right; the hosts in
+their groups 18 of 24, all right. Every proposal waits in To review for a person: review before approving. Not read
+yet: a name qualified by its application ("the storage Prometheus") told from a same-named part of another one;
+Compose services deployed by an Ansible play; a host named by its IP address in a sentence. To review can be long on a
+very large Ansible project. Several documents of one wiki whose pages link to each other each read, cut and embed
+every page their links reach (the search gives it once): one document per wiki reads each page once.
+
+Known gaps of the agent, seen while measuring the builds after this one (the same code is in this one): a follow-up answered from the chat's own figures, without a new query, can say that a query was run (once in 156 questions); a reply that disputes an answer ("that's wrong", "are you sure?") has no check of its own: the agent may defend its figure, or change its reading, without a new query; the team's health checks report a breach only when it lasts the check's duration, so a short peak above a limit that a System map link names is not shown (ask for the metric itself over the period).
+
+The knowledge search
+* **Misspelled and hard questions**: the three ways of the search (words, near spellings, meaning) fused by their
+  scores, and a question written as a sentence fused by ranks, a list of keywords or a name by scores; a word read
+  with two typing slips from the documents' own words; the names the documents write found as typed, exactly or
+  nearly; a judge before any LLM help: a weak search (a word near the knowledge's words that nothing reads; a
+  reranker's low score with `rerank.judge_floor`) written again once by the LLM and both searches fused
+  (`search.rewrite` = weak, on; `search.rewrite_seconds`); the questions found well never wait for it.
+* **The System map in the search**: each approved value of a category is a piece of its own: its description, its
+  other names, the category it is drawn inside, what it is part of and its parts, and every approved link it has,
+  both ways, with the link's short and long explanations; written again at the next indexing when a value or a
+  link is added, approved, edited or removed (hourly, or at once with `superset supagent index` after a batch of
+  approvals). A proposed or rejected one is not searched.
+* **A glossary's terms are not capped** (0.9.7, `search.terms_uncapped`): each term and each rule a piece of its own.
+* **A page several documents read comes once**: a wiki's spaces whose pages link to each other, each read to the last
+  page its links lead to, held every page once per space (a search's first six were two pages three times): its
+  sections come once, two pieces of it at most, whatever document read it.
+* The knowledge block given with each question keeps its room for the pieces (the words no piece holds are named by
+  the search tool only).
+* **Secrets masked before anything is kept or searched**, three more formats: a connection string's password with
+  any character up to the next `;` (ADO.NET, Npgsql, ODBC), a secret given as the default of an environment lookup
+  (`os.environ.get("API_TOKEN", "...")`, getenv, ENV.fetch), and a secret written in a sentence in the usual
+  languages ("Mot de passe ... :", "Passwort für ...:", "the API key is ..."); a plain word, a reference or a
+  placeholder after the label is not.
+
+The documents and the code
+* **A wiki read to the last page its links lead to**, each page with its links, its images' text and its diagrams
+  (draw.io, Gliffy, Mermaid, PlantUML read from their source).
+* **What the documents and the code state, read without an LLM** (`knowledge.understand`, on): who calls whom (the
+  addresses code and configuration reach), the databases written and read, the caches, where the logs go, the
+  metrics registered, the indices a shipper writes; code cut at its declarations for the search, each piece saying
+  what it is part of (its file, language, repository, service). `superset supagent understand [--propose] [--show]`.
+* **Repositories read across their files**: an Ansible project (its inventories, read even without an extension:
+  every host in its groups and the groups in theirs; its plays: what runs where; its roles judged a part when they run
+  a service or deploy an application, else a base role; its templates naming another group: who reaches whom), a
+  Kubernetes repository (a workload's environment and the ConfigMaps it takes), a Docker Compose file (depends_on,
+  links, the addresses in a service's environment). What a repository is is said on its Context page ("An Ansible
+  project: 2 inventories (12 hosts in 5 groups), 4 playbooks, 9 roles; what it deploys: ...").
+* **Proposed with their evidence** for the categories and the System map (`knowledge.propose`, To review), compared
+  with what exists: parts as values, servers and their groups (the server category), the links between them; a
+  proposal is not withdrawn when a reading suddenly finds less (a document not fetched a moment).
+* **Context pages from what the documents and the code state**: a page per part (its other names, its code, what it
+  uses and what uses it, its data, the pages about it, the repositories it was read in), per server group, per
+  repository and per wiki space.
+* **The catalog's guides, notes, rules, definitions and glossaries** read with the documents.
+* **Each kind of link explained as what it is**: the short and long explanations the AI writes for a link were asked
+  as flows for every kind (0.9.6 too): a part that runs on a server "waited for the health of" the other servers or
+  "read its configuration from" the place it runs on. Now a flow says what the first part waits for, reads, sends or
+  uses; a part that runs on a place what it is or does there and what to check on that place (health, resources,
+  restarts); a monitor what it watches; each link from its own two parts only. `superset supagent interactions
+  --explain` writes the missing explanations at once; `--again --kinds runs_on,monitors` writes again those the AI
+  wrote alone for those kinds (an admin's words stay, the flows keep theirs), continuing where the last run stopped,
+  until it says done.
+* The LLM's reading of the pages (`knowledge.understand_llm`) is off by default: measured, it added more wrong links
+  than right ones.
+
+The agent
+* **The whole picture for a question of how parts are connected** (where something runs, what it calls or uses,
+  where its data or logs go, what a failure reaches; also in French): the System map's interactions one step out and
+  one further, as an investigation has; a server says what runs on the groups it is part of.
+* **An answer the model wrote beside a tool call is not lost**: a last message that only points back to it gets it
+  back.
+* From 0.9.7: **a value held by another field** (`agent.value_elsewhere`), **a share over an inner join**
+  (`agent.share_join_check`), **a follow-up keeps the chat's period** (`agent.period_window_check`), **a LEFT JOIN
+  made inner** (`agent.outer_join_check`), **a query shown that was not run** (`agent.shown_sql_check`); the period
+  check reads `BETWEEN '<first day>' AND '<last day>'` on a field of days as ending with that day; the examples the LLM
+  reads are neutral.
+
+The changes of 0.9.6.1 to 0.9.6.9 are in 0.10.0.
+
+Upgrade from 0.9.6.x: the wheel on every host, `superset supagent init` once (tables v17 to v18), restart. INSTALL.txt,
+*From 0.9.6.x to 0.10.0*.
+
 ## 0.9.6.9 — 6 October 2026
 
 The System map edited where it is drawn: each change saved at once.

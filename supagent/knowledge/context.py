@@ -770,7 +770,16 @@ def build_context(reason: str = "manual", llm: bool = True, force: bool = False)
             keep: set[tuple[str, str]] = set()
             steps.begin("facts pages (no LLM)")
             done: dict[str, int] = defaultdict(int)
-            for page in fact_pages(ev) + boards:
+            understood: list[dict[str, Any]] = []
+            if settings.get("knowledge.understand"):     # (0.10) the parts, repositories and wiki spaces the documents
+                try:                                     # and the code describe
+                    from supagent.knowledge.context_docs import pages as understood_pages
+
+                    understood = understood_pages()
+                except Exception:  # pylint: disable=broad-except   (the other pages are written)
+                    db.session.rollback()
+                    log.warning("supagent context: the pages of the documents' facts", exc_info=True)
+            for page in fact_pages(ev) + boards + understood:
                 check()
                 keep.add((page["section"], page["slug"]))
                 done[save_page(page, "facts", _hash([page["title"], page["content"], page["database_ids"]]))] += 1

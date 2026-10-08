@@ -99,7 +99,53 @@ def unlinked_share(question: str, queries: list[str]) -> str | None:
         return None
     for q, ts in per:
         if len(ts) >= 2 and re.search(r"\bJOIN\b|\bIN\s*\(\s*SELECT\b|\bEXISTS\s*\(", q, re.I):
+            whole = restricted_whole(q) if _share_join_on() else None
+            if whole:                                    # joined, but the whole kept only the rows with a part
+                return (f"your query divides by the rows of {whole[0]} through an INNER JOIN with {whole[1]}: the whole "
+                        f"is then only the {whole[0]} rows that have a {whole[1]} row (a share near 100 % is the sign). "
+                        f"Count the whole over all its rows (FROM {whole[0]} LEFT JOIN {whole[1]}, the part counted "
+                        "from the joined rows, or the whole in a query of its own), then the share")
             return None                                  # the part read within the whole's rows
     return (f"the question asks for a share of a set of rows, and your queries read {' and '.join(sorted(tables))} "
             "apart, each with its own conditions: the part must be counted within the same rows (linked to them by "
             "their key), not over its own period")
+
+
+def _share_join_on() -> bool:
+    """agent.share_join_check (0.9.7): a share over an inner join of the part and the whole is sent back."""
+    try:
+        from supagent import settings
+
+        return bool(settings.get("agent.share_join_check"))
+    except Exception:  # pylint: disable=broad-except   (no app: as the default)
+        return True
+
+
+def restricted_whole(sql: str) -> tuple[str, str] | None:
+    """(the whole's table, the part's table) when a share is computed as an aggregate of one table over an aggregate
+    of another joined to it by INNER joins only: the whole keeps only its rows that have a part (the refunds of a
+    week over the sales of the refunded orders: 100 %). Columns without their table: not judged."""
+    import sqlglot
+    from sqlglot import exp
+
+    try:
+        tree = sqlglot.parse_one(sql, read="duckdb")
+    except Exception:  # pylint: disable=broad-except
+        return None
+    for sel in tree.find_all(exp.Select):
+        joins = sel.args.get("joins") or []
+        if not joins or any((j.side or "").upper() in ("LEFT", "RIGHT", "FULL") for j in joins):
+            continue
+        names = {(t.alias or t.name): t.name for t in sel.find_all(exp.Table)}
+
+        def tables_of(node: Any) -> set[str] | None:
+            if next(node.find_all(exp.AggFunc), None) is None:
+                return None
+            ts = {c.table for c in node.find_all(exp.Column)}
+            return None if not ts or "" in ts else {names.get(t, t) for t in ts}
+
+        for div in sel.find_all(exp.Div):
+            part, whole = tables_of(div.this), tables_of(div.expression)
+            if part and whole and not part & whole:
+                return ", ".join(sorted(whole)), ", ".join(sorted(part))
+    return None

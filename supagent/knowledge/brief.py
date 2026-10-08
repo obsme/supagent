@@ -331,6 +331,15 @@ def build(question: str, full: bool = True) -> dict[str, Any] | None:
             else:
                 verb = OUT.get(kind, kind) if everyone > 1 else ONE.get(kind, kind)
                 uses.append(f"- {who} {verb}: " + "; ".join(bits) + more + ".")
+    through: list[str] = []                        # a server: what runs on the groups it is part of (an inventory's)
+    for a in actors:
+        for p in V[a]["parents"]:
+            runs = [x for k, x, _n in g["in"].get(p, []) if k == "runs_on" and x not in actors]
+            if runs:
+                through.append(f'{see(runs[0]) if len(runs) == 1 else some(runs, 8)} run'
+                               f'{"s" if len(runs) == 1 else ""} on {V[a]["name"]} through its group {see(p)}')
+    if through:
+        used_by.insert(0, "- What runs on it through its groups: " + "; ".join(through[:6]) + ".")
     steps = []
     for b in further[:FURTHER]:                    # one step further: what they wait for, and what it consists of
         bits = []
@@ -401,6 +410,19 @@ def build(question: str, full: bool = True) -> dict[str, Any] | None:
     out.update(lines=head + uses + data + follow_line + further_line + checks_line + used_by, places=places,
                further=[V[b]["name"] for b in further])
     return out
+
+
+CONNECTION = re.compile(r"(?i)\b(where|which (hosts?|servers?|nodes?|machines?)|runs?\s+on|running\s+on|hosted|deployed|"
+                        r"depends?|dependenc\w*|calls?|called|uses?|used by|talks?\s+to|connect\w*|sends?|sent|"
+                        r"reads?\s+from|writes?\s+to|logs?\s+go|go(es)?\s+down|is\s+down|are\s+down|down\b|"
+                        r"affected|impact\w*|upstream|downstream|behind|in front|flow|path|route[sd]?|between|linked|"
+                        r"relation\w*|o[uù]\s|tourne|d[ée]pend|appelle|utilise|envoie|lit\s|tombe|impact)")
+
+
+def connection_question(question: str) -> bool:
+    """A question about how parts are connected (where something runs, what it calls or uses, where its data or logs
+    go, what a failure reaches): the system map's interactions answer it, not only what the named parts consist of."""
+    return bool(CONNECTION.search(question or ""))
 
 
 def brief_block(question: str, full: bool = True) -> str:

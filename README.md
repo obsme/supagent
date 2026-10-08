@@ -52,6 +52,11 @@ It adds:
   With the PostgreSQL extensions pgvector, pg_trgm and pg_textsearch, the **knowledge store**
   (0.6, optional) searches in PostgreSQL itself: BM25, near spellings, meaning, and each
   user's own chats.
+* **the documents and the code read for what they state** (0.10): the wiki to the last page its links lead to,
+  the repositories (code, configuration, an Ansible project's inventories and plays, Kubernetes, Docker Compose),
+  diagrams and the catalog, read without an LLM for who calls whom, what runs where, which database, cache or index
+  is whose; proposed for the categories and the **System map** with the lines that state them (To review), and
+  searched with the rest, the System map's links and their explanations included.
 * **a router** (0.6): before each answer, one short LLM call chooses the kind of work the
   question needs (functional, technical, incident, charts, observability, infrastructure) from
   its meaning and the team's knowledge, and gives that kind's knowledge and tools first; not
@@ -144,6 +149,15 @@ row level security filters and dashboards keep them), the AI roles' users moved 
 then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with the knowledge written) and Viewer
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
+## Upgrade from 0.9.6.x to 0.10.0
+
+`pip install` the new wheel on every host, `superset supagent init` once (tables v17 to v18: two new tables, what the
+documents and the code state; nothing else changes), restart. The documents, the wiki pages and the repositories are
+read at the next indexing for what they state and proposed in To review (*The documents and the code, read*,
+0.10); the System map's approved values and links are searched with the rest; 0.9.7's checks of the agent's work
+are on (*Checks of an answer before it is shown*). Back: the 0.9.6.9 wheel (the two tables stay, unused).
+INSTALL.txt, *From 0.9.6.x to 0.10.0*.
 
 ## Upgrade from 0.9.6.8 to 0.9.6.9
 
@@ -1404,6 +1418,24 @@ follow-up keeps its conditions, a cause is tied to the question's parts):
   unsaved preview); an answer that says a chart was changed when only a preview was made is marked.
 * Dates and times given with the question are no figures (a made-up "43" is not grounded by "10:43"), and what the
   model says about a check before its corrected answer ("here is the corrected answer:") is cut.
+* **0.9.7**, each a setting (on), by code:
+  * a query that found nothing for a value its field does not hold, when another field of its tables holds it
+    ("EMEA" is a region, the query filtered the country): that field is named to the agent, told to run the query
+    again on it rather than answer a count of 0 (`agent.value_elsewhere`);
+  * a share whose whole was read through an inner join with the part's table (the whole kept only its rows that have
+    a part) is sent back once (`agent.share_join_check`);
+  * a follow-up that names no period keeps the chat's: when its queries read from more than a day before the chat's
+    days and none starts inside them, the answer is sent back once (`agent.period_window_check`; not when the question
+    asks for a comparison or for what is usual);
+  * a query whose WHERE puts a condition on the table a LEFT JOIN keeps optional (`WHERE r."STATUS" = 'OPEN'` after
+    `LEFT JOIN returns r`: the rows without a return dropped, as by an inner join) is sent back before it runs, with
+    the two ways to write it (the condition in the join's ON, or inside the aggregate with CASE WHEN); sent again
+    unchanged, it runs (`agent.outer_join_check`);
+  * an answer that shows a query as the one behind its figures when no call ran it (its figures came from other
+    queries) is sent back once to run it or to show the queries run (`agent.shown_sql_check`); a template with
+    placeholders, the query run written otherwise, and a question that asks for the SQL are not judged;
+  * the period check reads an end written `BETWEEN '<first day>' AND '<last day>'` or `<= '<last day>'` on a field
+    of days as ending with that day (it was read as that day's midnight: the query sent back as missing the day).
 * **A test, off: the definition of a term** (`agent.definition_check`): when a question uses a term the glossary
   defines with how to compute it, one short LLM call compares the definition with the answer's queries. Measured on
   202 stored answers of the end-to-end suite: it flags 16 of the 33 wrong ones, and 55 of the 169 right ones (most of
@@ -1662,7 +1694,11 @@ an admin, documents that could not be read. Exit code 1 when there is a problem.
   with its path, its front matter not searched. Web and Confluence documents are cut again at their next reading
   (their text changes: their pieces and vectors are made again once).
 * **Two pieces of one page at most** among a search's results (the room goes to other pages), one line per page in
-  the background knowledge, and the agent reads the part of each piece its words are in.
+  the background knowledge, and the agent reads the part of each piece its words are in. The terms of a glossary
+  and the rules of an entry are each a piece of their own and are not capped (0.9.7, `search.terms_uncapped`, on):
+  two terms a question uses that the same glossary defines both come with it. A page several documents read (a
+  wiki's spaces whose pages link to each other, each read to the last page its links lead to) counts once (0.10.0):
+  its sections come once, two pieces of it at most, whatever document read it.
 
 Measured (lab) on 2,311 public documentation pages read as four documents, with 500 link texts written by the
 docs' authors as questions, by words only: the right page among the ten first 81 → 90 out of 100 (first: 49 → 60);
@@ -1724,6 +1760,26 @@ a BM25 index. The session is then stuck in its aborted transaction until it is c
 transaction there, but Superset's own sessions do: do not preload 0.5.x, and upgrade to 1.x (it needs the preload
 and has the fix). `store status` warns about it.
 
+**Misspelled and hard questions** (0.10). The three ways (words, near spellings, meaning) are fused by their
+scores; a question written as a sentence is fused by ranks, a list of keywords or a name by scores. A searched word
+no piece holds is read as a word of the documents two typing slips away at most, and the names the documents write
+(a host, a service, a metric) are found as typed, exactly or nearly. A **judge** decides whether a search is weak
+(a word near the knowledge's words that nothing reads; a reranker's low score, `rerank.judge_floor`; without a
+reranker, `search.judge_meaning_floor`, off): only then is the question written again once by the LLM (spelling
+fixed, names kept) and both searches fused (`search.rewrite` = weak, the default; `search.rewrite_seconds`, 4 s,
+then the first search alone; `off`: never). A question found well never waits for it. The words no piece holds
+are named by the search tool only: the knowledge block given with each question keeps its room for the pieces.
+
+**The System map in the search** (0.10). Each approved value of a category is a piece of its own: its description,
+its other names, the category it is drawn inside, what it is part of and its parts, and every approved link it has,
+both ways, with the link's short and long explanations ("Ledger sends to Vault (both ways): writes the settled
+orders every night"). A question about a part or about how parts connect finds the map's own words beside the
+documents, the metrics, the fields and the catalog. A value or a link added, approved, edited or removed: the map's
+pieces are written again at the next indexing (hourly, by the learning's schedule), or at once with `superset
+supagent index` (after a batch of approvals in To review or on the map: the chat's answers run in the Celery
+workers, which see the change at that indexing; the server process where the change was made writes them before
+its own next search). A proposed or rejected value or link is not searched.
+
 ## Documents and sites
 
 Admins add documents (text, Markdown or HTML files) and web pages or whole sites (the pages
@@ -1768,6 +1824,77 @@ searchable by everyone who can open the Data dictionary: use a token that only r
 page since 0.9.6.1, so that a changed page makes again its pieces only), each with the page's address, so the agent finds the passage a question needs and names its page; they go in the knowledge store when
 Superset's PostgreSQL has pgvector, pg_textsearch or pg_trgm (words, near spellings, meaning), else in the search of
 0.5. The table says how many pieces each document has in the search.
+
+## The documents and the code, read (0.10)
+
+What the team's documents say about the platform (which application calls which, where its data and its logs go,
+what runs on which servers) becomes knowledge the System map, the Context and the agent use, each statement with the
+line that says it. Read **without an LLM** (`knowledge.understand`, on), at each indexing, only the units whose text
+changed (a page, a file):
+
+* **Code**: the services and the stores it reaches by their addresses (http, gRPC, AMQP, Kafka, NATS, JDBC, Redis,
+  a database's URL), the databases it writes and reads, the caches, the metrics it registers (prometheus_client,
+  Micrometer, Go, OpenTelemetry meters), where it logs; cut at its declarations for the search (functions,
+  classes, routes), each piece saying what it is part of (its file, its language, its repository, the service it is
+  the code of).
+* **Configuration**: the addresses of other services (`DB_HOST=db`, `CACHE_URL=redis://cache:6379`), a shipper's
+  indices, a monitoring server's targets.
+* **An Ansible project**, read across its files: its inventories (read even without an extension: `hosts`,
+  `inventory/`, `group_vars/<group>`): every host in its groups and the groups in theirs; its plays: what runs
+  where; its roles: a role that runs a service or deploys an application is a part named by the role, a role that
+  only configures the hosts is not; a template that names another group's hosts: who reaches whom. Each inventory group is a **server group** with a Context page of
+  its own ("Server group: web": its servers, what runs on them), never merged with a part of the same name; a name
+  that is both a part and a server group is titled with its repository ("Server group: web (logging-deploy)").
+* **Kubernetes**: a workload's environment and the ConfigMaps it takes. **Docker Compose**: `depends_on`, `links`,
+  the addresses of other services in a service's environment; its services are parts the documents can name.
+* **Pages and prose documents**: the sentences that say a part calls, uses, reads from, writes to, sends to or runs
+  on another ("HAProxy on lb1", "runs on web1, web2 and web3"), tables, and the **diagrams** read from their source
+  (draw.io, Gliffy, Mermaid, PlantUML: an arrow between two boxes a link). A wiki is read to the last page its
+  links lead to, each page with its links and its images' text.
+* **The catalog** (`knowledge.understand_catalog`, on): its guides, notes, rules, definitions and glossaries.
+
+**Proposed for the categories and the System map** (`knowledge.propose`, on), compared with what exists, each
+waiting in *To review* with where it was read (the line of a file, the sentence of a page, the arrow of a diagram):
+the parts they name as values (a service an application; a database, a cache or a tool a component; a host a value
+of the server category), the links between them (calls, sends data to, reads from, depends on, runs on, monitors; a
+server part of its group), a part's indices and metrics as its items. Stated again: confirmed, nothing proposed. A
+learned link the other way round: its removal proposed. No longer stated: a proposal withdrawn, an approved link's
+removal proposed (never removed alone); not when a reading suddenly finds less than half of what it found (a
+document not fetched a moment). Nothing a person made or refused is changed or proposed again. The descriptions of
+what is approved, short and long, are written by the classification and the interactions' reading (LLM). Each kind
+of link is explained as what it is: a flow (calls, reads from, sends data to, depends on, triggers) says what the
+first part waits for, reads, sends or uses; a part that runs on a place (a server, a group of servers, a cluster)
+says what it is or does there and what to check on that place (its health, resources, restarts); a monitor what it
+watches; each link from its own two parts only (before, every kind was explained as a flow: a part that runs on a
+server "waited for the health of" the other servers). `superset supagent interactions --explain` writes the missing
+explanations at once, the approved links first; `--again` writes again those the AI wrote alone (an admin's words
+stay), continuing where the last run stopped, until it says done; `--kinds runs_on,monitors` only those kinds (the
+ones explained as flows before 0.10.0: the flows keep their explanations).
+
+**What a repository is** is said on its Context page ("An Ansible project: 2 inventories (12 hosts in 5 groups), 4
+playbooks, 9 roles; what it deploys: ...", Kubernetes manifests, a Helm chart, a Compose file, Terraform, code by
+language, scripts); a part's Context page says the repositories it was read in, its other names, its code, what it
+uses and what uses it, its data and the pages about it; a page per wiki space too.
+
+**The agent**: a question of how parts are connected (where something runs, what it calls or uses, where its data
+or its logs go, what a failure reaches; in French too) gets the System map's interactions around the parts it
+names, one step out and one further, as an investigation has; a server says what runs on the groups it is part of
+("X runs on srv-1 through its group web").
+
+**The LLM's reading** (`knowledge.understand_llm`, off): the LLM reads the pages and the prose documents too
+(`knowledge.llm_units` a run, `knowledge.llm_seconds` a page), each link kept only with the page's own words that
+state it. Off by default: measured on the lab's sets, it added more wrong links than right ones.
+
+**What it does not read yet** (measured on repositories and wiki pages it had never seen): part of the links a
+project states are missed and some of what is proposed is wrong: review before approving. A name qualified by its
+application ("the storage Prometheus") is not told from a same-named part of another; Compose services deployed by
+an Ansible play are not placed on the play's hosts; a host named by its IP address in a sentence is not read.
+Several documents of one wiki whose pages link to each other each read every page their links reach: the search
+gives each page once, but each document reads, cuts and embeds it again (time, vectors, LLM calls): one document
+per wiki (its home page) reads each page once.
+
+Commands: `superset supagent understand [--propose] [--show]` reads now (the units whose text changed), proposes,
+and prints every link read with its source; `superset supagent index` then makes the search's pieces.
 
 ## Backups of the knowledge (0.9)
 
@@ -1863,6 +1990,8 @@ superset supagent forget-learned [--database D] [--everything] [--yes]    learn 
                                                                           without --yes)
 superset supagent remove-auto-learned                                    answers 0.2.1 saved by themselves
 superset supagent index [--refresh-docs]                                 searchable pieces and vectors
+superset supagent understand [--propose] [--show]                       what the documents and the code
+                                                                          state, read now (0.10)
 superset supagent check-knowledge [--json]                               is everything put in given to the agent?
 superset supagent search "words" [--user U]                              what the agent would find
 superset supagent knowledge [--changes DAYS]
@@ -1871,6 +2000,9 @@ superset supagent ask "question" --user U [--pipeline classic|governed]  an answ
 superset supagent classify [--minutes N] [--limit N]                      categories of the knowledge, now: a run
                                                                           listed in the settings with its steps (0.9)
 superset supagent interactions [--minutes N] [--limit N] [--again]        the interactions the texts state, proposed (0.9)
+superset supagent interactions --explain [--again [--kinds K,...]] [--minutes N] [--limit N]
+                                                                          the links' explanations written now; --again:
+                                                                          the AI's own written again (of these kinds)
 superset supagent check-system [--question "..."] [--user U] [--json]     what the agent knows of the system, and
                                                                           what is missing for investigations (0.9)
 superset supagent backup [--vectors] | backups                            a backup of the knowledge now; the list (0.9)

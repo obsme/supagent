@@ -2,7 +2,7 @@
 
 An inventory of the platform (a CMDB, an asset or service catalog indexed with the data: a name field and a field of
 other names, aliases.tables) also says what each thing runs on and depends on: a service runs_on its nodes, a node
-sits in a rack and is connected_to a switch port ("switch-1:xe-0/0/2"), a service depends_on its database. The
+sits in a rack and is connected_to a switch port ("switch-1:ge-1/0/7"), a service depends_on its database. The
 agent, asked what failing calls have in common or why two services fail together, stayed at the services the spans
 name: the rack, the switch port and the change on the switch (the cause) were three joins away in a table it had no
 reason to read. This reads the inventories (a few thousand rows at most, cached for a minute) and, for the names

@@ -167,3 +167,52 @@ def test_a_day_before_the_data_on_another_date_field_says_so(world, monkeypatch)
     finally:
         db.session.delete(day)
         db.session.commit()
+
+
+def test_a_value_held_by_another_field_says_which_and_asks_for_the_query_again(world):
+    """(0.9.7) "STATUS = 'srv-2'" counted 0 was answered "there were none" (the check said: say the value does not
+    exist): the value is in the data, in another field. The result now names the field that holds it and asks for
+    the query again; it never asks for a 0."""
+    from supagent.knowledge.empty import why_empty
+
+    counted = why_empty(world["jobs"], 'SELECT COUNT(*) FROM "jobs" WHERE "STATUS" = \'srv-2\'', counted=True)
+    assert "'srv-2' is not a value of \"STATUS\"; it is a value of \"NODE\" (filter on \"NODE\" = 'srv-2')" in counted
+    assert "Run the query again" in counted and "does not exist" not in counted.split("rather than")[0]
+    rows = why_empty(world["jobs"], 'SELECT "NODE" FROM "jobs" WHERE "STATUS" = \'SRV-2\'')
+    assert rows.startswith("No rows.") and "filter on \"NODE\" = 'srv-2'" in rows     # its spelling in that field
+
+
+def test_a_partial_list_never_says_the_value_is_not_in_the_field(world):
+    from superset.extensions import db
+
+    from supagent.knowledge.empty import why_empty
+    from supagent.models import KObject
+
+    f = db.session.query(KObject).filter_by(kind="field", parent="jobs", name="STATUS").one()
+    before = dict(f.stats)
+    f.stats = {**before, "partial": True}
+    db.session.commit()
+    try:
+        hint = why_empty(world["jobs"], 'SELECT COUNT(*) FROM "jobs" WHERE "STATUS" = \'srv-2\'', counted=True)
+    finally:
+        f.stats = before
+        db.session.commit()
+    assert "'srv-2' is a value of \"NODE\"" in hint and "is not a value of" not in hint
+
+
+def test_a_value_no_field_holds_is_said_as_before(world):
+    from supagent.knowledge.empty import why_empty
+
+    hint = why_empty(world["jobs"], 'SELECT COUNT(*) FROM "jobs" WHERE "STATUS" = \'BOGUS\'', counted=True)
+    assert "'BOGUS' is not a value" in hint and "Say that the value does not exist in the data" in hint
+    assert "is a value of" not in hint
+
+
+def test_the_value_elsewhere_hint_has_its_setting(world, monkeypatch):
+    from supagent import settings
+    from supagent.knowledge.empty import why_empty
+
+    real = settings.get
+    monkeypatch.setattr(settings, "get", lambda k: False if k == "agent.value_elsewhere" else real(k))
+    hint = why_empty(world["jobs"], 'SELECT COUNT(*) FROM "jobs" WHERE "STATUS" = \'srv-2\'', counted=True)
+    assert "is a value of" not in hint and "'srv-2' is not a value" in hint

@@ -110,6 +110,66 @@ def or_and_refusal(name: str, args: dict) -> str | None:
             "send this same call again unchanged.")
 
 
+def outer_join_undone(sql: str) -> tuple[str, str] | None:
+    """(the condition, the table) when a WHERE condition on a column of the table a LEFT JOIN keeps optional drops the
+    rows that have no match, as an inner join would ("FROM orders o LEFT JOIN returns r ... WHERE r.STATUS =
+    'REFUNDED'": only the orders that have a refunded return, the total over all the orders lost). Not judged: IS NULL
+    and IS NOT NULL (an anti-join, or rows dropped on purpose), a COALESCE of the column, a condition inside an OR."""
+    from sqlglot import exp
+
+    tree = _parse(sql)
+    if tree is None:
+        return None
+    for sel in tree.find_all(exp.Select):
+        optional = {}
+        for j in sel.args.get("joins") or []:
+            if (j.side or "").upper() == "LEFT" and isinstance(j.this, exp.Table):
+                optional[j.this.alias_or_name] = j.this.name
+        where = sel.args.get("where")
+        if not optional or where is None:
+            continue
+        terms, todo = [], [where.this]
+        while todo:
+            node = todo.pop()
+            if isinstance(node, exp.And):
+                todo += [node.this, node.expression]
+            elif isinstance(node, exp.Paren):
+                todo.append(node.this)
+            else:
+                terms.append(node)
+        for term in terms:
+            if isinstance(term, (exp.Is, exp.Or)) or (isinstance(term, exp.Not) and isinstance(term.this, exp.Is)):
+                continue
+            if next(term.find_all(exp.Coalesce), None) is not None or next(term.find_all(exp.Or), None) is not None:
+                continue
+            cols = [c for c in term.find_all(exp.Column) if c.table in optional]
+            if cols:
+                return term.sql(dialect="duckdb"), optional[cols[0].table]
+    return None
+
+
+def outer_join_refusal(name: str, args: dict) -> str | None:
+    if name not in ("execute_sql", "export_excel", "chart_from_sql", "create_virtual_dataset", "save_sql_query"):
+        return None
+    try:
+        from supagent import settings
+
+        if not settings.get("agent.outer_join_check"):
+            return None
+    except Exception:  # pylint: disable=broad-except   (no app: as the default)
+        pass
+    req = args.get("request") if isinstance(args.get("request"), dict) else args
+    found = outer_join_undone(str((req or {}).get("sql") or ""))
+    if not found:
+        return None
+    cond, table = found
+    return (f"tool error (not run: a LEFT JOIN made inner): the condition {cond[:160]} is in WHERE and reads {table}, "
+            "the side of the LEFT JOIN that may have no row: the rows without a match are dropped, as with an inner "
+            "join (a total over all the rows becomes a total over the rows that have one). Put the condition in the ON "
+            f"of the join (LEFT JOIN {table} ... ON ... AND {cond[:80]}), or inside the aggregate (SUM(CASE WHEN ... "
+            "THEN ... END)). If only the rows with a match are meant, send this same call again unchanged.")
+
+
 PER_DAY = re.compile(r"\b(?:average|mean|avg)\b[^?.]{0,60}\bper (?:day|business day|cob|working day)\b|"
                      r"\bdaily average\b|\baverage (?:daily|per day)\b|\bper day\b[^?.]{0,40}\bon average\b|"
                      r"\bon average\b[^?.]{0,60}\bper day\b|\bmoyenne\b[^?.]{0,40}\bpar jour\b|\bmoyenne journali", re.I)
