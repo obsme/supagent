@@ -2807,6 +2807,10 @@ class AdminView(BaseView):
             if body["status"] == "approved":
                 approve(f)
             else:
+                if body["status"] == "rejected" and f.status != "rejected":
+                    from supagent.knowledge.facets import drop_with_value
+
+                    drop_with_value(f)                # (0.10.7) its links and items, waiting in To review too
                 f.status = body["status"]
         if str(body.get("value") or "").strip():
             f.value = name

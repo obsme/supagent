@@ -280,6 +280,29 @@ def _ensure(facet: str, value: str, status: str, source: str, description: str |
     return f
 
 
+def drop_with_value(f: Any) -> dict[str, int]:
+    """(0.10.7) A value set aside (rejected, retired, removed by an admin): what waits on it or rests on it goes with
+    it: the links drawn with it, proposed or approved (To review listed the proposed ones still), the items given to it
+    ("its items lose it"), the other values' "same as" that name it. What a person refused stays: a refused link or
+    item is what keeps it from being proposed again. What went, counted."""
+    from sqlalchemy import or_
+
+    from supagent.models import Facet, Link, Tag
+
+    ref = f"facet:{f.id}"
+    out = {"links": db.session.query(Link).filter(or_(Link.a_ref == ref, Link.b_ref == ref),
+                                                  Link.status != "rejected").delete(synchronize_session=False),
+           "tags": db.session.query(Tag).filter(Tag.facet_id == f.id, Tag.status != "rejected")
+                                        .delete(synchronize_session=False), "same_as": 0}
+    for o in db.session.query(Facet).filter(Facet.suggested.isnot(None), Facet.id != f.id):
+        sug = dict(o.suggested or {})
+        if sug.get("same_as") == f.id:
+            sug.pop("same_as")
+            o.suggested = sug or None
+            out["same_as"] += 1
+    return out
+
+
 def merge_value(f: Any, to: Any) -> None:
     """Value f joins value `to` (of the same category or another): its items move there (once each), its name
     becomes one of the other's names, f goes. Into an approved value, the items the LLM was sure of are used at

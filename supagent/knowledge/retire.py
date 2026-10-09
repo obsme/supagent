@@ -375,6 +375,10 @@ def decide(f: Any, retire: bool, by: str) -> str:
     sug = dict(f.suggested or {})
     r = sug.pop("retire", None) or {}
     if retire:
+        if f.status != "rejected":
+            from supagent.knowledge.facets import drop_with_value
+
+            drop_with_value(f)                         # (0.10.7) its links and items go with it
         f.status = "rejected"
         sug.pop("absent", None)
     else:
