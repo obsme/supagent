@@ -684,6 +684,18 @@ def _max_pages(doc: Doc) -> int:
     return max(1, int(doc.max_pages or 1))
 
 
+def _skip_title() -> Any:
+    """(0.10.6.1) The titles of the pages not read (docs.skip_titles: "deprecated"), compiled; None: every page."""
+    rx = str(settings.get("docs.skip_titles") or "").strip()
+    if not rx:
+        return None
+    try:
+        return re.compile(rx, re.I)
+    except re.error:
+        log.warning("supagent: docs.skip_titles is not a regular expression: every page is read")
+        return None
+
+
 def _asked_to_sign_in(url: str, sign: SignIn | None, how: str) -> str:
     where = _where(url)
     if sign is not None and sign.for_url(url):
@@ -802,15 +814,29 @@ def _read_web(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
     start = doc.url or ""
     base = start.rsplit("/", 1)[0] + "/"
     todo, seen, pages = [start], set(), []
+    skipped, skip = 0, _skip_title()
     while todo and len(pages) < _max_pages(doc):
         url = todo.pop(0).split("#")[0]
         if url in seen:
             continue
         seen.add(url)
-        title, text, links = fetch(url, sign) if sign is not None else fetch(url)
-        pages.append((url, title, text))
+        try:
+            title, text, links = fetch(url, sign) if sign is not None else fetch(url)
+        except (DocError, requests.exceptions.RequestException) as ex:
+            if len(seen) == 1:                         # the address itself: the document's error
+                raise
+            skipped += 1                               # (0.10.6.1) a page it links to that cannot be read (404,
+            log.info("supagent: document %s: a page not read (%s): %s", doc.id, _where(url), str(ex)[:200])
+            continue                                   # 403, not text, too large): skipped, the others read
+        if len(seen) > 1 and skip is not None and skip.search(title or ""):
+            skipped += 1                               # (0.10.6.1) "deprecated" in its title: not read, nor what it
+            continue                                   # leads to (the first page always is)
+        if (text or "").strip():
+            pages.append((url, title, text))
+        else:
+            skipped += 1                               # (0.10.6.1) no text: not kept, its links followed
         todo += [link for link in links if link.startswith(base) and link.split("#")[0] not in seen]
-    return pages, (pages[0][1] if pages else "") or start, 0
+    return pages, (pages[0][1] if pages else "") or start, skipped
 
 
 CONFLUENCE = [
@@ -949,10 +975,8 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
                         raw = _get(urljoin(t["web"] + "/", href.lstrip("/")), sign, limit).text()
                         got = G.drawio(raw, d["name"]) if d["kind"] == "draw.io" else G.gliffy(raw, d["name"])
             except (ValueError, DocError, requests.exceptions.RequestException) as ex:
-                if "asked to sign in" in str(ex):
-                    raise
                 log.info("supagent: document %s: the diagram %s of page %s not read: %s", doc.id, d.get("name"),
-                         page_id, str(ex)[:200])
+                         page_id, str(ex)[:200])      # (0.10.6.1) an attachment the sign-in may not see: the page kept
             if got and got["text"]:
                 texts.append(got["text"])
                 edges += got["edges"]
@@ -961,6 +985,7 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
     queue: deque[tuple[str, ...]] = deque()
     seen: set[str] = set()
     title = ""
+    skip = _skip_title()
     try:
         if t["kind"] == "space":
             title, start = f"Confluence space {t['space']}", 0
@@ -982,11 +1007,25 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
             queue.append(("id", str(t["id"])))
         while queue and len(pages) < want:
             key = queue.popleft()
-            pid = fetch(key)
+            try:
+                pid = fetch(key)
+            except DocError as ex:                   # (0.10.6.1) a page under it or linked from it that this
+                if not seen:                         # document's sign-in may not see (404, 403, a login page):
+                    raise                            # skipped, the others read; the first page itself: the error
+                skipped += 1
+                log.info("supagent: document %s: a Confluence page not read (%s): %s", doc.id, key[1], str(ex)[:200])
+                continue
             if pid is None or pid in seen:
                 continue
             seen.add(pid)
             item, base = items[pid]
+            first = (t["kind"] == "page" and pid == str(t.get("id"))) or \
+                (t["kind"] == "title" and pid == by_title.get((t["space"], t["title"])))
+            if not first and skip is not None and skip.search(str(item.get("title") or "")):
+                skipped += 1                           # (0.10.6.1) "deprecated" in its title: not read, nor the
+                log.info("supagent: document %s: Confluence page %s not read (its title: %s)", doc.id, pid,
+                         str(item.get("title") or "")[:120])
+                continue                               # pages under it and its links
             space = str((item.get("space") or {}).get("key") or (key[2] if key[0] == "title" else t.get("space") or ""))
             url = _confluence_url(item, base, t)
             read = read_storage(((item.get("body") or {}).get("storage") or {}).get("value") or "")
@@ -999,14 +1038,19 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
                     **({"diagram_edges": dedges[:200]} if dedges else {}),
                     **({"images": [{k: v for k, v in i.items() if v} for i in read["images"]][:50]} if read["images"]
                        else {})}
-            if len(text.encode()) > limit:
-                skipped += 1
+            if len(text.encode()) > limit or not text.strip():
+                skipped += 1                           # too large, or no text (0.10.6.1: its pages and links followed)
             else:
                 pages.append((url, str(item.get("title") or f"page {pid}"), text, meta))
             title = title or str(item.get("title") or "")
             start = 0
             while t["kind"] != "space" and len(pages) + len(queue) < want:   # the pages under it (a space's are all
-                data = get(f"/content/{q(pid)}/child/page?limit={CHILDREN_LIST}&start={start}")   # listed), then its links
+                try:                                                             # listed), then its links
+                    data = get(f"/content/{q(pid)}/child/page?limit={CHILDREN_LIST}&start={start}")
+                except DocError as ex:               # (0.10.6.1) its children not listed: the page and the rest kept
+                    log.info("supagent: document %s: the pages under Confluence page %s not listed: %s", doc.id, pid,
+                             str(ex)[:200])
+                    break
                 results = [r for r in data.get("results") or [] if isinstance(r, dict)]
                 queue.extend(("id", str(r["id"])) for r in results if r.get("id") and str(r["id"]) not in seen)
                 if len(results) < CHILDREN_LIST or not (data.get("_links") or {}).get("next"):

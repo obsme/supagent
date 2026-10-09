@@ -1,5 +1,40 @@
 # Changes
 
+## 0.10.6.1 — 2026-10-09
+
+The team's reports of 9 October on 0.10.6: a wiki document failed whole ("…/rest/api/content: HTTP 404: not found, or
+not visible to this document's sign-in", 0 pages) when one page it leads to could not be read; the values seeded at the
+start (the categories people wrote in the catalog, the ones the learning gave to the data's objects) could not be
+removed from the Categories page.
+
+Not measured again: the agent's answering code is 0.10.6's. Checked before this release: the unit tests; the readers
+against local servers (a wiki whose child page answers 404, a page in a space the sign-in may not see, a page titled
+"deprecated" with a page under it, an empty page with a page under it; a site with a missing page, a deprecated one and
+an empty one); the Categories page in a browser (a value removed alone and with the new bulk removal, no page error).
+
+Documents and sites
+* **A page that cannot be read is skipped, the others are read**: a page under the document's page, or one its links
+  name, that this document's sign-in may not see (404, 403, a login page) or that is not text is skipped and counted
+  (the document's "skipped"); the crawl goes on through every other page and its links, down to the document's
+  "Pages or files at most". The document's first page must be readable (else its error, as before). A diagram whose
+  attachment cannot be read no longer fails the page.
+* **Deprecated pages are not read**: a page whose title matches `docs.skip_titles` (default: "deprecated", any case)
+  is not read, nor the pages under it and its links (the document's first page always is); empty: every page is read.
+* **A page with no text** is not kept, and the pages under it and its links are still followed.
+
+Categories
+* **Every value can be removed**: the values seeded at the start had no remove action; every value now has one (Remove
+  for a value in use, Reject for a proposed one), except the two aspects (functional, technical). A removed value is
+  never seeded or proposed again; adding it by hand brings it back.
+* **Remove the values shown**: once the list is filtered (a category, a state or words), an admin removes every value
+  it shows at once, asked first with how many.
+* The categories themselves (add, rename, remove one of yours) are in "Categories: add, rename or remove one, and
+  where their values come from", above the values; a built-in one (subject, application, component) stays, its values
+  removed one by one or with the bulk removal.
+
+Upgrade from 0.10.6: the wheel on every host, restart; nothing to run (tables v18). INSTALL.txt, *From 0.10.6 to
+0.10.6.1*.
+
 ## 0.10.6 — 2026-10-09
 
 The learning proposes what the texts say, To review corrects what it proposes, and the agent's knowledge search follows

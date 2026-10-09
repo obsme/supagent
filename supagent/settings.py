@@ -478,6 +478,9 @@ SPECS: list[Spec] = [
          "them, a part's indices and metrics; compared with what exists (stated again: confirmed; the other way round "
          "or no longer stated: removal proposed); nothing a person made or refused is changed"),
     Spec("docs.max_kb", 2048, "int", "Largest page or file read (KB)"),
+    Spec("docs.skip_titles", r"\bdeprecated\b", "str", "Pages of a wiki or a site whose title matches this pattern "
+         "(a regular expression, any case; e.g. \\bdeprecated\\b|\\barchived\\b) are not read, nor the pages they lead to "
+         "(the document's first page always is); empty: every page is read"),
     # ---- memory learned from the chats
     Spec("memory.enabled", True, "bool", "Learn preferences, rules and facts from the chats"),
     Spec("memory.team_approval", True, "bool", "Team memories need an admin's approval before they are used "

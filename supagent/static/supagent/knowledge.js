@@ -1275,8 +1275,10 @@
             sel.addEventListener("change", function () { if (sel.value) post({ merge_into: +sel.value }); });
           } }));
         }
-        if (canDelete || f.status !== "approved") if (f.source !== "seed") acts.appendChild(sureButton(f.status === "approved" ? "Retire" : "Reject", function () { post({ status: "rejected" }); },
-          (f.status === "approved" ? "Retire " : "Reject ") + "\u201c" + f.value + "\u201d?",
+        // (0.10.6.1) every value but the fixed aspects, the ones seeded at the start too (they had no way out): a value
+        // removed stays removed (the learning never seeds a rejected one again)
+        if ((canDelete || f.status !== "approved") && f.facet !== "aspect") acts.appendChild(sureButton(f.status === "approved" ? "Remove" : "Reject", function () { post({ status: "rejected" }); },
+          (f.status === "approved" ? "Remove " : "Reject ") + "\u201c" + f.value + "\u201d?",
           (f.items ? "Its " + S.num(f.items) + " item" + (f.items === 1 ? "" : "s") + " lose this " + f.facet + ". " : "") +
           "It is not proposed again; adding it by hand brings it back."));
         tb.appendChild(el("tr", {}, [valueCell, el("td", { text: f.facet }), el("td", { class: "num", text: S.num(f.items) }),
@@ -1286,6 +1288,32 @@
           acts]));
       });
       if (!all.length) tb.appendChild(D.emptyRow(6, "No category yet: the daily learning classifies the knowledge (or: superset supagent classify)."));
+      // (0.10.6.1) the values shown removed at once (an admin; the fixed aspects stay): filter by category, state or
+      // words first, then remove what is left in the list, asked once with how many
+      var bulkBox = $("fac-bulk"), gone = all.filter(function (f) { return f.facet !== "aspect"; });
+      if (bulkBox) {
+        bulkBox.innerHTML = "";
+        var filtered = $("fac-facet").value || $("fac-status").value || $("fac-q").value.trim();
+        if (canDelete && gone.length && filtered) {                   // (never the whole list unfiltered)
+          var go = el("button", { type: "button", class: "btn small", text: "Remove the " + S.num(gone.length) + " value" + (gone.length === 1 ? "" : "s") + " shown" });
+          go.addEventListener("click", function () {
+            S.confirm(go, "Remove the " + S.num(gone.length) + " value" + (gone.length === 1 ? "" : "s") + " shown?", { yes: "Remove " + S.num(gone.length), no: "Cancel",
+              detail: "Their items lose them; they are not proposed again (adding one by hand brings it back). The list's filters choose which ones." }).then(function (ok) {
+              if (!ok) return;
+              go.disabled = true;
+              var n = 0, chain = Promise.resolve();
+              gone.forEach(function (f) {
+                chain = chain.then(function () { return S.admin("POST", "facets/" + f.id, { status: "rejected" }); }).then(function (r) {
+                  if (!(r && r.error)) n++;
+                  go.textContent = "Removed " + S.num(n) + " of " + S.num(gone.length) + "…";
+                });
+              });
+              chain.then(function () { saved(); loadCategories(); facetsLoad(); });
+            });
+          });
+          bulkBox.appendChild(go);
+        }
+      }
     });
   }
   var FACET_NAMES = { subject: "Subject", application: "Application", component: "Component" };
@@ -1324,7 +1352,7 @@
     var show = function () {
       li.innerHTML = "";
       li.appendChild(el("strong", { text: FACET_NAMES[c.name] }));
-      li.appendChild(el("span", { class: "muted", text: (c.builtin ? " (built in)" : " (yours)") + " · " + S.num(n) + " value" + (n === 1 ? "" : "s") +
+      li.appendChild(el("span", { class: "muted", text: (c.builtin ? " (built in: it stays; its values are removed one by one in the list below)" : " (yours)") + " · " + S.num(n) + " value" + (n === 1 ? "" : "s") +
         (c.fields ? " · values read from the fields " + c.fields : " · no field read") +
         (c.inside ? " · drawn inside its " + (FACET_NAMES[c.inside] || c.inside).toLowerCase() + " on the System map" : "") }));
       // what the category is: for people, and given to the agent and the router with the parts a question names

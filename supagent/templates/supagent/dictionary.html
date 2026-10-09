@@ -269,6 +269,7 @@
         <select id="fac-status" aria-label="State"><option value="">Approved and proposed</option>
           <option value="approved">Approved</option><option value="proposed">Proposed</option></select>
         <input id="fac-q" type="search" placeholder="Search the values" aria-label="Search the categories">
+        <span id="fac-bulk"></span>
       </div>
       <div class="filters facet-add" role="group" aria-label="Add a value">
         <select id="fac-new-facet" aria-label="Category of the new value"><option value="subject">Subject</option>
@@ -280,7 +281,7 @@
         <span id="fac-result" class="result" role="status" aria-live="polite"></span>
       </div>
       <details class="cat-own" id="cat-own">
-        <summary>Categories and where their values come from</summary>
+        <summary>Categories: add, rename or remove one, and where their values come from</summary>
         <div class="sec-head"><span class="muted">Read from the data's fields</span>
           <button type="button" class="info" aria-controls="x-cat-own" aria-label="About the categories of your own">i</button></div>
         <div class="explain" id="x-cat-own">Subject, application and component, and your own (server, environment,

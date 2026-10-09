@@ -150,6 +150,13 @@ then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with t
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
 
+## Upgrade from 0.10.6 to 0.10.6.1
+
+The wheel on every host, then restart; nothing to run (tables v18). A wiki or site document no longer fails whole when
+one of its pages cannot be read: that page is skipped and counted, the others are read; pages titled "deprecated"
+(`docs.skip_titles`) are not read, nor the pages they lead to. Every value of the Categories page can be removed, the
+ones seeded at the start too, alone or all the values a filtered list shows. INSTALL.txt, *From 0.10.6 to 0.10.6.1*.
+
 ## Upgrade from 0.10.0 to 0.10.6
 
 `pip install` the new wheel on every host, `superset supagent init` once (no table changes), restart. 0.10.4 and
