@@ -1,5 +1,63 @@
 # Changes
 
+## 0.10.6.2 — 2026-10-09
+
+The team's reports of 9 October on 0.10.6.1: a value rejected in To review left the links and the items proposed with
+it; the learning proposed values named with long phrases, proposed monitoring tools, infrastructure services and Java
+libraries as applications, and linked the subjects to nothing; an Ansible repository that keeps its inventories per
+environment (inventory/PRD/hosts, inventory/STG/hosts) had its environments' groups mixed in one.
+
+Not measured again: the agent's answering code is 0.10.6's (a subject's links are said to it, never followed).
+Checked before this release: the unit tests (42 new); the Ansible reader on the lab's 12 Ansible repositories, the old
+reader against the new (the repositories with one inventory and no environment folder unchanged; the others in
+levels such as "infra prod" and "infra staging"); a dry run on a lab map without the LLM: 13 subject links proposed for
+4 approved subjects (100 with the first rule, two shared texts: too many, not kept), and the one connector proposed as an
+application filed as a component.
+
+To review
+* **A rejected value takes its proposals with it**: the links drawn with it, proposed or approved, and the items given
+  to it go when a value is rejected, retired or removed; what a person refused about it stays, so that it is not
+  proposed again.
+
+The learning's names
+* **A learned value is a name**: 30 characters at most (`categories.learned_max_chars`) and 3 words at most
+  (`categories.learned_max_words`; a name joined by - _ or . is one word), no sentence (its punctuation, an article
+  first, a verb): else it is not proposed. A host's full name over the limit (svc.namespace.svc.cluster.local): its
+  first label, the full name kept as another name. Never checked: a value that exists (a person's, the catalog's, one
+  approved), the servers' and the groups' names, the values read in the data's fields.
+* **What a part is**: a library or a framework the code is built with (log4j, jackson-databind,
+  spring-boot-starter-web, lodash, a name ending -lib, -sdk, -common, -utils...) is not proposed; a monitoring tool
+  (Prometheus, Grafana, Zabbix, an exporter...), an infrastructure service (DNS, LDAP, a proxy or a load balancer, a
+  message broker, a CI server, an application server) or a database server is a component, or goes to a category of
+  yours named for them (monitoring, observability, infrastructure, middleware, databases, libraries...). The AI's
+  instructions say the same; the code applies it whatever the AI answers.
+* **What waits from an older reading is put right** at the next learning: a proposal named with a phrase, or a library,
+  withdrawn; a tool proposed as an application moved. A value a person approved, edited or refused is never changed.
+
+Subjects
+* **A subject's parts**: an approved part and an approved subject that 3 texts or more are about together (a fifth of
+  the texts of one of them at least) are proposed linked, the part "relates to" the subject, with the texts as
+  evidence, 10 parts per subject at most (`learn.subject_links`, on). Drawn on the System map once approved; the agent
+  is told a part's subjects, and its paths (impact, chains, leads) never go through a subject.
+
+Ansible
+* **Inventories per environment**: a repository that keeps its inventories per environment (inventory/<ENV>/hosts,
+  inventories/<env>/hosts.yml, <application>/inventory/<env>/hosts, inventory/<env>.ini...) gives each environment a
+  level of its own: "orders PRD" holds that environment's groups, "web (orders PRD)", each holding its servers; a
+  play's role runs on its group in every environment. A group named like the environment or the application
+  (production, orders) is the environment itself. The application's name is the folder above the inventory, else the
+  repository's name without its Ansible words (orders-ansible: orders). A repository with one inventory and no
+  environment folder keeps its names. An environment named test (inventory/test/hosts) is read like the others, no
+  longer as the repository's tests.
+* A map that has the old groups: the levels and the groups per environment are proposed in To review, and the old
+  group's links may be proposed for removal. Approve the new ones, then remove the old group (approved, the
+  environments mixed) from the Categories page: its links go with it, and the servers are drawn under their
+  environment (the map draws a server under the first group it was put in).
+
+Upgrade from 0.10.6.1 or 0.10.6: the wheel on every host, restart; nothing to run (tables v18). New settings:
+`categories.learned_max_chars` (30), `categories.learned_max_words` (3), `learn.subject_links` (on). INSTALL.txt,
+*From 0.10.6.1 to 0.10.6.2*.
+
 ## 0.10.6.1 — 2026-10-09
 
 The team's reports of 9 October on 0.10.6: a wiki document failed whole ("…/rest/api/content: HTTP 404: not found, or

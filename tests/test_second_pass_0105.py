@@ -96,7 +96,9 @@ def test_a_second_learning_over_the_approved_map_proposes_and_removes_nothing(en
         U.run(reason="test")
         first = propose()
         rels = {(r["from"], r["kind"], r["to"]) for r in U.export()["relations"]}
-        assert ("zqredis", "runs_on", "zqcache") in rels and ("zqorders", "runs_on", "zqapp") in rels   # the stream read
+        assert ("zqredis", "runs_on", "zqcache (zqops production)") in rels and \
+            ("zqorders", "runs_on", "zqapp (zqops production)") in rels   # the stream read (0.10.6.2: an inventory
+        #                                                       kept in an environment's folder: its groups are that one's)
         assert not any(k == "runs_on" and b == "all" for _a, k, b in rels)          # "all": every server, no value
         assert not any(b == "zqold-1" for _a, _k, b in rels)                        # a commented target
         assert first["values"] and first["links"]

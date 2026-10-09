@@ -1613,7 +1613,8 @@ def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
             from supagent.knowledge import projects as PJ
 
             try:
-                across, declared = PJ.facts(us)
+                across, declared = PJ.facts(us, label=_repo_name(d) or   # (0.10.6.2) its environments' name
+                                            (str(d.title or "").rstrip("/").rsplit("/", 1)[-1] or None))
             except Exception as ex:  # pylint: disable=broad-except   (the files' own facts stay)
                 log.warning("supagent understand: reading %s across its files: %s", d.id, str(ex)[:300])
                 across, declared = {}, {}
@@ -1916,6 +1917,9 @@ SOURCE_RANK = {"code": 0, "config": 1, "inferred": 2, "diagram": 3, "doc": 4, "w
 DATA_VERBS = ("emits", "writes", "logs_to", "watched_by")
 
 
+ENV_GROUP = re.compile(r"^(.+) \(([^()]+)\)$")   # (0.10.6.2) "web (orders PRD)": the group web of orders PRD
+
+
 def export() -> dict[str, Any]:
     """What the documents state, merged: the relations between parts and the links of parts to the data (with their
     sources, how many units say them, a line that does), what the facts imply together (a service's logs are in the
@@ -1935,19 +1939,37 @@ def export() -> dict[str, Any]:
 
     from supagent.knowledge.projects import test_file
 
+    # (0.10.6.2) a repository whose inventories are kept per environment names its groups "web (orders PRD)", in
+    # its environment "orders PRD": a group its other files name bare (a README's "Target Group", a sentence) is that
+    # group in each environment, never a group of its own mixing them
+    levels: dict[Any, set[str]] = defaultdict(set)
+    for f, u in rows:
+        if f.verb == "in_group" and f.obj_kind == "group":
+            levels[u.doc_id].add(f.obj)
+    per_env: dict[Any, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+    for f, u in rows:
+        if f.verb == "in_group":
+            for name in (f.subject, f.obj):
+                m = ENV_GROUP.match(name or "")
+                if m and m.group(2) in levels[u.doc_id] and name not in per_env[u.doc_id][norm(m.group(1))]:
+                    per_env[u.doc_id][norm(m.group(1))].append(name)
     rel: dict[tuple, dict[str, Any]] = {}
     for f, u in rows:
         if u.kind == "file" and test_file(u.ukey):    # (0.10.6) a repository's tests, fixtures, examples (read
             continue                                 # before 0.10.6 too): no fact of the System map
         s = canon(f.subject)
-        o = canon(f.obj) if f.obj_kind in ("part", "host", "group") else f.obj
-        key = (s, f.verb, o)
-        r = rel.setdefault(key, {"from": s, "kind": f.verb, "to": o, "obj_kind": f.obj_kind, "sources": set(),
-                                 "units": set(), "quote": f.quote, "where": u.title or u.ukey})
-        r["sources"].add(f.source)
-        r["units"].add(u.id)
-        if u.owner:
-            r.setdefault("owners", set()).add(u.owner)
+        objs = [f.obj]
+        if f.obj_kind in ("group", "host") and f.verb != "in_group" and per_env.get(u.doc_id):
+            objs = per_env[u.doc_id].get(norm(f.obj)) or objs
+        for obj in objs:
+            o = canon(obj) if f.obj_kind in ("part", "host", "group") else obj
+            key = (s, f.verb, o)
+            r = rel.setdefault(key, {"from": s, "kind": f.verb, "to": o, "obj_kind": f.obj_kind, "sources": set(),
+                                     "units": set(), "quote": f.quote, "where": u.title or u.ukey})
+            r["sources"].add(f.source)
+            r["units"].add(u.id)
+            if u.owner:
+                r.setdefault("owners", set()).add(u.owner)
     # implied: a part's logs go where the shipper it sends them to writes; a namespace's workloads to its collector
     runs_on = {(r["from"]): r["to"] for r in rel.values() if r["kind"] == "runs_on"}
     host_of = defaultdict(set)

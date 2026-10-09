@@ -81,11 +81,19 @@ def _graph() -> dict[str, Any]:
     long: dict[tuple[int, str, int], str] = {}        # what to do when following an interaction (its long explanation)
     from supagent.knowledge.sysmap import generic
 
+    from supagent.knowledge.interactions import TOPICS
+
+    subjects: dict[int, list[int]] = {}               # (0.10.6.2) a part's subjects and a subject's parts: said,
     rows = db.session.query(Link.a_ref, Link.b_ref, Link.kind, Link.note, Link.detail, Link.both_ways).filter(
         Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%"), Link.status == "approved", Link.kind != PART_OF)
     for a_ref, b_ref, kind, note, detail, both in rows:
         a, b = a_ref.split(":", 1)[1], b_ref.split(":", 1)[1]
         if a.isdigit() and b.isdigit() and int(a) in values and int(b) in values:
+            if kind == "about" and (values[int(a)]["cat"] in TOPICS or values[int(b)]["cat"] in TOPICS):
+                for x, y in ((int(a), int(b)), (int(b), int(a))):   # never a path: a subject ties every part it
+                    if y not in subjects.setdefault(x, []):         # is about to every other one
+                        subjects[x].append(y)
+                continue
             kind = "link" if generic(kind) else kind      # a person's link: "is linked to", with what it is
             ways = [(int(a), int(b)), (int(b), int(a))] if both else [(int(a), int(b))]
             for x, y in ways:
@@ -95,7 +103,7 @@ def _graph() -> dict[str, Any]:
                     long[(x, kind, y)] = " ".join(detail.split())
     loose, slips = loose_index(names)
     g = {"values": values, "names": names, "children": children, "out": out_links, "in": in_links, "rank": cats,
-         "long": long, "loose": loose, "slips": slips}
+         "long": long, "loose": loose, "slips": slips, "subjects": subjects}
     with _LOCK:
         _CACHE.update(stamp=s, graph=g)
     return g
@@ -786,6 +794,10 @@ def links_of(names: list[str], depth: int = 1) -> dict[str, Any]:
                     item[key] = rel
             if follow:
                 item["what_to_do_when_following"] = follow
+            near = g.get("subjects", {}).get(i, [])          # (0.10.6.2) its subjects, or the parts about it
+            if near:
+                item["subjects" if V[i]["cat"] not in ("subject", "aspect") else "parts_about_it"] = \
+                    [f'{V[x]["name"]} ({V[x]["cat"]})' for x in near[:20]]
             out.append(item)
     res: dict[str, Any] = {"parts": out}
     if listed:

@@ -54,12 +54,18 @@ def _category(kind: str, name: str) -> str | None:
     from supagent.knowledge.datalinks import SERVERISH
     from supagent.knowledge.facets import editable
 
+    from supagent.knowledge.naming import filed
+
     cats = list(editable())
     if kind in ("host", "vip"):                            # (0.10.4) a VIP: an address, with the servers
         return next((c for c in cats if SERVERISH.search(c)), None)
     if kind in ("database", "cache") or TECHNICAL.search(name):
-        return "component" if "component" in cats else None
-    return "application" if "application" in cats else None
+        base = "component" if "component" in cats else None
+    else:
+        base = "application" if "application" in cats else None
+    # (0.10.6.2) a monitoring tool, an infrastructure service or a database server no application (the
+    # deployment's category for them, else a component); a library or a framework no part (naming.filed)
+    return filed(base, name, None, cats)[0] if base else None
 
 
 def _rank(f: Any) -> tuple:
@@ -125,6 +131,10 @@ def propose(dry_run: bool = False) -> dict[str, Any]:
 
     g = export()
     out = {"values": 0, "links": 0, "confirmed": 0, "removals": 0, "withdrawn": 0, "items": 0, "not placed": 0}
+    if not dry_run:                                       # (0.10.6.2) what waits from an older reading, put right
+        from supagent.knowledge.naming import tidy
+
+        out.update({k: v for k, v in tidy().items() if v})
     import json as _json
 
     from supagent.models import Meta
@@ -227,16 +237,31 @@ def propose(dry_run: bool = False) -> dict[str, Any]:
             return None                                   # person decides; To review is no place for a twin)
         cat = _category(kind_of.get(key, "part"), name)
         if cat is None:
-            out["not placed"] += 1
+            from supagent.knowledge.naming import kind_of as what_part
+
+            if what_part(name) == "library":
+                out["a library: no part"] = out.get("a library: no part", 0) + 1
+            else:
+                out["not placed"] += 1
             return None
-        f = Facet(facet=cat, value=" ".join(str(name).split())[:128], status="proposed", source=SOURCE,
-                  synonyms=sorted(a for a in aliases.get(key, ()) if _norm(a) != key) or None,
+        from supagent.knowledge.naming import checked
+
+        shown, others, _why = checked(cat, name)          # (0.10.6.2) a name, not a phrase, not over the limit
+        if shown is None:
+            out["no name: not proposed"] = out.get("no name: not proposed", 0) + 1
+            return None
+        if _norm(shown) != key and values.get(_norm(shown)) is not None:   # its short name's value: that one
+            twin = values[_norm(shown)]
+            values[key] = twin
+            return None if twin.status == "rejected" else twin
+        f = Facet(facet=cat, value=shown[:128], status="proposed", source=SOURCE,
+                  synonyms=sorted({a for a in aliases.get(key, ()) if _norm(a) != _norm(shown)} | set(others)) or None,
                   origins=["read in the documents and the code"])
         if not dry_run:
             db.session.add(f)
             db.session.flush()
             ai_subjects_into(key, f)
-        values[key] = f
+        values[key] = values[_norm(shown)] = f
         out["values"] += 1
         return f
 
