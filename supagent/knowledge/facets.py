@@ -377,7 +377,11 @@ def seed() -> dict[str, int]:
         add("subject", c, "approved", "seed", "a category of the catalog")
     learned = {c for (c,) in db.session.query(KObject.category).filter(KObject.category.isnot(None),
                                                                        KObject.gone_at.is_(None))}
+    from supagent.knowledge.naming import checked
+
     for c in sorted(x for x in learned if x and x.strip() and x.strip().lower() not in wrote and x.lower() not in skip):
+        if checked("subject", c)[0] != " ".join(c.split()):
+            continue                                  # (0.10.6.2) a phrase or a name over the limit: no subject
         add("subject", c, found, "seed" if found == "approved" else "llm",
             "a category the learning gave to objects of the data (their descriptions, their names)")
     n["values_read"], n["fields_read"] = 0, 0
@@ -608,7 +612,13 @@ CLASSIFY_SYSTEM = ("You classify pieces of knowledge of a company's data platfor
                    "relations its text states to other items or tables (about, depends_on, part_of, explains, "
                    "runs_on). A component is a part of the systems (a service, a job or batch, a report, a "
                    "pipeline, a group of servers), never the name of a table, index, metric or field: those are "
-                   "relations (about). Use the known values below, written exactly; when none fits, add a new value "
+                   "relations (about). An application is a business application or service of the team; a "
+                   "monitoring tool (Prometheus, Grafana, an exporter), an infrastructure service (a DNS, a "
+                   "directory, a proxy or a load balancer, a message broker, a CI server) or a database server is a "
+                   "component; a library or a framework the code is built with (log4j, Spring, Jackson, lodash) is "
+                   "no value at all. A value's name is the thing's name as the texts write it: one to three words, "
+                   "30 characters at most, never a sentence, a description or a list. Use the known values below, "
+                   "written exactly; when none fits, add a new value "
                    "in new_values with a short description (a general subject, never a single record), the known "
                    "values it is part of (a component of one application or several, an application of a subject) "
                    "and, when it names the same thing as a known value, that value (same_as). When a text says a "
@@ -710,6 +720,7 @@ def said_inside(child: str, parent: str, batch: list[dict[str, Any]]) -> str | N
 
 def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[str, str]) -> dict[str, int]:
     """The LLM's answer written: new values proposed, tags and links (confident ones used at once)."""
+    from supagent.knowledge.naming import checked, filed
     from supagent.models import Classified, Facet, Link, Tag
 
     n = {"tags": 0, "proposed": 0, "links": 0}
@@ -747,14 +758,42 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
 
         return None if facet == "subject" and SERVERISH.search(hit.facet or "") else hit
 
+    cats = list(editable())
+
+    def place(facet: str, value: str, description: str | None = None) -> tuple[str | None, str, list[str]]:
+        """(0.10.6.2) A new value the AI names: its category (a monitoring tool, an infrastructure service or a
+        database server no application, a library no value: naming.filed), its name (no phrase, no name over the
+        limit: naming.checked) and other names; (None, why, []) when it is not proposed."""
+        to, _kind = filed(facet, value, description, cats)
+        if to is None:
+            n["not proposed"] = n.get("not proposed", 0) + 1
+            return None, "a library", []
+        name, others, why = checked(to, value)
+        if name is None:
+            n["not proposed"] = n.get("not proposed", 0) + 1
+            return None, why, []
+        return to, name, others
+
     for nv in args.get("new_values") or []:
         if data_name(str(nv.get("facet") or ""), str(nv.get("value") or "")):
             continue
         if nv.get("facet") in llm_cats and str(nv.get("value") or "").strip():
-            if db.session.query(Facet.id).filter(Facet.facet == nv["facet"], Facet.value.ilike(
-                    " ".join(str(nv["value"]).split()))).first() is None and elsewhere(nv["facet"], nv["value"]):
-                continue                              # known under another category: nothing new to propose
-            f = _ensure(nv["facet"], nv["value"], "proposed", "llm", str(nv.get("description") or "")[:500] or None)
+            desc = str(nv.get("description") or "")[:500] or None
+            f = db.session.query(Facet).filter(Facet.facet == nv["facet"], Facet.value.ilike(
+                " ".join(str(nv["value"]).split()))).first()
+            if f is None:
+                if elsewhere(nv["facet"], nv["value"]):
+                    continue                          # known under another category: nothing new to propose
+                to, name, others = place(nv["facet"], str(nv["value"]), desc)
+                if to is None:
+                    continue
+                if (to, name.lower()) != (nv["facet"], " ".join(str(nv["value"]).split()).lower()) and (
+                        db.session.query(Facet.id).filter(Facet.facet == to, Facet.value.ilike(name)).first()
+                        is not None or elsewhere(to, name)):
+                    continue                          # (0.10.6.2) known where it belongs: nothing new to propose
+                f = _ensure(to, name, "proposed", "llm", desc)
+                if f is not None and others and f.status == "proposed":
+                    f.synonyms = sorted(set(f.synonyms or []) | set(others))
             if f is not None and f.status == "proposed":
                 n["proposed"] += 1
                 if not f.origins:
@@ -801,7 +840,16 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
                 wanted.append((o["category"], str(o["value"])))
         for facet, value in wanted:
             f = (db.session.query(Facet).filter(Facet.facet == facet, Facet.value.ilike(value.strip())).first()
-                 or elsewhere(facet, value) or _ensure(facet, value, "proposed", "llm"))
+                 or elsewhere(facet, value))
+            if f is None:                             # (0.10.6.2) a new one: where it belongs, as a name
+                to, name, others = place(facet, value)
+                if to is None:
+                    continue
+                f = ((db.session.query(Facet).filter(Facet.facet == to, Facet.value.ilike(name)).first()
+                      if (to, name) != (facet, value.strip()) else None)
+                     or elsewhere(to, name) or _ensure(to, name, "proposed", "llm"))
+                if f is not None and others and f.status == "proposed":
+                    f.synonyms = sorted(set(f.synonyms or []) | set(others))
             if f is None or f.status == "rejected":
                 continue
             t = db.session.query(Tag).filter(Tag.ref == ref, Tag.facet_id == f.id).first()
@@ -842,6 +890,9 @@ def settle() -> dict[str, int]:
     out = {"tags": 0, "links": 0, "values": 0}
     # (a value in use is never retired, merged or changed here: what looks wrong with one is proposed to an admin,
     # knowledge.retire; only the learning's own proposals nobody approved are taken back)
+    from supagent.knowledge.naming import tidy
+
+    out.update({k: v for k, v in tidy().items() if v})   # (0.10.6.2) no phrase, no library, no tool as application
     names = _table_refs()
     for f in db.session.query(Facet).filter(Facet.facet == "component", Facet.status == "proposed",
                                              Facet.source == "llm"):

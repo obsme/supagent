@@ -289,6 +289,80 @@ def _yaml_inventory(path: str, text: str) -> Inventory | None:
     return inv if inv.all_hosts() or len(inv.groups) > 1 else None
 
 
+# (0.10.6.2, the team's report of 9 October: "we have inventory per application in the repo, like inventory/PRD/hosts
+# or inventory/STG/hosts") an inventory kept per environment: its groups are that environment's, its servers too
+ENV_WORDS = re.compile(r"^(prd|prod|production|live|stg|stage|staging|uat|qa|qua|qualif|qualification|test|tst|dev|"
+                       r"develop|development|int|integration|sit|preprod|pre-prod|preproduction|ppd|pprod|pp|rec|"
+                       r"recette|hom|homol|homologation|sandbox|sbx|dr|drp|perf|performance|demo|lab|nonprod|non-prod|"
+                       r"(?:prd|prod|stg|uat|dev|test|qa|int)[-_]?\d{1,2})$", re.I)
+NOT_ENV = {"main", "all", "default", "site", "static", "local", "example", "sample", "hosts", "inventory", "group_vars",
+           "host_vars", "files", "templates"}
+ANSIBLE_WORDS = ("ansible|deploy|deployments?|infra|infrastructure|playbooks?|inventor(?:y|ies)|config|configuration|"
+                 "ops|automation|provisioning|platform")
+REPO_SUFFIX = re.compile(rf"[-_](?:{ANSIBLE_WORDS})$", re.I)
+REPO_PREFIX = re.compile(rf"^(?:{ANSIBLE_WORDS})[-_]", re.I)
+GENERIC_FOLDER = re.compile(rf"^(?:{ANSIBLE_WORDS}|src|repo|repository|files|etc)$", re.I)
+
+
+def _app_of(label: str | None) -> str:
+    """A repository's name without its Ansible words (orders-ansible, ansible-orders, parcel-ops: orders, parcel;
+    infra-ansible: infra)."""
+    x = str(label or "").strip()
+    for rx in (REPO_SUFFIX, REPO_PREFIX):
+        y = rx.sub("", x, count=1)
+        if y:
+            x = y
+    return x
+
+
+def inventory_place(path: str) -> tuple[str | None, str | None]:
+    """(0.10.6.2) What where an inventory is kept says it is for: (its environment, the application or site above it)
+    from inventory/<env>/hosts, <app>/inventory/<env>/hosts, inventories/<app>/<env>/hosts.yml, inventory/<env>.ini,
+    inventory/hosts-<env>, <env>/hosts; (None, None) when the place says nothing (inventory/hosts, hosts)."""
+    segs = [x for x in sample_base(path or "").split("/") if x]
+    if not segs:
+        return None, None
+    dirs, stem = segs[:-1], re.sub(r"\.(ya?ml|ini|cfg|txt|toml)$", "", segs[-1], flags=re.I)
+    rest = re.sub(r"^(?:hosts|inventory)[._-]?|[._-]?(?:hosts|inventory)$", "", stem, flags=re.I)
+    at = next((i for i in range(len(dirs) - 1, -1, -1) if re.fullmatch(r"inventor(?:y|ies)", dirs[i], re.I)), None)
+    if at is not None:
+        above = dirs[at - 1] if at >= 1 else None
+        below = [x for x in dirs[at + 1:] if x.lower() not in NOT_ENV]
+        if not below:                                     # inventory/prod.ini, inventory/hosts-stg
+            env = rest if rest and rest.lower() not in NOT_ENV else None
+            return (env, above) if env else (None, None)
+        envs = [x for x in below if ENV_WORDS.match(x)]
+        env = envs[-1] if envs else below[-1]
+        others = [x for x in below if x != env]
+        return env, (others[-1] if others else above)
+    if rest and ENV_WORDS.match(rest):                    # hosts-prd, prod-inventory.yml
+        return rest, (dirs[-1] if dirs else None)
+    if dirs and ENV_WORDS.match(dirs[-1]) and re.fullmatch(r"hosts|inventory", stem, re.I):   # prd/hosts
+        up = dirs[-2] if len(dirs) >= 2 and not re.fullmatch(r"env(?:ironment)?s?", dirs[-2], re.I) else None
+        return dirs[-1], up
+    return None, None
+
+
+def levels(invs: dict[str, "Inventory"], label: str | None = None) -> dict[str, str]:
+    """(0.10.6.2) {inventory path: its environment's name} for a repository that keeps its inventories per
+    environment (two environments or more, or one its folder names as such: PRD, staging, uat...): the application
+    (the folder above the inventory, else the repository's name without its Ansible words) and the environment as
+    the folders write them, "orders PRD"."""
+    places = {p: inventory_place(p) for p in invs}
+    places = {p: (env, above) for p, (env, above) in places.items() if env}
+    if not places:
+        return {}
+    if len({(env.lower(), (above or "").lower()) for env, above in places.values()}) < 2 and \
+            not any(ENV_WORDS.match(env) for env, _above in places.values()):
+        return {}
+    repo = _app_of(label)
+    out = {}
+    for p, (env, above) in places.items():
+        app = above if above and above.lower() not in NOT_ENV and not GENERIC_FOLDER.match(above) else repo
+        out[p] = f"{app} {env}" if app else env
+    return out
+
+
 def inventories(units: list[dict[str, Any]]) -> dict[str, Inventory]:
     out = {}
     for u in units:
@@ -734,12 +808,39 @@ def _verb(window: str, me: str) -> str | None:
     return "calls"
 
 
-def ansible(units: list[dict[str, Any]], named: frozenset[str] | set[str] = frozenset()
+def ansible(units: list[dict[str, Any]], named: frozenset[str] | set[str] = frozenset(), label: str | None = None
             ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]:
     """The facts of an Ansible repository ({path: [fact]}) and the names it declares ({"parts", "hosts", "groups"}).
-    `named`: (0.10.6) the groups its tests' inventories name (no host of theirs)."""
+    `named`: (0.10.6) the groups its tests' inventories name (no host of theirs). `label`: (0.10.6.2) the
+    repository's name, for its environments' (levels())."""
     by_path = {u["path"]: u for u in units if u.get("path")}
     invs = inventories(units)
+    staged = levels(invs, label)                       # (0.10.6.2) {inventory: "orders PRD"}
+
+    def gname(path: str | None, group: str) -> str:
+        """A group of an inventory kept per environment: "web (orders PRD)" (each environment's web its own); a group
+        named like its environment or its application (production, orders, orders_prd: every server of it) is the
+        environment itself."""
+        if path not in staged:
+            return group
+        level = staged[path]
+        words = [_norm(w) for w in level.split()]
+        if _norm(group) in {_norm(level), *words, "-".join(words), "-".join(reversed(words))}:
+            return level
+        return f"{group} ({level})"
+
+    def placed(inv: "Inventory | None", kind: str, place: str) -> list[str]:
+        """Where a play's group is: in each environment of the application that has it (a play runs with any of
+        them), else the group itself."""
+        if kind != "group" or inv is None or inv.path not in staged:
+            return [place]
+        app = staged[inv.path].rsplit(" ", 1)[0] if " " in staged[inv.path] else None
+        out = [gname(inv.path, place)]
+        for other, oi in sorted(invs.items()):
+            if other != inv.path and other in staged and place in oi.groups and \
+                    (staged[other].rsplit(" ", 1)[0] if " " in staged[other] else None) == app:
+                out.append(gname(other, place))
+        return list(dict.fromkeys(out))
     roles = _roles(units, by_path)
     plays = [p for u in units if sample_base(u["path"] or "").endswith((".yml", ".yaml")) and   # (site.yml.sample too)
              "roles/" not in (u["path"] or "")
@@ -757,18 +858,28 @@ def ansible(units: list[dict[str, Any]], named: frozenset[str] | set[str] = froz
                                      {r for p in plays for r in p["roles"]})}
     F = Facts(by_path)
     vfiles = _vars_files(units)
-    # the inventories: every host in its groups (a child group's hosts in its parents' too)
+    # the inventories: every host in its groups (a child group's hosts in its parents' too); (0.10.6.2) an
+    # inventory kept per environment: its groups in the environment ("web (orders PRD)" in "orders PRD"), the hosts of
+    # no group of its own in the environment itself
     for path, inv in invs.items():
+        env = staged.get(path)
         for g in inv.groups:
             if g in ("all", "ungrouped"):
+                if env:                                    # a host of no group of its own: in the environment
+                    for h, ln in inv.groups[g]["hosts"].items():
+                        F.add(path, h, "in_group", env, "group", line=ln, conf=0.95)
                 continue
-            names["groups"].append(g)
+            me = gname(path, g)
+            names["groups"].append(me)
             for h, ln in inv.hosts_of(g).items():
-                F.add(path, h, "in_group", g, "group", line=ln, conf=0.95)
+                F.add(path, h, "in_group", me, "group", line=ln, conf=0.95)
                 names["hosts"].append(h)
-            for p in inv.parents(g):
-                if p not in ("all", "ungrouped") and inv.hosts_of(g):
-                    F.add(path, g, "in_group", p, "group", line=inv.groups[g]["line"], conf=0.95)
+            ups = [p for p in inv.parents(g) if p not in ("all", "ungrouped")]
+            for p in ups:
+                if inv.hosts_of(g) and gname(path, p) != me:
+                    F.add(path, me, "in_group", gname(path, p), "group", line=inv.groups[g]["line"], conf=0.95)
+            if env and me != env and inv.hosts_of(g) and not any(gname(path, p) != me for p in ups):
+                F.add(path, me, "in_group", env, "group", line=inv.groups[g]["line"], conf=0.95)
         names["hosts"] += inv.all_hosts()
     # the plays: what runs where
     on: dict[tuple[str | None, str], set[str]] = defaultdict(set)      # (inventory, group or host) -> parts
@@ -853,8 +964,9 @@ def ansible(units: list[dict[str, Any]], named: frozenset[str] | set[str] = froz
             names["parts"].append(part)
             for kind, place in kept.get(part, places):
                 on[(inv.path if inv else None, place)].add(part)
-                F.add(p["file"], part, "runs_on", place, "group" if kind == "group" else "host", pos=p["pos"],
-                      conf=0.9)
+                for where in placed(inv, kind, place):   # (0.10.6.2) each environment's group
+                    F.add(p["file"], part, "runs_on", where, "group" if kind == "group" else "host", pos=p["pos"],
+                          conf=0.9)
         play_parts.append((p, list(dict.fromkeys(parts)), inv, places))
     # a script's ad-hoc commands: a service started on a pattern's hosts
     for u, m in adhoc:
@@ -864,7 +976,8 @@ def ansible(units: list[dict[str, Any]], named: frozenset[str] | set[str] = froz
                 not SYSTEM_SERVICES.match(str(a["name"])) and str(a.get("state", "")).lower() in ("started", "restarted"):
             for kind, place in _places(m.group("pattern"), inv, named):
                 on[(inv.path if inv else None, place)].add(str(a["name"]))
-                F.add(u["path"], str(a["name"]), "runs_on", place, kind, pos=m.start(), conf=0.85)
+                for where in placed(inv, kind, place):
+                    F.add(u["path"], str(a["name"]), "runs_on", where, kind, pos=m.start(), conf=0.85)
                 names["parts"].append(str(a["name"]))
 
     def parts_on(inv: Inventory | None, group: str) -> set[str]:
@@ -1312,12 +1425,17 @@ def kinds(units: list[dict[str, Any]], declared: dict[str, Any], workloads: list
     return out
 
 
+ENV_TEST = re.compile(r"(^|/)(inventor(?:y|ies))/(?:tests?|testing)(?=/)", re.I)
+
+
 def test_file(path: str) -> bool:
-    """(0.10.6) A file of a repository's tests, fixtures or examples (TEST_DIR): no fact of the System map."""
-    return bool(TEST_DIR.search(path or ""))
+    """(0.10.6) A file of a repository's tests, fixtures or examples (TEST_DIR): no fact of the System map. (0.10.6.2)
+    An inventory's environment named test (inventory/test/hosts) is one of the deployment's environments."""
+    return bool(TEST_DIR.search(ENV_TEST.sub(r"\1\2/env", path or "")))
 
 
-def facts(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
+def facts(units: list[dict[str, Any]], label: str | None = None
+          ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
     """The facts a repository states across its files ({path: [fact]}), the names it declares and, in an Ansible
     repository, who speaks in its files ({"owners": {path: a role's part, or "" for nobody}}). (0.10.6) Its tests,
     fixtures and examples left out (test_file)."""
@@ -1325,7 +1443,7 @@ def facts(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]],
     tests = inventories([u for u in units if test_file(u.get("path") or "")])
     named = {g for i in tests.values() for g in i.groups if g not in ("all", "ungrouped")}   # their groups' names
     units = [u for u in units if not test_file(u.get("path") or "")]
-    a, names = ansible(units, named)
+    a, names = ansible(units, named, label)
     k, workloads, renamed = kubernetes(units)
     c, services, built = compose(units)
     for src in (a, k, c):

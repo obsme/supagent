@@ -160,6 +160,7 @@ def test_a_classification_is_a_run_with_its_steps(platform, app, monkeypatch):
         assert [s["step"] for s in steps] == [
             "categories: the values read in the data's fields", "categories: what waits, by the rules",
             "categories: the knowledge items that changed", "categories: given to the items by the LLM",
+            "categories: the subjects' parts (the texts about both)",     # (0.10.6.2) learn.subject_links
             "categories: parts that look retired", "the kind of each index (logs, spans, events...)",
             "update the search"]          # (0.10.5 C') "parts with no description" only with learn.describe_values
         assert steps[0]["values_read"] >= 31 and steps[0]["server"] >= 31 and "seconds" in steps[0]
@@ -181,7 +182,7 @@ def test_a_classification_is_a_run_with_its_steps(platform, app, monkeypatch):
         with _client(app, "admin") as c:
             listed = c.get("/supagent/admin/api/runs").get_json()["runs"]
             mine = next(x for x in listed if x["id"] == run_id)
-            assert mine["kind"] == "classify" and len(mine["stats"]["steps"]) == 7      # (0.10.5 C': descriptions off)
+            assert mine["kind"] == "classify" and len(mine["stats"]["steps"]) == 8      # (0.10.5 C': descriptions off; 0.10.6.2: the subjects' parts)
         with _client(app, "alice") as c:
             assert c.post("/supagent/admin/api/classify", json={}).status_code in (302, 401, 403)
     finally:

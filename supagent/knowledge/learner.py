@@ -564,6 +564,18 @@ def _categories(run_id: int, steps: Steps, seconds: float, limit: int) -> dict[s
         log.warning("supagent learn: run %s: the categories: %s", run_id, str(ex)[:300])
         out["classified"] = {"error": str(ex)[:300]}
         steps.interrupted(str(ex)[:300])
+    if settings.get("learn.subject_links"):              # (0.10.6.2) the subjects linked to the parts their texts
+        steps.begin("categories: the subjects' parts (the texts about both)")   # are about (naming.subject_links)
+        try:
+            from supagent.knowledge.naming import subject_links
+
+            out["subject_links"] = subject_links()
+        except LearningStopped:
+            raise
+        except Exception as ex:  # pylint: disable=broad-except
+            db.session.rollback()
+            out["subject_links"] = {"error": str(ex)[:300]}
+        steps.end(**_flat(out["subject_links"]))
     steps.begin("categories: parts that look retired")   # proposed to an admin, never retired here
     try:
         from supagent.knowledge.retire import check as look_retired

@@ -150,6 +150,15 @@ then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with t
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
 
+## Upgrade from 0.10.6.1 to 0.10.6.2
+
+The wheel on every host, then restart; nothing to run (tables v18). A rejected value takes its proposed links and items
+with it. What the learning proposes is a name (30 characters and 3 words at most, no phrase); a monitoring tool, an
+infrastructure service or a database server is no application, a library no value; what waits from an older reading
+is put right at the next learning. A subject is proposed linked to the parts its texts are about. An Ansible
+repository with inventories per environment (inventory/PRD/hosts, inventory/STG/hosts) gives each environment its
+groups and their servers. INSTALL.txt, *From 0.10.6.1 to 0.10.6.2*.
+
 ## Upgrade from 0.10.6 to 0.10.6.1
 
 The wheel on every host, then restart; nothing to run (tables v18). A wiki or site document no longer fails whole when

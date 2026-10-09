@@ -1,15 +1,15 @@
-supagent 0.10.6.1 - the AI agent inside Apache Superset
+supagent 0.10.6.2 - the AI agent inside Apache Superset
 =======================================================
 
 What is in this folder
-  supagent-0.10.6.1-py3-none-any.whl  the package for Superset 6.1 (pure Python; nothing else to install)
+  supagent-0.10.6.2-py3-none-any.whl  the package for Superset 6.1 (pure Python; nothing else to install)
   supagent-guide.html / .pdf        the guide (install, LLM middleware, learning, screens)
   catalog.example.yaml              an example catalog, to adapt
   SHA256SUMS                        checksums
 
-Upgrading? From 0.10.6: pip install this wheel on every host, restart; nothing to run: "From 0.10.6 to 0.10.6.1"
-below. From 0.10.0: pip install this wheel on every host, superset supagent init once (no table changes: v18),
-restart: "From 0.10.0 to 0.10.6" below (0.10.4 and 0.10.5 were not released: "What 0.10.5 brings" and "What 0.10.4 brings" too). From 0.9.6.9,
+Upgrading? From 0.10.6.1 or 0.10.6: pip install this wheel on every host, restart; nothing to run: "From 0.10.6.1 to
+0.10.6.2" below (and "From 0.10.6 to 0.10.6.1" from 0.10.6). From 0.10.0: pip install this wheel on every host,
+superset supagent init once (no table changes: v18), restart: "From 0.10.0 to 0.10.6" below (0.10.4 and 0.10.5 were not released: "What 0.10.5 brings" and "What 0.10.4 brings" too). From 0.9.6.9,
 0.9.6.8, ... 0.9.6.1 or 0.9.6: pip install this wheel on every host, superset supagent init once (tables v17 to v18:
 two new tables, nothing else changes), restart: "From 0.9.6.x to 0.10.6" below, and the sections after it for what
 each 0.9.6.x after yours brought (in this wheel too, nothing more to run). From 0.9.4, 0.9.2, 0.9.1 or 0.9.0: pip
@@ -33,7 +33,7 @@ role): three packages must be pinned, or Superset itself does not start (none is
 1. Install in Superset's virtualenv (pip only)
 
    PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-   $PY -m pip install supagent-0.10.6.1-py3-none-any.whl
+   $PY -m pip install supagent-0.10.6.2-py3-none-any.whl
    Superset 6.1: nothing else is needed (offline too).
 
 2. Register it: one line in superset_config.py (no logic)
@@ -134,10 +134,28 @@ role): three packages must be pinned, or Superset itself does not start (none is
      superset supagent init          builds it (the first time it finds the extensions)
      superset supagent store status  extensions, versions, size, warnings
 
+From 0.10.6.1 to 0.10.6.2
+=========================
+
+On every host  $PY -m pip install supagent-0.10.6.2-py3-none-any.whl, then restart the web servers, the Celery workers
+and beat. Nothing to run: no table changes (v18), superset_config.py does not change. New settings:
+categories.learned_max_chars (30), categories.learned_max_words (3), learn.subject_links (on). Back: the 0.10.6.1 wheel.
+  - To review: a rejected value takes with it the links and the items proposed with it (what a person refused stays).
+  - The learning: a value it proposes is a name (30 characters and 3 words at most, no phrase); a monitoring tool, an
+    infrastructure service or a database server is a component (or goes to a category of yours named for them), a
+    library is not proposed; what waits from an older reading is put right at the next learning (a person's values
+    are never changed).
+  - Subjects: an approved part and an approved subject that 3 texts or more are about together are proposed linked.
+  - Ansible: inventories per environment (inventory/PRD/hosts, inventory/STG/hosts) give each environment a level
+    ("orders PRD") holding its groups ("web (orders PRD)") and their servers. A map that has the old groups (approved,
+    the environments mixed): approve the new levels and groups in To review (the old group's links may be proposed
+    for removal), then remove the old group from the Categories page, so that the servers are drawn under their
+    environment.
+
 From 0.10.6 to 0.10.6.1
 =======================
 
-On every host  $PY -m pip install supagent-0.10.6.1-py3-none-any.whl, then restart the web servers, the Celery workers
+On every host  $PY -m pip install supagent-0.10.6.2-py3-none-any.whl, then restart the web servers, the Celery workers
 and beat. Nothing to run: no table changes (v18), superset_config.py does not change. New setting: docs.skip_titles
 (the titles of the wiki's and the sites' pages not read: "deprecated" by default). Back: the 0.10.6 wheel.
   - Documents and sites: a page under the document's page or named by its links that cannot be read (404, 403, a
@@ -152,7 +170,7 @@ From 0.10.0 to 0.10.6
 0.10.4 and 0.10.5 were measured and not released: what they bring comes with 0.10.6 (What 0.10.5 brings and What
 0.10.4 brings, below).
 
-On every host  $PY -m pip install supagent-0.10.6.1-py3-none-any.whl, then once, on one host:
+On every host  $PY -m pip install supagent-0.10.6.2-py3-none-any.whl, then once, on one host:
       superset supagent init          tables: schema version 18 -> 18 (no table changes)
 Then restart the web servers, the Celery workers and beat. superset_config.py does not change.
 
@@ -238,11 +256,11 @@ From 0.9.6.x to 0.10.6
 
 First a backup of Superset's database (the way back to the data as it was):
       pg_dump -Fc -f superset-before-0.10.6.dump "<Superset's database>"
-On every host  $PY -m pip install supagent-0.10.6.1-py3-none-any.whl, then once, on one host:
+On every host  $PY -m pip install supagent-0.10.6.2-py3-none-any.whl, then once, on one host:
       superset supagent init          tables: schema version 17 -> 18
 (two new tables: supagent_kunit, the units of the documents and the code that were read: a page, a file; and
 supagent_kfact, what each states, with its line; nothing else changes, nothing deleted). Then restart the web
-servers, the Celery workers and beat. Settings -> Chat settings shows "supagent 0.10.6.1 (tables v18)".
+servers, the Celery workers and beat. Settings -> Chat settings shows "supagent 0.10.6.2 (tables v18)".
 superset_config.py does not change.
 
 What starts by itself:
@@ -472,7 +490,7 @@ pieces are made again once more with 0.9.6's names; a Context page rejected with
 From 0.9 to 0.9.6
 =================
 
-On every host  $PY -m pip install supagent-0.10.6.1-py3-none-any.whl, then once, on one host:
+On every host  $PY -m pip install supagent-0.10.6.2-py3-none-any.whl, then once, on one host:
       superset supagent init          tables: schema version 15 -> 18; the roles AI Admin, AI Editor, AI Viewer
 Then restart the web servers, the Celery workers and beat. Settings -> Chat settings shows "supagent 0.10.6.1 (tables
 v18)". Give people their role (superset supagent grant <user> --role viewer|editor|admin): the role AI Agent of
@@ -512,7 +530,7 @@ as their note; it shows no note nor memory kept for a group. The roles AI Admin,
 From 0.8 to 0.9.0
 =================
 
-On every host  $PY -m pip install supagent-0.10.6.1-py3-none-any.whl, then once, on one host:
+On every host  $PY -m pip install supagent-0.10.6.2-py3-none-any.whl, then once, on one host:
       superset supagent init          tables: schema version 14 -> 18
 (three new nullable columns on supagent_link: detail, evidence, explained_by: the long explanation of an
 interaction, where it was found, who explained it; the sentence an older proposed interaction kept as its note
@@ -598,11 +616,11 @@ What changes:
 Steps (Superset stopped for a few minutes):
  1. Stop the web servers, the Celery workers and beat, on every host.
  2. Back up: pg_dump -Fc -f superset-before-0.8.0.dump "<Superset's database>"; $PY -m pip freeze > pip-before-0.8.0.txt
- 3. On every host: $PY -m pip install supagent-0.10.6.1-py3-none-any.whl    ($PY -m pip show supagent: 0.10.6)
+ 3. On every host: $PY -m pip install supagent-0.10.6.2-py3-none-any.whl    ($PY -m pip show supagent: 0.10.6)
  4. Once, on one host: superset supagent init
       tables: schema version 13 -> 18
       knowledge store: N pieces of the catalog's notes are guides now      (when the store is used and had some)
- 5. Start everything. Checks: Settings -> Chat settings shows "supagent 0.10.6.1 (tables v18)"; Data dictionary ->
+ 5. Start everything. Checks: Settings -> Chat settings shows "supagent 0.10.6.2 (tables v18)"; Data dictionary ->
     Knowledge -> Catalog: the former notes are guides; a question in the chat answers.
 
 Back to 0.7.1: stop, pip install the 0.7.1 wheel, then in Superset's database:

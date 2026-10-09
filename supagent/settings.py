@@ -295,6 +295,19 @@ SPECS: list[Spec] = [
          "server with its component, a tenant with its servers: 0.9.6); off: proposed in To review like an index's"),
     Spec("categories.data_link_days", 21, "int", "A link read from the data that the data has not shown for this many "
          "days is proposed for removal (never removed alone)"),
+    Spec("categories.learned_max_chars", 30, "int", "(0.10.6.2) A value the learning proposes (an application, a "
+         "component, a subject, a value of a category of yours filled by hand) has a name of this many characters at "
+         "most: a longer one is a sentence or a description, not proposed (a host's full name: its first label, the "
+         "full name kept as another name). The servers, the groups and the values read in the data's fields take "
+         "any name; a value that exists is never changed"),
+    Spec("categories.learned_max_words", 3, "int", "(0.10.6.2) ... and this many words at most (a name joined by "
+         "- _ or . is one word); with punctuation of a sentence, an article first or a verb, it is a phrase: not "
+         "proposed"),
+    Spec("learn.subject_links", True, "bool", "(0.10.6.2) With the classification, an approved part and an approved "
+         "subject that three of the texts the AI classified or more are about together (a fifth of the texts of one "
+         "of them at least) are proposed linked (the part relates to the subject, the texts as evidence; 10 parts per "
+         "subject at most, the most frequent first); they are drawn on the System map once approved, never followed "
+         "by the agent's paths"),
     Spec("learn.classify_per_run", 400, "int", "Knowledge items the daily learning classifies at most (their "
          "categories: aspect, subjects, applications, components, and the relations their texts state); the next "
          "run continues; 0: none (no item is given to the LLM)"),
