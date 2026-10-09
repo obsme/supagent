@@ -88,7 +88,8 @@ def test_the_review_lists_what_waits_with_real_counts_and_titles(app, queue):
         assert d["counts"]["tags"] == 1                                       # on approved values only
         assert d["tags"][0]["title"].startswith("Amounts are in EUR")         # the item, in words
         assert d["links"][0]["b_title"] == "ledger" and d["counts"]["routes"] == 3
-        assert d["waiting"] == sum(d["counts"][k] for k in ("memory", "recipes", "values", "tags", "links"))
+        assert d["counts"]["warnings"] == 1 and d["warnings"][0]["kind"] == "two_ways"   # Settlement(s): one name?
+        assert d["waiting"] == sum(d["counts"][k] for k in ("memory", "recipes", "values", "tags", "links", "warnings"))
 
 
 def test_every_action_takes_an_item_out_of_the_review(app, queue, sure_used_at_once):
@@ -425,3 +426,41 @@ def test_review_all_is_on_by_default(app):
 
     with app.app_context():
         assert settings.BY_KEY["categories.review_all"].default is True and F.review_all()
+
+
+def test_the_review_filtered_by_a_word(app):
+    """(0.10.1) To review filtered by a word: a part's name, a repository or a document where a proposal was read;
+    the counts are the filter's, so that "Approve all shown" and "Reject all shown" act on what it shows."""
+    from superset.extensions import db
+
+    from supagent.models import Facet, Link
+
+    with app.app_context():
+        a = Facet(facet="application", value="Gullwing", status="approved", source="admin")
+        b = Facet(facet="component", value="Ternstore", status="proposed", source="docs",
+                  origins=["read in OPS/gull-deploy"])
+        c = Facet(facet="component", value="Plovercache", status="proposed", source="docs",
+                  origins=["read in OPS/plover-deploy"])
+        db.session.add_all([a, b, c])
+        db.session.flush()
+        x = Link(a_ref=f"facet:{a.id}", b_ref=f"facet:{b.id}", kind="reads_from", status="proposed", source="docs",
+                 evidence="DB_HOST=ternstore (roles/gull/templates/env.j2; OPS/gull-deploy)")
+        y = Link(a_ref=f"facet:{a.id}", b_ref=f"facet:{c.id}", kind="calls", status="proposed", source="docs",
+                 evidence="CACHE_URL=redis://plovercache (app/settings.py; OPS/plover-deploy)")
+        db.session.add_all([x, y])
+        db.session.commit()
+        try:
+            cl = _client(app, "admin")
+            d = cl.get("/supagent/admin/api/review?q=gull-deploy").get_json()
+            assert d["q"] == "gull-deploy"
+            assert [v["value"] for v in d["values"]] == ["Ternstore"] and d["counts"]["values"] == 1
+            assert [l["id"] for l in d["links"]] == [x.id] and d["counts"]["links"] == 1   # read there
+            d = cl.get("/supagent/admin/api/review?q=plovercache").get_json()
+            assert [l["id"] for l in d["links"]] == [y.id]                                # a part's name
+            assert [v["value"] for v in d["values"]] == ["Plovercache"]
+            d = cl.get("/supagent/admin/api/review").get_json()
+            assert d["q"] == "" and d["counts"]["links"] >= 2                            # no filter: all
+        finally:
+            db.session.query(Link).filter(Link.id.in_([x.id, y.id])).delete(synchronize_session=False)
+            db.session.query(Facet).filter(Facet.id.in_([a.id, b.id, c.id])).delete(synchronize_session=False)
+            db.session.commit()

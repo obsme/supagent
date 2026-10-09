@@ -1594,6 +1594,8 @@ class KnowledgeView(_RecipesMixin, BaseView):
                 if f is None:
                     abort(404)
                 f.description = str(body["describe"].get("description") or "").strip()[:2000] or None
+                if isinstance(f.suggested, dict) and "description_by" in f.suggested:   # (0.10.5) a person's now
+                    f.suggested = {k: v for k, v in f.suggested.items() if k != "description_by"} or None
                 f.reviewed_by = g.user.username
                 db.session.commit()
                 touch()
@@ -1646,7 +1648,20 @@ class KnowledgeView(_RecipesMixin, BaseView):
         fid = request.args.get("id") or ""
         if not fid.isdigit():
             return _json({"error": "id: the part's id"}, 400)
-        return _json({"links": sysmap.links_of_value(int(fid)), "can_edit": _can_edit(), "can_delete": _can_delete()})
+        from superset.extensions import db
+
+        data: list[dict[str, Any]] = []
+        try:                                  # (0.10.2) where it is in the data the user may query, written as there
+            from supagent.knowledge.valueindex import places
+            from supagent.models import Facet
+
+            f = db.session.get(Facet, int(fid))
+            data = places([f.value] + [str(x) for x in (f.synonyms or [])]) if f is not None else []
+        except Exception:  # pylint: disable=broad-except   (the links are shown without it)
+            db.session.rollback()
+            log.warning("supagent: where a value is in the data: not read", exc_info=True)
+        return _json({"links": sysmap.links_of_value(int(fid)), "data": data, "can_edit": _can_edit(),
+                      "can_delete": _can_delete()})
 
     @expose("/api/map/export.pdf", methods=("POST",))
     @has_access_api
@@ -1774,7 +1789,8 @@ class AdminView(BaseView):
         "set_memory": "edit", "add_doc": "edit", "edit_doc": "edit", "refresh_doc": "edit", "add_facet": "edit",
         "approve_found": "edit", "set_facet": "edit", "set_tag": "edit", "set_link": "edit", "set_route": "edit",
         "delete_entry": "delete", "delete_doc": "delete",
-        "context_proposals": "read", "context_review": "edit", "context_diff": "read"}
+        "context_proposals": "read", "context_review": "edit", "context_diff": "read", "lint_dismiss": "edit",
+        "fields_decide": "edit"}
 
     # ---- team memory
     @expose("/api/memory", methods=("GET",))
@@ -2323,10 +2339,24 @@ class AdminView(BaseView):
         from supagent.models import Facet, Link, Memory, Recipe, Route, Tag
 
         limit = min(max(int(request.args.get("limit", 50)), 1), 500)
+        # (0.10.1) a filter: a part, a repository, a document, a word: what the proposals name or where they were read
+        q = " ".join(str(request.args.get("q") or "").split())[:200]
+        like = f"%{q}%" if q else None
+        hit_refs: list[str] = []
+        if like:
+            import sqlalchemy as _sa
+
+            hit_refs = [f"facet:{i}" for (i,) in db.session.query(Facet.id).filter(
+                or_(Facet.value.ilike(like), Facet.description.ilike(like),
+                    _sa.cast(Facet.synonyms, _sa.String).ilike(like)))]
         mem_q = db.session.query(Memory).filter(Memory.scope == "team", Memory.status == "proposed")
+        if like:
+            mem_q = mem_q.filter(Memory.text.ilike(like))
         memories = [{"id": m.id, "text": m.text, "kind": m.kind, "category": m.category, "source": m.source,
                      "created_at": m.created_at} for m in mem_q.order_by(Memory.id.desc()).limit(limit)]
         rec_q = db.session.query(Recipe).filter(Recipe.status == "helpful")
+        if like:
+            rec_q = rec_q.filter(or_(Recipe.question.ilike(like), Recipe.title.ilike(like)))
         from supagent.knowledge.paths import of_recipe, path_text
 
         recipes = [{"id": r.id, "question": r.question, "tool": r.tool, "target": r.target,
@@ -2338,6 +2368,11 @@ class AdminView(BaseView):
         # (the AI-written descriptions of the data are not listed here: tens of thousands on a platform, nobody
         # approves them one by one; Data -> Browse shows them, to correct the ones that matter)
         val_q = db.session.query(Facet).filter(Facet.status == "proposed")
+        if like:
+            import sqlalchemy as _sa
+
+            val_q = val_q.filter(or_(Facet.value.ilike(like), Facet.description.ilike(like), Facet.facet.ilike(like),
+                                     _sa.cast(Facet.origins, _sa.String).ilike(like)))
         vals = val_q.order_by(Facet.facet, Facet.value).limit(limit).all()
         n_items = dict(db.session.query(Tag.facet_id, func.count(Tag.id)).filter(
             Tag.facet_id.in_([f.id for f in vals] or [-1])).group_by(Tag.facet_id).all())
@@ -2367,12 +2402,20 @@ class AdminView(BaseView):
         relations: list[dict[str, Any]] = []          # (0.9.6: what a value is part of is a link, reviewed as one)
         tag_q = (db.session.query(Tag, Facet).join(Facet, Facet.id == Tag.facet_id)
                  .filter(Tag.status == "proposed", Facet.status == "approved"))
+        if like:
+            tag_q = tag_q.filter(or_(Facet.value.ilike(like), Tag.ref.ilike(like)))
         tag_rows = tag_q.order_by(Tag.confidence.desc(), Tag.id.desc()).limit(limit).all()
         link_q = db.session.query(Link).filter(Link.status == "proposed")
+        if like:
+            link_q = link_q.filter(or_(Link.evidence.ilike(like), Link.note.ilike(like), Link.detail.ilike(like),
+                                       Link.kind.ilike(like), Link.a_ref.in_(hit_refs or ["-"]),
+                                       Link.b_ref.in_(hit_refs or ["-"])))
         link_rows = link_q.order_by(Link.confidence.desc(), Link.id.desc()).limit(limit).all()
         route_q = db.session.query(Route).filter(Route.moa.isnot(None), Route.moa != "other",
                                                  Route.moa_followed.is_(True), Route.signal.in_(CONFIRMED),
                                                  or_(Route.moa_by.is_(None), Route.moa_by != "admin"))
+        if like:
+            route_q = route_q.filter(Route.question.ilike(like))
         route_rows = route_q.order_by(Route.id.desc()).limit(limit).all()
         titles = _ref_titles([t.ref for t, _f in tag_rows] + [x.a_ref for x in link_rows] + [x.b_ref for x in link_rows])
         tags = [{"id": t.id, "ref": t.ref, "title": titles.get(t.ref, t.ref), "facet": f.facet, "value": f.value,
@@ -2390,6 +2433,9 @@ class AdminView(BaseView):
         # links whose removal is proposed (by an editor, or by the learning: what they were read from is gone): in
         # use until someone who may remove links decides
         drop_q = db.session.query(Link).filter(Link.proposed_drop.isnot(None), Link.status == "approved")
+        if like:
+            drop_q = drop_q.filter(or_(Link.note.ilike(like), Link.proposed_drop.ilike(like),
+                                       Link.a_ref.in_(hit_refs or ["-"]), Link.b_ref.in_(hit_refs or ["-"])))
         drop_rows = drop_q.order_by(Link.proposed_drop_at.desc(), Link.id.desc()).limit(limit).all()
         drop_titles = _ref_titles([x.a_ref for x in drop_rows] + [x.b_ref for x in drop_rows])
         from supagent.knowledge.sysmap import described
@@ -2400,17 +2446,74 @@ class AdminView(BaseView):
         from supagent.knowledge.retire import waiting as retire_waiting
 
         retire, n_retire = retire_waiting(limit)         # parts that look retired: proposed, never done alone
+        if q:
+            retire = [x for x in retire if q.lower() in f"{x.get('value')} {x.get('facet')} {x.get('evidence')}".lower()]
+            n_retire = len(retire)
         from supagent.knowledge.context import proposals as context_proposals
 
         pages = context_proposals()                      # Context pages changed, new or gone: a person validates
+        if q:
+            pages = [pg for pg in pages if q.lower() in str(pg.get("title") or "").lower()]
+        try:                                             # (0.10.2) what would confuse the agent or the search
+            from supagent.knowledge.lint import warnings as lint_warnings
+
+            warns = lint_warnings()
+        except Exception:  # pylint: disable=broad-except   (the review shows the rest)
+            db.session.rollback()
+            warns = []
+        if q:
+            warns = [w for w in warns if q.lower() in f"{w['subject']} {w['why']}".lower()]
+        try:                                             # (0.10.2) where a category is in the data, from its values
+            from supagent.knowledge.datafields import proposals as field_proposals
+
+            fields = field_proposals()
+        except Exception:  # pylint: disable=broad-except   (the review shows the rest)
+            db.session.rollback()
+            log.warning("supagent review: where the categories are in the data: not read", exc_info=True)
+            fields = []
+        if q:
+            fields = [x for x in fields if q.lower() in f"{x['subject']} {x['why']}".lower()]
         counts = {"memory": mem_q.count(), "recipes": rec_q.count(),
                   "values": val_q.count(), "relations": len(rel_all), "tags": tag_q.count(), "links": link_q.count(),
-                  "removals": drop_q.count(), "retire": n_retire, "routes": route_q.count(), "context": len(pages)}
+                  "removals": drop_q.count(), "retire": n_retire, "routes": route_q.count(), "context": len(pages),
+                  "warnings": len(warns), "fields": len(fields)}
         return _json({"memory": memories, "recipes": recipes, "values": values, "found": found, "retire": retire,
                       "relations": relations, "tags": tags, "links": links, "removals": removals, "routes": routes,
-                      "context": pages[:limit], "counts": counts, "can_delete": _can_delete(),
+                      "context": pages[:limit], "warnings": warns[:limit], "fields": fields[:limit], "counts": counts,
+                      "can_delete": _can_delete(), "q": q,
                       "waiting": sum(counts[k] for k in ("memory", "recipes", "values", "relations", "tags", "links",
-                                                         "removals", "retire", "context"))})
+                                                         "removals", "retire", "context", "warnings", "fields"))})
+
+    @expose("/api/fields/decide", methods=("POST",))
+    @has_access_api
+    def fields_decide(self) -> Response:
+        """(0.10.2) A category read from a label or a field its values are in (categories.fields: an admin's), or the
+        proposal set aside."""
+        from superset import db
+
+        from supagent.knowledge.datafields import decide
+
+        body = request.get_json(silent=True) or {}
+        read = bool(body.get("read"))
+        if read and not _is_admin():
+            return _json({"error": "your role may not change where a category is read from (Admin)"}, 403)
+        try:
+            return _json(decide(str(body.get("category") or ""), str(body.get("name") or ""), read, g.user.username))
+        except (ValueError, KeyError) as ex:
+            db.session.rollback()
+            return _json({"error": str(ex)}, 400)
+
+    @expose("/api/lint/dismiss", methods=("POST",))
+    @has_access_api
+    def lint_dismiss(self) -> Response:
+        """(0.10.2) A warning of what would confuse the agent or the search, set aside by an approver."""
+        from supagent.knowledge.lint import dismiss
+
+        key = str((request.get_json(silent=True) or {}).get("key") or "").strip()
+        if not key:
+            return _json({"error": "no key"}, 400)
+        dismiss(key)
+        return _json({"ok": True})
 
     @expose("/api/facets", methods=("GET",))
     @has_access_api
@@ -2776,12 +2879,25 @@ class AdminView(BaseView):
         if x is None:
             abort(404)
         body = _body()
+        edited = False
+        if body.get("kind") or body.get("reverse"):    # (0.10.6) corrected in To review: its kind, its direction
+            from supagent.knowledge.sysmap import INTERACTIONS
+
+            kind = str(body.get("kind") or x.kind)
+            if kind != x.kind and kind not in INTERACTIONS:
+                return _json({"error": "kind: " + ", ".join(INTERACTIONS)}, 400)
+            a_ref, b_ref = (x.b_ref, x.a_ref) if body.get("reverse") else (x.a_ref, x.b_ref)
+            if db.session.query(Link.id).filter(Link.a_ref == a_ref, Link.b_ref == b_ref, Link.kind == kind,
+                                                Link.id != x.id).first() is not None:
+                return _json({"error": "this link is on the map already (or was rejected): reject this one"}, 409)
+            x.kind, x.a_ref, x.b_ref = kind, a_ref, b_ref
+            edited = True
         if "note" in body or "detail" in body:          # the explanations, corrected by the admin who approves
             for key, size in (("note", 500), ("detail", 2000)):
                 if key in body:
                     setattr(x, key, str(body.get(key) or "").strip()[:size] or None)
             x.explained_by = g.user.username
-        if body.get("status") in ("approved", "rejected") or "note" in body or "detail" in body:
+        if body.get("status") in ("approved", "rejected") or "note" in body or "detail" in body or edited:
             if body.get("status") in ("approved", "rejected"):
                 x.status, x.reviewed_by = body["status"], g.user.username
             db.session.commit()
@@ -2790,7 +2906,8 @@ class AdminView(BaseView):
 
                 touch()
                 db.session.commit()
-        return _json({"id": x.id, "status": x.status, "note": x.note or "", "detail": x.detail or ""})
+        return _json({"id": x.id, "status": x.status, "note": x.note or "", "detail": x.detail or "", "kind": x.kind,
+                      "a": x.a_ref, "b": x.b_ref})
 
     @expose("/api/routes/<int:rid>", methods=("POST",))
     @has_access_api

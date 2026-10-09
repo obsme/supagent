@@ -32,7 +32,18 @@ import re
 from collections import Counter, defaultdict
 from typing import Any, Iterator
 
+
+def sample_base(path: str) -> str:
+    """(0.10.1) A sample file to copy (site.yml.sample, hosts.example): the path it stands for."""
+    from supagent.knowledge.docs import sample_base as base
+
+    return base(path)
+
 CONFIDENCE = 0.85
+# (0.10.6) a repository's tests, fixtures and examples: their inventories, plays and services describe a test or an
+# example, not the deployment (tests/functional/all_daemons/hosts gave "mon0 part of ceph-monitoring"); read for the
+# search, never for the System map
+TEST_DIR = re.compile(r"(^|/)(tests?|testing|testdata|__tests__|fixtures?|molecule|examples?|e2e|spec)/", re.I)
 INVENTORY_NAME = re.compile(r"(^|/)(hosts|inventory)([._-][\w.-]*)?$", re.I)
 INVENTORY_DIR = re.compile(r"(^|/)inventor(y|ies)/", re.I)
 HOST_TOKEN = re.compile(r"^[A-Za-z0-9_.-]*(?:\[[0-9a-zA-Z]+:[0-9a-zA-Z]+\])?[A-Za-z0-9_.-]*$")
@@ -53,9 +64,12 @@ BASE_ROLES = {
     "download", "downloads", "reset", "remove", "uninstall", "install", "preinstall", "postinstall", "configure",
     "deploy-finish", "post-deploy", "pre-deploy", "migrate", "migration", "backup-config", "gather-facts"}
 LANGUAGES = ("java", "python", "pip", "nodejs", "node", "ruby", "php", "golang", "dotnet")
+SERVICE_REST = re.compile(r"(?:prometheus-)?exporter|server|agent|daemon|proxy|gateway|red|api|worker")   # (0.10.4)
+#                                     after a language's name, a service of its own: node-exporter, node-red
 CONFIG_SUFFIX = re.compile(r"[_-](users|user|databases|database|dbs|schemas|privs|privileges|extensions|config|"
                            r"configure|configuration|settings|tuning|maintenance|index[_-]maintenance|setup|install|"
-                           r"vars|defaults|common|repo|repository)$", re.I)
+                           r"vars|defaults|common|repo|repository|manifests?|deploy|deployments?|provision|"
+                           r"provisioning|apply)$", re.I)   # (0.10.4) k8s_manifests: what applies others, no part
 # the services of the system itself: a role starting only these configures the system
 SYSTEM_SERVICES = re.compile(r"^(ntpd?|chronyd?|firewalld|iptables|ip6tables|ufw|sshd?|rsyslog|syslog-ng|crond?|"
                              r"auditd|systemd-[\w-]+|tuned|irqbalance|network|networking|NetworkManager|docker|"
@@ -103,12 +117,31 @@ def _short(role: str) -> str:
     return str(role or "").strip().split("/")[-1].split(".")[-1]
 
 
+ROLE_AFFIX = re.compile(r"^(?:ansible[-_]role[-_]|ansible[-_])|(?:[-_]ansible(?:[-_]role)?|[-_]role)$", re.I)
+
+
+def _part_name(short: str) -> str:
+    """(0.10.4) The part a role installs, without the words of Ansible's naming (ansible-role-nginx, proxy_ansible:
+    nginx, proxy)."""
+    bare = ROLE_AFFIX.sub("", short)
+    return bare if len(bare) >= 2 else short
+
+
+DB_FAMILY = {"postgresql": r"^(postgres|postgresql|pgsql|pg)(-|$)", "mysql": r"^(mysql|mariadb)(-|$)",
+             "mongodb": r"^mongo(db)?(-|$)", "rabbitmq": r"^rabbit(mq)?(-|$)"}
+DB_SERVER = {"postgresql": r"^(postgres|pg)", "mysql": r"^(mysql|mariadb)", "mongodb": r"^mongo",
+             "rabbitmq": r"^rabbit"}
+DB_MODULES = (("postgresql", re.compile(r"^postgresql_(db|user|privs|schema|ext|owner)$")),
+              ("mysql", re.compile(r"^mysql_(db|user|query)$")), ("mongodb", re.compile(r"^mongodb_(user|shell)$")),
+              ("rabbitmq", re.compile(r"^rabbitmq_(user|vhost|queue|exchange)$")))   # (0.10.4)
 MASKED = re.compile(r"(?m)(:[ \t]+|^[ \t]*-[ \t]+|[\[,][ \t]*)\*\*\*(?=[ \t]*(?:#.*)?$|[ \t]*[,}\]])")
+MASKED_KEY = re.compile(r"(?m)^([ \t]*(?:-[ \t]+)?)\*\*\*(?=[ \t]*:(?:[ \t]|$))")
 
 
 def yaml_text(text: str) -> str:
-    """A text whose masked secrets (password: ***) stay a value for YAML (*** is an alias there)."""
-    return MASKED.sub(r'\1"***"', text or "")
+    """A text whose masked secrets (password: ***) stay a value for YAML (*** is an alias there); (0.10.4) a masked
+    key too (a Compose file's secrets: "***:", the name of a secret masked), else the whole file was no YAML."""
+    return MASKED_KEY.sub(r'\1"***"', MASKED.sub(r'\1"***"', text or ""))
 
 
 def _yaml(text: str) -> Any:
@@ -120,9 +153,12 @@ def _yaml(text: str) -> Any:
             pass
 
         Loader.add_constructor(None, lambda loader, node: getattr(node, "value", None))
-        return yaml.load(text, Loader=Loader)             # noqa: S506 (a SafeLoader)
+        docs = [d for d in yaml.load_all(text, Loader=Loader) if d is not None]   # noqa: S506 (a SafeLoader)
     except Exception:  # pylint: disable=broad-except   (a template, or not YAML)
         return None
+    if len(docs) > 1 and all(isinstance(d, list) for d in docs):
+        return [x for d in docs for x in d]               # (0.10.5) "---", comments, "---" again: one stream of
+    return docs[0] if docs else None                      # documents (was: no YAML, the playbook unread)
 
 
 def _line(text: str, pos: int) -> tuple[int, str]:
@@ -257,7 +293,7 @@ def inventories(units: list[dict[str, Any]]) -> dict[str, Inventory]:
     out = {}
     for u in units:
         path = u["path"] or ""
-        low = path.lower()
+        low = sample_base(path).lower()                     # (0.10.1) hosts.example, inventory.ini.sample
         if not (INVENTORY_NAME.search(low) or INVENTORY_DIR.search(low)) or \
                 low.endswith((".py", ".php", ".sh", ".cfg", ".j2", ".md", ".json", ".rb", ".js")) or \
                 "/group_vars/" in "/" + low or "/host_vars/" in "/" + low:
@@ -277,7 +313,7 @@ def _vars_files(units: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = defaultdict(dict)
     for u in units:
         path = u["path"] or ""
-        m = re.search(r"(?:^|/)(group|host)_vars/([^/]+?)(?:\.ya?ml)?(?:/[^/]+?)?$", path)
+        m = re.search(r"(?:^|/)(group|host)_vars/([^/]+?)(?:\.ya?ml)?(?:/[^/]+?)?$", sample_base(path))
         if not m:
             continue
         data = _yaml(u["text"] or "")
@@ -379,19 +415,73 @@ class Role:
         self.deploys: list[tuple[str, Any]] = []
         self.vars: dict[str, Any] = {}
         self.tasks = False                                 # its tasks are in the repository
+        self.stores: list[tuple[str, str, int]] = []       # (0.10.4) (family, file, line): the databases its tasks
+        #                                                    make an account or a database in (postgresql_db ...)
+        self.site = False                                  # (0.10.4) it publishes a web site (a virtual host)
+        self.stack = False                                 # (0.10.6) it carries a Compose file of several services
 
     @property
     def part(self) -> str | None:
-        """The part this role is, or None (it configures the system or installs a language)."""
+        """The part this role is, or None (it configures the system or installs a language; (0.10.6) it deploys a
+        Compose stack: its services are the parts, not the role)."""
+        if self.stack:
+            return None
         short = _short(self.name)
         n = _norm(short)
         if self.root is not None and self.tasks:           # its tasks tell
             own = [s for s in self.services if not SYSTEM_SERVICES.match(s)]
-            return short if (own or self.deploys) and not n.startswith(("base-", "common")) else None
+            return _part_name(short) if (own or self.deploys or self.site) and \
+                not n.startswith(("base-", "common")) else None   # (0.10.4) a web site it publishes: an application
         if n in BASE_ROLES or n.startswith("base-") or CONFIG_SUFFIX.search(n) or \
-                any(n.startswith(lang + "-") for lang in LANGUAGES):
-            return None
-        return short
+                any(n.startswith(lang + "-") and not SERVICE_REST.fullmatch(n[len(lang) + 1:]) for lang in LANGUAGES):
+            return None                                    # (0.10.4) php-mysql, nodejs-16: the language's; node-exporter
+        return _part_name(short)                           # is a service of its own
+
+
+EVERYWHERE_SHARE = 0.6         # (0.10.4) a role applied to this share of a project's groups at least (and to 3)...
+EVERYWHERE_MIN = 3
+
+
+def _service_bases(name: str) -> set[str]:
+    """(0.10.4) The names a service is known by, without its instance and unit suffix: "ceph-mds@{{ host }}" ->
+    ceph-mds, "node_exporter" -> node-exporter, "{{ 'x-crash@' + h if c else 'x-crash.service' }}" -> x-crash; a name
+    only a variable gives ("{{ service_name }}") has none."""
+    text = str(name or "")
+    exprs = [re.sub(r"\[[^\]]*\]", "", e) for e in re.findall(r"\{\{(.*?)\}\}", text)]   # not a subscript's key
+    parts = re.findall(r"'([^']+)'|\"([^\"]+)\"", " ".join(exprs))
+    words = [a or b for a, b in parts] + [re.sub(r"\{\{.*?\}\}", "", text)]
+    out = set()
+    for w in words:
+        base = re.split(r"[@\s]", w.strip(), maxsplit=1)[0]
+        base = re.sub(r"\.(service|target|socket|timer)$", "", base)
+        base = _norm(base)
+        if base and re.search(r"[a-z]", base):
+            out.add(base)
+    return out
+
+
+def _role_prefix(roles: dict[str, "Role"]) -> str:
+    """(0.10.4) The prefix every role of a project shares ("ceph-" for ceph-mon, ceph-osd...), or ""."""
+    names = sorted({_norm(_short(r.name)) for r in roles.values()})
+    if len(names) < 3:
+        return ""
+    pre = posixpath.commonprefix(names)
+    return pre[: max(pre.rfind("-"), pre.rfind(" ")) + 1] if pre else ""
+
+
+def _own_service(role: "Role", prefix: str) -> bool:
+    """(0.10.4) The role starts a service named after itself (ceph-mds starts ceph-mds@...; node-exporter starts
+    node_exporter), not only the system's, another role's or a variable's."""
+    short = _norm(_short(role.name))
+    core = short[len(prefix):] if prefix and short.startswith(prefix) else short
+    for svc in role.services:
+        for base in _service_bases(svc):
+            if SYSTEM_SERVICES.match(base):
+                continue
+            b = base[len(prefix):] if prefix and base.startswith(prefix) else base
+            if b and (b == core or (len(core) >= 3 and core in b) or (len(b) >= 4 and b in core)):
+                return True
+    return False
 
 
 def _roles(units: list[dict[str, Any]], by_path: dict[str, dict[str, Any]]) -> dict[str, Role]:
@@ -411,10 +501,24 @@ def _roles(units: list[dict[str, Any]], by_path: dict[str, dict[str, Any]]) -> d
                 ts = list(_tasks(data))
                 r.services += _starts_service(ts)
                 r.deploys += _deploys(ts)
+                text = by_path[path]["text"] or ""
+                for t in ts:                               # (0.10.4) postgresql_db, mysql_user ...: a database it uses
+                    mod = _module(t)[0].split(".")[-1]
+                    fam = next((f for f, rx in DB_MODULES if rx.match(mod)), None)
+                    if fam:
+                        at = text.find(mod)
+                        r.stores.append((fam, path, text.count("\n", 0, max(at, 0)) + 1))
+        if re.search(r"(^|/)[^/]*(sites-(available|enabled)|vhost|virtualhost|conf\.d_[^/]*\.conf)[^/]*$", rest, re.I) \
+                and rest.startswith(("templates/", "files/")):
+            r.site = True                                  # (0.10.4) an Apache or nginx site of its own
         if rest.startswith(("defaults/", "vars/")) and rest.endswith((".yml", ".yaml")):
             data = _yaml(by_path[path]["text"] or "")
             if isinstance(data, dict):
                 r.vars.update(data)
+        if re.search(r"(^|/)(docker-)?compose(\.[\w-]+)?\.ya?ml(\.j2)?$", rest):   # (0.10.6) a stack of services
+            data = _yaml(by_path[path]["text"] or "")
+            if isinstance(data, dict) and isinstance(data.get("services"), dict) and len(data["services"]) >= 2:
+                r.stack = True
     return out
 
 
@@ -451,11 +555,14 @@ def _plays(u: dict[str, Any]) -> list[dict[str, Any]]:
         k += 1
         pattern = p["hosts"]
         pattern = ":".join(map(str, pattern)) if isinstance(pattern, list) else str(pattern)
-        roles = []
+        roles, where = [], {}
         for r in p.get("roles") or []:
             name = r if not isinstance(r, dict) else (r.get("role") or r.get("name"))
             if name:
                 roles.append(str(name))
+                g = _when_group(r.get("when")) if isinstance(r, dict) else None
+                if g:
+                    where[str(name)] = g
         tasks = []
         for key in ("pre_tasks", "tasks", "post_tasks", "handlers"):
             tasks += list(_tasks(p.get(key)))
@@ -463,14 +570,62 @@ def _plays(u: dict[str, Any]) -> list[dict[str, Any]]:
             mod, val = _module(t)
             if mod.endswith(("include_role", "import_role")) and isinstance(val, dict) and val.get("name"):
                 roles.append(str(val["name"]))
+                g = _when_group(t.get("when"))
+                if g:
+                    where[str(val["name"])] = g
         out.append({"file": u["path"], "pos": pos, "pattern": pattern, "roles": list(dict.fromkeys(roles)),
-                    "tasks": tasks, "vars": p.get("vars") if isinstance(p.get("vars"), dict) else {},
+                    "where": where, "tasks": tasks, "vars": p.get("vars") if isinstance(p.get("vars"), dict) else {},
                     "vars_files": [str(x) for x in (p.get("vars_files") or []) if isinstance(x, str)]})
     return out
 
 
-def _places(pattern: str, inv: Inventory | None) -> list[tuple[str, str]]:
-    """Where a play's pattern points: [("group", name) | ("host", name)]; all the hosts for "all"."""
+WHEN_GROUP = re.compile(r"inventory_hostname\s+in\s+groups\s*(?:\.get\(\s*(?P<get>.+?)\s*(?:,|\)\s*$|\)\s)|"
+                        r"\[\s*(?P<idx>.+?)\s*\])|['\"](?P<lit>[\w.-]+)['\"]\s+in\s+group_names")
+
+
+def _when_group(cond: Any) -> str | None:
+    """(0.10.1) The group a role's condition keeps it to ("inventory_hostname in groups[mon_group_name]", "'web' in
+    group_names"): "{{ expression }}" for a variable's (with its default), the name itself for a literal; None
+    without one, or with several groups."""
+    text = " ".join(map(str, cond)) if isinstance(cond, list) else str(cond or "")
+    if " or " in text:
+        return None                                       # (several groups: the play's places stay)
+    m = WHEN_GROUP.search(text)
+    if not m:
+        return None
+    if m.group("lit"):
+        return m.group("lit")
+    expr = (m.group("get") or m.group("idx") or "").strip()
+    lit = re.fullmatch(r"['\"]([\w.-]+)['\"]", expr)
+    return lit.group(1) if lit else "{{ " + expr + " }}"
+
+
+def hosts_pattern(pattern: str, scopes: list[dict[str, Any]], defaults: dict[str, Any] | None = None) -> str:
+    """(0.10.1) A play's hosts written with Jinja, resolved: a variable (the play's, the inventory's for all), else the
+    value of its default('x') filter, else the one of a role's defaults; groups['x'] or groups.x (with a default(...)
+    after it); what stays unresolved keeps its braces (no place)."""
+    def one(m: re.Match) -> str:
+        expr = m.group(1).strip()
+        g = re.match(r"groups\s*(?:\[\s*['\"]([\w.-]+)['\"]\s*\]|\.([A-Za-z_]\w*))", expr)
+        if g:
+            return g.group(1) or g.group(2)
+        v = re.match(r"([A-Za-z_]\w*)\s*(?:\|\s*(?:default|d)\(\s*['\"]([^'\"]+)['\"]\s*(?:,\s*\w+\s*)?\))?\s*$", expr)
+        if not v:
+            return m.group(0)
+        for sc in scopes:
+            val = sc.get(v.group(1)) if isinstance(sc, dict) else None
+            if isinstance(val, (str, int)) and "{{" not in str(val):
+                return str(val)
+        if v.group(2):
+            return v.group(2)
+        val = (defaults or {}).get(v.group(1))
+        return str(val) if isinstance(val, (str, int)) and "{{" not in str(val) else m.group(0)
+    return re.sub(r"\{\{(.*?)\}\}", one, pattern or "")
+
+
+def _places(pattern: str, inv: Inventory | None, named: frozenset[str] | set[str] = frozenset()) -> list[tuple[str, str]]:
+    """Where a play's pattern points: [("group", name) | ("host", name)]; all the hosts for "all". (0.10.6) A group
+    the inventory has not but the repository's tests name (`named`: ceph's mdss, nfss): the group, without hosts."""
     out: list[tuple[str, str]] = []
     if "{{" in pattern:
         return out
@@ -486,7 +641,7 @@ def _places(pattern: str, inv: Inventory | None) -> list[tuple[str, str]]:
             out.append(("host", x))
         elif inv and any(ch in x for ch in "*?["):
             out += [("group", g) for g in inv.groups if fnmatch.fnmatch(g, x) and g not in ("all", "ungrouped")]
-        elif not inv or not inv.groups:
+        elif not inv or not inv.groups or x in named:
             out.append(("group", x))                       # no inventory in the repository: the group as named
     return list(dict.fromkeys(out))
 
@@ -579,12 +734,15 @@ def _verb(window: str, me: str) -> str | None:
     return "calls"
 
 
-def ansible(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]:
-    """The facts of an Ansible repository ({path: [fact]}) and the names it declares ({"parts", "hosts", "groups"})."""
+def ansible(units: list[dict[str, Any]], named: frozenset[str] | set[str] = frozenset()
+            ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]:
+    """The facts of an Ansible repository ({path: [fact]}) and the names it declares ({"parts", "hosts", "groups"}).
+    `named`: (0.10.6) the groups its tests' inventories name (no host of theirs)."""
     by_path = {u["path"]: u for u in units if u.get("path")}
     invs = inventories(units)
     roles = _roles(units, by_path)
-    plays = [p for u in units if (u["path"] or "").endswith((".yml", ".yaml")) and "roles/" not in (u["path"] or "")
+    plays = [p for u in units if sample_base(u["path"] or "").endswith((".yml", ".yaml")) and   # (site.yml.sample too)
+             "roles/" not in (u["path"] or "")
              for p in _plays(u)]
     adhoc = [(u, m) for u in units if (u["path"] or "").endswith((".sh", ".bash")) for m in ADHOC.finditer(u["text"] or "")]
     names: dict[str, list[str]] = {"parts": [], "hosts": [], "groups": []}
@@ -616,25 +774,46 @@ def ansible(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]
     on: dict[tuple[str | None, str], set[str]] = defaultdict(set)      # (inventory, group or host) -> parts
     part_scopes: dict[str, list[dict[str, Any]]] = defaultdict(list)    # part -> its variables' scopes
     play_parts: list[tuple[dict[str, Any], list[str], Inventory | None, list[tuple[str, str]]]] = []
+    defaults: dict[str, Any] = {}                       # (0.10.1) the roles' defaults: a play's templated hosts
+    for r in roles.values():
+        for k, v in r.vars.items():
+            defaults.setdefault(k, v)
+    runtime: set[str] = set()                           # (0.10.4) groups a play makes as it runs (add_host, group_by)
     for p in plays:
-        inv = _inventory_for(p["file"], invs, p["pattern"])
-        places = _places(p["pattern"], inv)
-        if not places:
-            continue
+        for t in p["tasks"]:
+            mod, val = _module(t)
+            a = _args(val)
+            short_mod = mod.split(".")[-1]
+            names_made = a.get("groups") or a.get("group") or a.get("groupname") if short_mod == "add_host" else \
+                a.get("key") if short_mod == "group_by" else None
+            for g in (names_made if isinstance(names_made, list) else str(names_made or "").split(",")):
+                if str(g).strip() and "{{" not in str(g):
+                    runtime.add(str(g).strip())
+    plays_seen: list[tuple[dict[str, Any], Inventory | None, list[tuple[str, str]], list[str], dict[str, Any]]] = []
+    for p in plays:
         here = posixpath.dirname(p["file"])
         play_vars = dict(p["vars"])
         for vf in p["vars_files"]:
             data = _yaml((by_path.get(posixpath.normpath(posixpath.join(here, vf))) or {}).get("text") or "")
             if isinstance(data, dict):
                 play_vars.update(data)
+        pattern = hosts_pattern(p["pattern"], [play_vars, vfiles.get("group:all", {})], defaults)
+        inv = _inventory_for(p["file"], invs, pattern)
+        places = [x for x in _places(pattern, inv, named) if not (x[0] == "group" and x[1] in runtime)]
+        if not places:
+            continue
         groups_vars = [vfiles.get(f"group:{g}", {}) for kind, g in places if kind == "group"] + [vfiles.get("group:all", {})]
-        parts = []
+        parts, kept = [], {}
         for name in p["roles"]:
             role = _find_role(name, p["file"], roles)
             part = role.part
             if part:
                 parts.append(part)
                 part_scopes[part] += [play_vars, role.vars, *groups_vars]
+                if name in p.get("where", {}):               # (0.10.1) a role kept to one group by its condition
+                    g = hosts_pattern(p["where"][name], [play_vars, vfiles.get("group:all", {})], defaults)
+                    if "{{" not in g:
+                        kept[part] = [("group", g)]
         scopes = [play_vars, *groups_vars]
         for mod, a in _deploys(p["tasks"]):                 # an application the play's own tasks deploy
             src = _resolve(a.get("repo") or a.get("image") or a.get("src") or "", scopes)
@@ -643,9 +822,36 @@ def ansible(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]
             if app and "{{" not in app and re.fullmatch(r"[A-Za-z][\w.-]{1,80}", app):
                 parts.append(app)
                 part_scopes[app] += scopes
+        for svc in _starts_service(p["tasks"]):            # (0.10.6) a service the play's own tasks start (no
+            svc = _resolve(svc, scopes)                     # role: "systemd: name: pricing-svc, state: started"):
+            if isinstance(svc, str) and "{{" not in svc and not SYSTEM_SERVICES.match(svc) and \
+                    re.fullmatch(r"[A-Za-z][\w.-]{1,80}", svc) and svc not in parts:   # a part on the play's hosts
+                parts.append(svc)
+                part_scopes[svc] += scopes
+        plays_seen.append((p, inv, places, parts, kept))
+    # (0.10.4) a role the plays apply to most of the project's groups, starting no service of its own (the container
+    # engine, the common settings, the handlers of the other roles' daemons): configuration, not a part of the system
+    prefix = _role_prefix(roles)
+    groups_of: dict[str, set[str]] = defaultdict(set)
+    role_of: dict[str, Role] = {}
+    for p, _inv, places, parts, kept in plays_seen:
+        for name in p["roles"]:
+            role = _find_role(name, p["file"], roles)
+            if role.part:
+                role_of.setdefault(role.part, role)
+        for part in parts:
+            groups_of[part] |= {place for kind, place in kept.get(part, places) if kind == "group"}
+    every_group = set().union(*groups_of.values()) if groups_of else set()
+    everywhere = {part for part, gs in groups_of.items() if part in role_of and len(every_group) >= 4 and
+                  len(gs) >= max(EVERYWHERE_MIN, EVERYWHERE_SHARE * len(every_group)) and
+                  not role_of[part].deploys and not _own_service(role_of[part], prefix)}
+    for part in everywhere:
+        part_scopes.pop(part, None)
+    for p, inv, places, parts, kept in plays_seen:
+        parts = [x for x in parts if x not in everywhere]
         for part in dict.fromkeys(parts):
             names["parts"].append(part)
-            for kind, place in places:
+            for kind, place in kept.get(part, places):
                 on[(inv.path if inv else None, place)].add(part)
                 F.add(p["file"], part, "runs_on", place, "group" if kind == "group" else "host", pos=p["pos"],
                       conf=0.9)
@@ -656,7 +862,7 @@ def ansible(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]
         a = _args(m.group("args").split("-a", 1)[-1].strip().strip("\"'") if "-a" in m.group("args") else "")
         if m.group("module").split(".")[-1] in ("service", "systemd") and a.get("name") and \
                 not SYSTEM_SERVICES.match(str(a["name"])) and str(a.get("state", "")).lower() in ("started", "restarted"):
-            for kind, place in _places(m.group("pattern"), inv):
+            for kind, place in _places(m.group("pattern"), inv, named):
                 on[(inv.path if inv else None, place)].add(str(a["name"]))
                 F.add(u["path"], str(a["name"]), "runs_on", place, kind, pos=m.start(), conf=0.85)
                 names["parts"].append(str(a["name"]))
@@ -755,11 +961,36 @@ def ansible(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]
                 target = _target(set(stores), line, scopes, part) or (stores[0] if len(stores) == 1 else None)
                 if target:
                     F.add(path, part, "uses", target, "part", line=ln)
+    # (0.10.4) the databases a role's tasks make an account or a database in: the role's part uses them (the
+    # project's own part of that family, else the family's name: postgresql_db -> postgresql)
+    applied = set(names["parts"])
+    for role in roles.values():
+        if not (role.root and role.part in applied and role.stores):
+            continue
+        for fam, path, line in role.stores:
+            if re.search(DB_SERVER[fam], _norm(role.part)) or _norm(role.part) in ("db", "database") or \
+                    any(re.search(DB_SERVER[fam], b) for svc in role.services for b in _service_bases(svc)):
+                continue                                   # the database's own role: no client of itself
+            same = [x for x in applied if re.search(DB_FAMILY[fam], _norm(x)) and x != role.part]
+            F.add(path, role.part, "uses", same[0] if len(same) == 1 else fam, "part", line=line, conf=0.8)
+    # (0.10.4) the services a role starts are other names of its part (monit's "check process postfix" is the
+    # mail server), when no other role starts one of that name
+    starters: dict[str, set[str]] = defaultdict(set)
+    for role in roles.values():
+        if role.root and role.part in applied:
+            for svc in role.services:
+                for base in _service_bases(svc):              # (a mail server's postfix is its own, though
+                    if base and (not SYSTEM_SERVICES.match(base) or base in ("postfix", "sendmail")) and \
+                            base != _norm(role.part):              # a system's mail relay too)
+                        starters[base].add(role.part)
+    names["aliases"] = {b: next(iter(ps)) for b, ps in starters.items() if len(ps) == 1}
     names = {k: (list(dict.fromkeys(v)) if isinstance(v, list) else v) for k, v in names.items()}
     speaks: dict[str, str] = {}                            # a file's own part: its role's (none for a base role)
     for path in by_path:
         root = next((k for k in sorted(roles, key=len, reverse=True) if not k.startswith("@") and
                      path.startswith(k + "/")), None)
+        if root and roles[root].stack:
+            continue                                      # (0.10.6) a stack's files: their own tool's (prometheus.yml)
         if root:
             speaks[path] = roles[root].part or ""
         elif path in invs or re.search(r"(^|/)(group|host)_vars/", path) or \
@@ -779,9 +1010,17 @@ DB_SCHEME = re.compile(r"^(jdbc:)?(postgres(ql)?|mysql|mariadb|sqlserver|oracle|
                        r"memcached|cassandra|amqp|amqps|kafka|nats)\b", re.I)
 
 
+def untemplated(text: str) -> str:
+    """(0.10.4) A Jinja-templated YAML file readable as YAML: its control lines out, each expression a word
+    (namespace: {{ ns }} -> namespace: tpl), the literal values kept."""
+    text = re.sub(r"(?m)^[ \t]*\{%.*?%\}[ \t]*$\n?", "", text or "")
+    return re.sub(r"\{\{.*?\}\}", "tpl", text)
+
+
 def _docs_with_lines(text: str) -> Iterator[tuple[int, Any]]:
     """The YAML documents of a manifest with the line each starts at."""
     offset = 0
+    text = untemplated(text) if "{{" in text or "{%" in text else text
     for chunk in re.split(r"(?m)^---\s*$", text):
         data = _yaml(chunk)
         if data is not None:
@@ -823,20 +1062,31 @@ def _host_of(value: str) -> tuple[str, int | None, str] | None:
     return host.split(".")[0], int(port) if port else None, scheme
 
 
-def kubernetes(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+def kubernetes(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], list[str], dict[str, str]]:
     """The links a repository's manifests state through the workloads' environment ({path: [fact]}, the workloads)."""
     by_path = {u["path"]: u for u in units if u.get("path")}
     workloads: list[dict[str, Any]] = []
     configmaps: dict[str, dict[str, Any]] = {}
+    renamed: dict[str, str] = {}                           # (0.10.4) {a workload's name: its application's}
     for u in units:
         path = u["path"] or ""
-        if not path.endswith((".yml", ".yaml")) or "{{" in (u["text"] or "")[:2000]:
+        if not path.endswith((".yml", ".yaml", ".yml.j2", ".yaml.j2")):
             continue
         text = u["text"] or ""
         for start, d in _docs_with_lines(text):
             if not isinstance(d, dict) or not isinstance(d.get("metadata"), dict):
                 continue
             kind, name = d.get("kind"), str(d["metadata"].get("name") or "")
+            if name == "tpl":
+                continue                                   # (a name only a variable gives)
+            labels = {**((d["metadata"].get("labels") or {}) if isinstance(d["metadata"].get("labels"), dict) else {}),
+                      **(((((d.get("spec") or {}).get("template") or {}).get("metadata") or {}).get("labels") or {})
+                         if isinstance(d.get("spec"), dict) else {})}
+            app = str(labels.get("app") or labels.get("app.kubernetes.io/name") or "") if isinstance(labels, dict) else ""
+            if kind in WORKLOAD_KINDS and app and app != name and app != "tpl" and \
+                    re.fullmatch(re.escape(app) + r"[-_]v?\d+(\.\d+)*|" + re.escape(app) + r"[-_]\w+", name):
+                renamed[name] = app                        # (0.10.4) details-v1 of app details: the part details
+                name = app
             if kind == "ConfigMap" and isinstance(d.get("data"), dict):
                 configmaps.setdefault(name, {"path": path, "start": start, "data": d["data"], "users": set()})
             elif kind in WORKLOAD_KINDS and name:
@@ -857,7 +1107,7 @@ def kubernetes(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, An
                             env_from.append(str(ef["configMapRef"].get("name") or ""))
                 workloads.append({"name": name, "path": path, "start": start, "env": env, "from": env_from})
     if not workloads:
-        return {}, []
+        return {}, [], renamed
     known = {w["name"].lower() for w in workloads}
     for w in workloads:
         for cm in w["from"]:
@@ -904,25 +1154,31 @@ def kubernetes(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, An
             store = bool(DB_SCHEME.match(scheme)) or port in (5432, 3306, 27017, 6379, 11211, 1433, 1521, 9042) or \
                 re.search(r"(^|_)(DB|DATABASE|REDIS|CACHE|MONGO|SQL)(_|$)", name, re.I)
             F.add(path, w["name"], "uses" if store else "calls", host, "part", line=ln, conf=0.85)
-    return dict(F.out), sorted({w["name"] for w in workloads})
+    return dict(F.out), sorted({w["name"] for w in workloads}), renamed
 
 
 # --------------------------------------------------------------------------------------------------------------- #
 # Docker Compose
 # --------------------------------------------------------------------------------------------------------------- #
-COMPOSE_NAME = re.compile(r"(^|/)(docker-)?compose([._-][\w.-]*)?\.ya?ml$", re.I)
+SENDS_KEY = re.compile(r"OTEL_EXPORTER|OTLP|SMTP|MAIL_?RELAY|SMARTHOST", re.I)   # (0.10.5) what is sent to: telemetry,
+#                                                                                     mail
+COMPOSE_NAME = re.compile(r"(^|/)[\w.-]*(compose|docker-stack)[\w.-]*\.ya?ml$", re.I)   # (0.10.4) a Swarm stack,
+#                                                                    an extension's x-compose.yml: the same format
 STORE_IMAGE = re.compile(r"(^|/)(mysql|mariadb|postgres|postgis|timescale\w*|mongo|redis|valkey|memcached|cassandra|"
                          r"elasticsearch|opensearch|kafka|rabbitmq|nats|zookeeper|etcd|consul|minio|influxdb|"
                          r"clickhouse|mssql|oracle|couchdb|neo4j)([:@/-]|$)", re.I)
 
 
-def compose(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+def compose(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], list[str], dict[str, str]]:
     """The links a Compose file states between its services: what a service depends on (depends_on, links: a
     database, a cache or a broker is used, another service called) and the addresses of other services in its
-    environment ({path: [fact]}, the services)."""
+    environment ({path: [fact]}, the services, and (0.10.4) the files a service is built from: {path: service}, the
+    files of a build context in a folder of its own, whose configuration and code speak for the service)."""
     by_path = {u["path"]: u for u in units if u.get("path")}
     F = Facts(by_path)
     names: list[str] = []
+    contexts: dict[str, set[str]] = {}
+    aliases: dict[str, str] = {}
     for u in units:
         path = u["path"] or ""
         if not COMPOSE_NAME.search(path):
@@ -947,6 +1203,27 @@ def compose(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]
                 continue
             n = str(n)
             names.append(n)
+            build = v.get("build")
+            ctx = build.get("context") if isinstance(build, dict) else build
+            mounts = [str(x).split(":", 1)[0] for x in (v.get("volumes") or []) if isinstance(x, str) and ":" in str(x)]
+            mounts += [str(x.get("source")) for x in (v.get("volumes") or []) if isinstance(x, dict) and
+                       x.get("type") == "bind" and x.get("source")]
+            for src in ([ctx] if isinstance(ctx, str) else []) + [m for m in mounts if m.startswith(".")]:
+                if not src.strip() or "://" in src or "$" in src:
+                    continue
+                folder = posixpath.normpath(posixpath.join(posixpath.dirname(path), src.strip()))
+                if not any(f == folder or f.startswith(folder + "/") for f in by_path):
+                    folder = posixpath.normpath(src.strip())   # (0.10.4) an extension's file, merged with the main
+                    #                                            one: its folders are the project's (-f a -f b)
+                if folder != "." and not folder.startswith(".."):   # (the repository's root: everybody's)
+                    contexts.setdefault(folder, set()).add(n)   # (0.10.4) its build folder, the files it mounts
+            nets = v.get("networks")                       # (0.10.4) a network alias is another name of it
+            for net in (nets.values() if isinstance(nets, dict) else []):
+                for al in ((net or {}).get("aliases") or []) if isinstance(net, dict) else []:
+                    al = re.sub(r"\$\{[A-Z0-9_]+:-([^}]+)\}", r"\1", str(al))
+                    if al and "$" not in al and al != n:
+                        aliases[al] = n
+                        aliases.setdefault(al.split(".")[0], n)
             deps = v.get("depends_on") or []
             deps = list(deps) if isinstance(deps, (list, dict)) else []
             links = [str(x).split(":")[0] for x in (v.get("links") or []) if isinstance(x, str)]
@@ -962,10 +1239,26 @@ def compose(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]
                 key, val = kv
                 got = _host_of(val.strip())
                 host = got[0] if got else (val.strip().lower() if val.strip() in services else None)
+                if host is None:                          # (0.10.5) "http://${OTEL_COLLECTOR_HOST}:...": the service
+                    ph = re.search(r"\$\{([A-Za-z][A-Za-z0-9_]*?)_(?:HOST|HOSTNAME|ADDR|ADDRESS)\b", val)   # named so
+                    named = ph and next((x for x in services if _norm(x) == _norm(ph.group(1).replace("_", "-"))),
+                                        None)
+                    host = named or None
                 if host and host in services and host != n and (ADDRESS_VAR.search(key) or got):
-                    F.add(path, n, "uses" if host in store or (got and DB_SCHEME.match(got[2] or "")) else "calls",
-                          host, "part", line=line_of(n, key), conf=0.8)
-    return dict(F.out), list(dict.fromkeys(names))
+                    F.add(path, n, "uses" if host in store or (got and DB_SCHEME.match(got[2] or "")) else
+                          "sends_to" if SENDS_KEY.search(key) else "calls", host, "part", line=line_of(n, key), conf=0.8)
+    built: dict[str, str] = {}
+    for path in by_path:
+        folder = next((k for k in sorted(contexts, key=len, reverse=True) if path == k or path.startswith(k + "/")),
+                      None)
+        if not folder or COMPOSE_NAME.search(path):
+            continue
+        who = sorted(contexts[folder])
+        named = [x for x in who if _norm(x) == _norm(posixpath.basename(folder))]
+        if len(who) == 1 or len(named) == 1:            # (0.10.4) a folder two services use: the one named after it
+            built[path] = who[0] if len(who) == 1 else named[0]   # (kibana/ for kibana, not kibana-genkeys)
+    built["@aliases"] = aliases                           # (read by facts(): {another name: the service})
+    return dict(F.out), list(dict.fromkeys(names)), built
 
 
 CODE_EXT = {".py": "Python", ".go": "Go", ".java": "Java", ".kt": "Kotlin", ".js": "JavaScript", ".ts": "TypeScript",
@@ -1019,18 +1312,34 @@ def kinds(units: list[dict[str, Any]], declared: dict[str, Any], workloads: list
     return out
 
 
+def test_file(path: str) -> bool:
+    """(0.10.6) A file of a repository's tests, fixtures or examples (TEST_DIR): no fact of the System map."""
+    return bool(TEST_DIR.search(path or ""))
+
+
 def facts(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
     """The facts a repository states across its files ({path: [fact]}), the names it declares and, in an Ansible
-    repository, who speaks in its files ({"owners": {path: a role's part, or "" for nobody}})."""
+    repository, who speaks in its files ({"owners": {path: a role's part, or "" for nobody}}). (0.10.6) Its tests,
+    fixtures and examples left out (test_file)."""
     out: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    a, names = ansible(units)
-    k, workloads = kubernetes(units)
-    c, services = compose(units)
+    tests = inventories([u for u in units if test_file(u.get("path") or "")])
+    named = {g for i in tests.values() for g in i.groups if g not in ("all", "ungrouped")}   # their groups' names
+    units = [u for u in units if not test_file(u.get("path") or "")]
+    a, names = ansible(units, named)
+    k, workloads, renamed = kubernetes(units)
+    c, services, built = compose(units)
     for src in (a, k, c):
         for path, fs in src.items():
             out[path] += fs
     names = dict(names)
     names["parts"] = list(dict.fromkeys(list(names.get("parts", [])) + workloads + services))
+    names.setdefault("aliases", {})                       # (0.10.4) {another name: the part}
+    for other, app in renamed.items():                    # (0.10.4) a workload's versioned name: its application
+        names["aliases"].setdefault(other, app)
     names.setdefault("owners", {})
+    for other, svc in (built.pop("@aliases", None) or {}).items():   # (0.10.4) xmpp.meet.jitsi is prosody
+        if other not in names["parts"]:
+            names["aliases"].setdefault(other, svc)
+    names["built"] = built                                # (0.10.4) {path: the Compose service built from it}
     names["kinds"] = kinds(units, names, workloads, services)
     return dict(out), names

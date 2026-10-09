@@ -410,6 +410,7 @@ def test_a_confluence_cloud_space_with_a_user_and_api_token(env, servers, monkey
     assert d.title == "Confluence space OPS" and d.pages[0]["url"] == f"{s.base}/wiki/display/OPS/Runbooks"
     d2 = _doc(f"{s.base}/wiki/spaces/OPS/overview", max_pages=3, auth={"type": "basic", "user": "alice@example.com"},
               secret=SECRET)
+    d.enabled = False                                                 # (0.10.1: else its pages are the first's)
     assert D.refresh(d2)["pages"] == 3                                # max_pages
 
 
@@ -556,3 +557,33 @@ def test_an_intranet_address_says_which_setting_allows_it(app, ctx):
     with pytest.raises(D.DocError) as ex:
         D.check_url("http://127.0.0.1:8088/wiki/")
     assert "private" in str(ex.value) and "docs.allowed_domains" in str(ex.value)
+
+
+def test_a_page_another_document_reads_is_left_to_it(env, servers, monkeypatch):
+    """(0.10.1) A wiki given as several documents whose pages link to each other: each page read once, by the
+    document with the lowest id that reaches it; a document all of whose pages another reads keeps its own address;
+    a document disabled gives its pages back at the next reading."""
+    from superset.extensions import db
+
+    from supagent.knowledge import docs as D
+
+    holder: dict = {}
+    s = servers(_confluence("/confluence", lambda h: h.get("authorization") == f"Bearer {SECRET}",
+                            lambda: holder["base"] + "/confluence"))
+    holder["base"] = s.base
+    first = _doc(f"{s.base}/confluence/pages/viewpage.action?pageId=100", max_pages=4, auth={"type": "bearer"},
+                 secret=SECRET)
+    second = _doc(f"{s.base}/confluence/pages/viewpage.action?pageId=100", max_pages=10, auth={"type": "bearer"},
+                  secret=SECRET)
+    third = _doc(f"{s.base}/confluence/pages/viewpage.action?pageId=101", max_pages=10, auth={"type": "bearer"},
+                 secret=SECRET)
+    assert D.refresh(first)["pages"] == 4
+    out = D.refresh(second)
+    assert [p["title"] for p in second.pages] == ["Old alerts"] and out["read_by_another"] == 4
+    out = D.refresh(third)                                            # 101 is the first's, 104 the second's
+    assert [p["title"] for p in third.pages] == ["Restart"] and out["read_by_another"] == 1
+    first.enabled = False
+    db.session.commit()
+    out = D.refresh(second)
+    assert [p["title"] for p in second.pages] == ["Runbooks", "Restart", "Pools", "Alerts", "Old alerts"]
+    assert "read_by_another" not in out

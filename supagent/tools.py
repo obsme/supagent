@@ -1782,6 +1782,24 @@ def _breaches(conn: Any, series: list, op: str, threshold: float, min_ms: int, s
     return out
 
 
+def _excursions(conn: Any, series: list, op: str, threshold: float, step_ms: int, wanted: set) -> list[dict]:
+    """(0.10.4) Where a check's threshold was crossed on the named entities, however briefly: the highest (or lowest)
+    value, when, and the minutes beyond it. The team's check needs the crossing to last (its `for`); a System map link
+    or a question may name the limit without a duration, so the agent sees these too."""
+    out = []
+    for s in series:
+        if not ({str(v).lower() for v in (getattr(s, "labels", None) or {}).values()} & wanted):
+            continue
+        bad = [(t, v) for t, v in s.points if not math.isnan(v) and (v > threshold if op == "above" else v < threshold)]
+        if not bad:
+            continue
+        worst_t, worst = (max if op == "above" else min)(bad, key=lambda p: p[1])
+        out.append({"labels": {k: v for k, v in s.labels.items() if k != "__name__"}, "worst": round(worst, 3),
+                    "at": f"{conn.zone.local(worst_t):%Y-%m-%d %H:%M}",
+                    "minutes_beyond": round(len(bad) * step_ms / 60000)})
+    return out
+
+
 _GROUPING = re.compile(r"\b(by|on)\s*\((?!\s*__tenant_id__\b)")
 
 
@@ -1846,7 +1864,13 @@ def check_health(start: str, end: str, entities: list[str] | None = None, checks
 
                 with ThreadPoolExecutor(max_workers=4) as pool:
                     results = list(pool.map(one, defs.items()))
-                hidden, matched = 0, not wanted
+                hidden, matched, brief = 0, not wanted, []
+                try:
+                    from supagent import settings as _settings
+
+                    brief_on = bool(_settings.get("tools.brief_crossings"))
+                except Exception:  # pylint: disable=broad-except   (no application: as by default, off)
+                    brief_on = False
                 for name, c, series, err in results:
                     if err:
                         errors[name] = err
@@ -1857,7 +1881,9 @@ def check_health(start: str, end: str, entities: list[str] | None = None, checks
                     op = "above" if "above" in c else "below"
                     thr = float(c.get(op))
                     min_ms = parse_duration(str(c.get("for", "0s"))) if c.get("for") else 0
+                    breached = set()
                     for b in _breaches(conn, series or [], op, thr, min_ms, step):
+                        breached.add(tuple(sorted((str(k), str(v)) for k, v in b["labels"].items())))
                         hit = {str(v).lower() for v in b["labels"].values()} & wanted
                         if wanted and not hit:
                             hidden += 1
@@ -1866,6 +1892,11 @@ def check_health(start: str, end: str, entities: list[str] | None = None, checks
                         found.append({"check": name, "description": c.get("description", ""),
                                       "threshold": f"{op} {thr:g}{c.get('unit', '')}", **b,
                                       **({"via": ", ".join(through)} if through else {})})
+                    if wanted and min_ms and brief_on:   # (0.10.4, tools.brief_crossings) crossed, too briefly
+                        for e in _excursions(conn, series or [], op, thr, step, wanted):
+                            if tuple(sorted((str(k), str(v)) for k, v in e["labels"].items())) not in breached:
+                                brief.append({"check": name, "threshold": f"{op} {thr:g}{c.get('unit', '')}",
+                                              "lasting": str(c.get("for")), **e})
                 found.sort(key=lambda b: (b["from"], b["check"]))
                 usual = _breaches_usual(conn, defs, found, t0, t1, step) if found else 0
                 found.sort(key=lambda b: bool(b.get("usual")))       # the new ones first (stable: by time within)
@@ -1884,10 +1915,16 @@ def check_health(start: str, end: str, entities: list[str] | None = None, checks
                     note = (note + "; " if note else "") + (
                         "parts_added: the parts the system map says these are made of were checked too; a breach "
                         "found on one of them says via which")
+                if brief:
+                    note = (note + "; " if note else "") + (
+                        f"brief_crossings: {len(brief)} threshold(s) crossed for less than the check's duration (no "
+                        f"breach by the team's checks); compare their worst values with a limit the system map's "
+                        f"links or the question name, with their time")
                 return {"database": db_obj.database_name, "from": start, "to": end,
                         "step_minutes": step // 60000, "checks": list(defs), "breaches": found[:200],
                         "breach_count": len(found), "errors": errors, "note": note,
-                        **({"parts_added": added} if added else {})}
+                        **({"parts_added": added} if added else {}),
+                        **({"brief_crossings": brief[:50]} if brief else {})}
             finally:
                 conn.close()
     except ToolError as ex:
@@ -3928,19 +3965,24 @@ def _fitted(res: dict[str, Any], chars: int = GROUP_CHARS) -> dict[str, Any]:
 
 
 @mcp.tool
-def system_links(names: list[str]) -> dict:
+def system_links(names: list[str], depth: int = 1) -> dict:
     """What the team's system map says about parts of the system, by their exact names (an application, a
     server, a pool, a service, a feed, a family...): what each is, what it is part of and consists of, what it
     depends on, runs on, reads and calls, what depends on it, and where its kind is in the data (fields, metric
     labels, joins). In an investigation: from the part that looks wrong to what it depends on, and to what
-    depends on it."""
+    depends on it. `depth` 2 or 3: also the paths, in one call: "leads_to", the chains of what they depend on,
+    call, read, send to (each step a link, the server at its end), and "led_from", the chains of what leads to them
+    (what a failure of theirs reaches: the impact; for a server, what runs on it and on its group, then what depends
+    on those: a server's comes at every depth). A server or a group: "if_it_fails" lists what runs on it, on its
+    group, then what depends on, calls or reads those, and further: all of them are what its failure reaches. A
+    category's name ("applications", "servers") lists its values, to go on from."""
     try:
         with _as_user():
             from supagent.knowledge.brief import links_of
             from supagent.knowledge.inventory import walk
 
             asked = [str(n) for n in (names or [])][:8]
-            res = links_of(asked)
+            res = links_of(asked, depth=max(1, min(int(depth or 1), 4)))
             try:                                  # what an inventory (a CMDB) says they stand on (0.9.5)
                 below = walk(asked)
             except Exception as ex:  # pylint: disable=broad-except   (no inventory read: the map alone)
@@ -3948,7 +3990,7 @@ def system_links(names: list[str]) -> dict:
                 below = None
             if below:
                 res["inventory"] = below
-            if not res.get("parts") and not below:
+            if not res.get("parts") and not res.get("categories_listed") and not below:
                 res["note"] = ("none of these names is a value of the team's categories (Data dictionary, "
                                "Categories): search_knowledge may know them")
             return res

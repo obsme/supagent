@@ -239,6 +239,29 @@ def excerpt(text: str, query: str, size: int = EXCERPT_CHARS) -> str:
     return head + ("\u2026" if best_at else "") + part.strip() + ("\u2026" if best_at + len(part) < len(text) else "")
 
 
+# (0.10.6) A question about how the system is built (its parts, what depends on what, a chain, what a failure
+# reaches) and not about figures: the System map, the documents and the Context first; the data's objects lower, and
+# no "where the value is" first ("How does a user request reach the database?" got "Where the value user is", request
+# metrics and charts, and none of the pages that answer it)
+STRUCTURE_Q = re.compile(r"\b(?:chain|path|depends?|dependen(?:cy|cies|t)|upstream|downstream|architecture|"
+                         r"make\s+up|made\s+of|consists?\s+of|involved|runs?\s+on|running\s+on|behind|"
+                         r"reach(?:es|ed)?|goes\s+down|go\s+down|is\s+down|are\s+down|talks?\s+to|connects?\s+to|"
+                         r"impact(?:s|ed)?|affected|in\s+order)\b", re.I)
+DATA_Q = re.compile(r"\b(?:metrics?|fields?|labels?|index|indexes|indices|columns?|tables?|measures?|counts?|rates?|"
+                    r"how\s+many|how\s+much|total|sum|average|mean|median|percent(?:age)?|p\d\d|figures?|values?|"
+                    r"yesterday|today|last\s+(?:hour|day|week|month)|between|least|most|highest|lowest|max(?:imum)?|"
+                    r"min(?:imum)?|peak|top|busiest|slowest|fastest|january|february|march|april|may|june|july|"
+                    r"august|september|october|november|december|sept?|oct|nov|dec|jan|feb|mar|apr|jun|jul|aug)\b",
+                    re.I)
+DATA_KINDS = ("metric", "family", "index", "chart", "dashboard", "value")   # the data's objects (a question about the
+#                                                                           build gets them after the other pieces)
+
+
+def structural(query: str) -> bool:
+    """(0.10.6) A question about how the system is built, not about its data (STRUCTURE_Q and no DATA_Q word)."""
+    return bool(STRUCTURE_Q.search(query or "")) and not DATA_Q.search(query or "")
+
+
 def search(query: str, k: int | None = None, kinds: tuple[str, ...] | None = None,
            lower: dict[str, int] | None = None, skip: tuple[str, ...] = (), rerank: bool = True) -> list[dict[str, Any]]:
     """The pieces for a query, best first, at most PER_PAGE of one page. `lower`: kinds counted as found that many
@@ -250,10 +273,33 @@ def search(query: str, k: int | None = None, kinds: tuple[str, ...] | None = Non
     refresh_map()                                       # (0.10) the System map's pieces in step with its last change
 
     k = int(k or settings.get("search.top_k"))
+    build = structural(query)             # (0.10.6) how the system is built: no "where the value is" first
+    vals = [] if build else _values(query, kinds, skip)   # (0.10.2) where the values the question names are: first
     if not (rerank and R.enabled()):
-        return capped(_search(query, k * 3, kinds, lower, skip), k)
-    depth = max(k * 3, int(settings.get("rerank.depth") or 40))
-    return capped(R.rerank(query, _search(query, depth, kinds, lower, skip), depth), k)
+        found = _search(query, k * 3, kinds, lower, skip)
+    else:
+        depth = max(k * 3, int(settings.get("rerank.depth") or 40))
+        found = R.rerank(query, _search(query, depth, kinds, lower, skip), depth)
+    if build:                             # (0.10.6) the map's, the documents' and the Context's pieces first: the
+        found = [f for f in found if f["kind"] not in DATA_KINDS] + \
+            [f for f in found if f["kind"] in DATA_KINDS]   # data's objects (found by their names' words) after them
+    return vals + capped(found, k)
+
+
+def _values(query: str, kinds: tuple[str, ...] | None, skip: tuple[str, ...]) -> list[dict[str, Any]]:
+    """(0.10.2) The pieces saying which metrics' labels and indices' fields hold a value the question names (a
+    server, a service, a status...), with the category values named so; none when search.values is off or the
+    kinds asked for leave values out."""
+    if not settings.get("search.values") or (kinds and "value" not in kinds) or "value" in (skip or ()):
+        return []
+    try:
+        from supagent.knowledge.valueindex import where
+
+        return where(query)
+    except Exception as ex:  # pylint: disable=broad-except   (the search goes on without them)
+        db.session.rollback()
+        log.warning("supagent search: the values' index: %s", str(ex)[:300])
+        return []
 
 
 def _search(query: str, k: int, kinds: tuple[str, ...] | None, lower: dict[str, int] | None,
@@ -313,6 +359,9 @@ def _search(query: str, k: int, kinds: tuple[str, ...] | None, lower: dict[str, 
 
 
 OBJECT_KINDS = ("metric", "index")
+USAGE_LINE = re.compile(r"^(SQL|formulas \(catalog\)):")
+LABEL_ABOUT = re.compile(r"(\b[\w.\-]+) \([^()]{15,}\)(?=: )")   # a label's description, before its values
+USAGE_CHARS = 320       # a metric's usage lines kept whole in its line of the prompt, at most
 OBJECT_PLACES = 3       # in the knowledge found with a question: "Where the data is" gives the data first
 CONTEXT_LINES = 2       # at most, the pages about a subject of the question (an application...) first
 PAGE_WORDS = ("context ai written overview application data source inventory how the system works architecture "
@@ -320,6 +369,25 @@ PAGE_WORDS = ("context ai written overview application data source inventory how
 
 
 SUPERSET_KINDS = ("chart", "dashboard")
+
+
+
+def usage_apart(text: str) -> tuple[str, str]:
+    """(0.10.6) A metric's piece without its usage lines ("SQL: a counter: use the column rate or increase...",
+    "formulas (catalog): ...") and those lines, whole ones, USAGE_CHARS at most; the piece unchanged and no usage
+    when it fits in its line of the prompt (450 characters) or has no such line."""
+    lines = (text or "").splitlines()
+    usage = [ln.strip() for ln in lines if USAGE_LINE.match(ln.strip())]
+    if not usage or len(" ".join((text or "").split())) <= 450:
+        return text, ""
+    taken: list[str] = []
+    for ln in usage:
+        if sum(len(x) + 1 for x in taken) + len(ln) > USAGE_CHARS:
+            break
+        taken.append(ln)
+    if not taken:
+        return text, ""
+    return "\n".join(ln for ln in lines if ln.strip() not in taken), " ".join(taken)
 
 
 def knowledge_block(question: str, shown: set[str] | None = None, with_charts: bool = False,
@@ -395,9 +463,19 @@ def knowledge_block(question: str, shown: set[str] | None = None, with_charts: b
     if verdict.get("searched_also"):
         lines[0] += "\n(The question was also searched as the AI wrote it again: a word of it matched nothing.)"
     for f in found:
-        text = " ".join(excerpt(f["text"] or "", question, 450).split())
+        body, usage = f["text"] or "", ""
+        if f["kind"] in OBJECT_KINDS:                 # (0.10.6) how to compute it, kept whole: a window around
+            body, usage = usage_apart(body)           # the question's words cut "SQL: a counter: use rate or
+            if usage and all(" ".join(u.split()) in " ".join(excerpt(f["text"] or "", question, 450).split())
+                             for u in usage.split(" formulas (catalog): ")[:1]):   # increase, never SUM" when the
+                body, usage = f["text"] or "", ""     # labels' descriptions were long (a count summed from the
+            elif usage:                               # per-second rate): the room taken from those descriptions,
+                body = LABEL_ABOUT.sub(r"\1", body)    # the labels and their values kept
+        size = max(180, 450 - len(usage))
+        text = " ".join(excerpt(body, question, size).split())
         about = [t.split(": ", 1)[1] for t in cats.get(f["ref"], []) if not t.startswith("aspect")][:3]
-        line = f"- [{f['kind']}] {f['title']}" + (f" ({', '.join(about)})" if about else "") + f": {text[:450]}"
+        line = (f"- [{f['kind']}] {f['title']}" + (f" ({', '.join(about)})" if about else "") + f": {text[:size]}"
+                + (f" {usage}" if usage else ""))
         if sum(len(x) for x in lines) + len(line) > budget:
             break
         lines.append(line)

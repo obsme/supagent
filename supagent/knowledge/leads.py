@@ -96,7 +96,7 @@ def untied(question: str, answer: str, trace: list[dict]) -> tuple[list[str], st
         v = V[i]
         return not (v.get("about") or v.get("parents") or g["children"].get(i) or g["out"].get(i) or g["in"].get(i))
 
-    seeds = [i for i in named(question, g) if not bare(i)]
+    seeds = [i for i in named(question, g, loose=True) if not bare(i)]
     if not seeds:
         return [], ""
     actors = list(seeds)

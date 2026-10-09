@@ -207,6 +207,8 @@ def pages() -> list[dict[str, Any]]:
             out.append({"section": "technical", "slug": f"repositories-{_slug(title)}", "title": f"Repository: {title}",
                         "content": "\n".join(lines), "database_ids": [],
                         "sources": [{"ref": f"doc:{doc_id}", "title": title}]})
+        if wiki and any(isinstance(p, dict) and p.get("space") for p in d.pages or []):
+            continue                                       # (0.10.1) a wiki's pages: a page per space, below
         if wiki:
             ids = {str((p or {}).get("id")): (p or {}).get("title") for p in (d.pages or []) if isinstance(p, dict)}
             lines = [f"# {title}", "", f"A wiki space: {len(wiki)} page{'s' if len(wiki) > 1 else ''} read.", "", "## Pages", ""]
@@ -224,4 +226,49 @@ def pages() -> list[dict[str, Any]]:
             out.append({"section": "functional", "slug": f"wiki-{_slug(title)}", "title": f"Wiki: {title}",
                         "content": "\n".join(lines), "database_ids": [],
                         "sources": [{"ref": f"doc:{doc_id}", "title": title}]})
+    out.extend(_space_pages(docs, units, pages_about, shown))
+    return out
+
+
+def _space_pages(docs: dict[int, Any], units: list[Any], pages_about: dict[str, set[int]],
+                 shown: dict[str, str]) -> list[dict[str, Any]]:
+    """(0.10.1) A page per wiki space, whatever document read its pages (a wiki given as one document per space reads
+    each page once, by the first document that reaches it: the other spaces' pages are in that document): its pages,
+    the pages they link to, their diagrams, the parts they describe. Titled after the document that starts in it."""
+    has_pages = {u.doc_id for u in units if u.kind == "page"}
+    unit_ids: dict[tuple[int, str], int] = {(u.doc_id, u.ukey): u.id for u in units if u.kind == "page"}
+    items: dict[str, list[tuple[Any, dict[str, Any]]]] = defaultdict(list)
+    named_by: dict[str, str] = {}
+    seen: set[tuple[str, str]] = set()
+    holders: dict[str, dict[int, Any]] = defaultdict(dict)
+    for doc_id, d in sorted(docs.items()):
+        if doc_id not in has_pages:
+            continue
+        for i, p in enumerate(d.pages or []):
+            if isinstance(p, dict) and p.get("space") and p.get("title"):
+                holders[str(p["space"])][doc_id] = d
+                if i == 0:
+                    named_by.setdefault(str(p["space"]), d.title or d.url)
+                key = (str(p["space"]), str(p.get("id") or p.get("url") or p["title"]))
+                if key not in seen:                        # (a document's own address another one reads too)
+                    seen.add(key)
+                    items[str(p["space"])].append((d, p))
+    out: list[dict[str, Any]] = []
+    for space, these in sorted(items.items()):
+        title = named_by.get(space) or space
+        ids = {str(p.get("id")): p.get("title") for _d, p in these}
+        lines = [f"# {title}", "", f"A wiki space ({space}): {len(these)} page{'s' if len(these) > 1 else ''} read.", "",
+                 "## Pages", ""]
+        for _d, p in these[:200]:
+            to = [ids.get(str(x)) for x in p.get("links") or [] if ids.get(str(x))]
+            lines.append(f"- {p['title']}" + (f" (links to: {', '.join(to[:8])})" if to else "")
+                         + (f" ({len(p.get('diagram_edges') or [])} arrows in its diagrams)" if p.get("diagram_edges")
+                            else ""))
+        mine = {unit_ids.get((d.id, str(p.get(k)))) for d, p in these for k in ("id", "url")} - {None}
+        named = sorted({shown[k] for k, ids_ in pages_about.items() if k in shown and ids_ & mine})
+        if named:
+            lines += ["", "## The parts its pages describe", "", ", ".join(named[:80])]
+        out.append({"section": "functional", "slug": f"wiki-{_slug(title)}", "title": f"Wiki: {title}",
+                    "content": "\n".join(lines), "database_ids": [],
+                    "sources": [{"ref": f"doc:{i}", "title": d.title or d.url} for i, d in sorted(holders[space].items())]})
     return out

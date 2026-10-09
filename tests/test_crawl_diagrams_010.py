@@ -147,6 +147,7 @@ def test_a_wiki_is_read_to_the_last_page_its_links_lead_to(env, servers):
     assert "Sup3r-S3cret-Val" not in d.content and "password: ***" in d.content     # a page's secret masked
     assert not any("elsewhere" in r["path"] for r in s.got)                         # another site: never
     small = _doc(f"{s.base}/wiki/spaces/OPS/pages/1/Home", max_pages=2)
+    d.enabled = False                                                 # (0.10.1: else its pages are the first's)
     D.refresh(small)
     assert [p["title"] for p in small.pages] == ["Home", "Guide"]                   # pages at most
 

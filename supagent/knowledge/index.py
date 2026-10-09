@@ -385,17 +385,48 @@ def _context_pieces() -> Iterator[dict[str, Any]]:
 
 
 _MAP_CHANGED = [True]        # (0.10) a value or a link of the map changed since its pieces were written (at start: yes)
+MAP_KEY = "map_changed"      # (0.10.1) supagent_meta: when a value or a link last changed, for every process
+MAP_READ_S = 2.0             # the stamp read at most this often per process
+_MAP_SEEN: dict[str, Any] = {"stamp": None, "at": 0.0, "value": ""}
 
 
 def _mark_map(session: Any, _ctx: Any, _instances: Any) -> None:
-    """Before a flush: a value or a link of the System map added, changed or removed marks the map's pieces stale."""
+    """Before a flush: a value or a link of the System map added, changed or removed marks the map's pieces stale, in
+    this process at once and, once the change is committed, in every process (the stamp below)."""
     try:
         from supagent.models import Facet, Link
 
         if any(isinstance(o, (Facet, Link)) for o in (*session.new, *session.dirty, *session.deleted)):
             _MAP_CHANGED[0] = True
+            session.info["supagent_map_changed"] = True
     except Exception:  # pylint: disable=broad-except
         pass
+
+
+def _stamp_map(session: Any) -> None:
+    """After a commit that changed the map: the stamp written in a short transaction of its own (not in the change's:
+    a long learning run would hold the row and keep every approval waiting), so that the Celery workers, where the
+    chat's answers run, write the map's pieces again before their next search."""
+    if not session.info.pop("supagent_map_changed", False):
+        return
+    import time
+
+    import sqlalchemy as sa
+
+    value = f"{time.time():.6f}"
+    try:
+        bind = session.get_bind()
+        with bind.begin() as con:
+            done = con.execute(sa.text("UPDATE supagent_meta SET value = :v WHERE key = :k"),
+                               {"v": value, "k": MAP_KEY}).rowcount
+            if not done:
+                con.execute(sa.text("INSERT INTO supagent_meta (key, value) VALUES (:k, :v)"), {"k": MAP_KEY, "v": value})
+    except Exception as ex:  # pylint: disable=broad-except   (another process wrote it at the same time, or no table)
+        log.debug("supagent: the map's stamp: %s", ex)
+
+
+def _forget_map_mark(session: Any) -> None:
+    session.info.pop("supagent_map_changed", None)
 
 
 try:
@@ -403,16 +434,39 @@ try:
     from sqlalchemy.orm import Session as _Session
 
     _event.listen(_Session, "before_flush", _mark_map)
+    _event.listen(_Session, "after_commit", _stamp_map)
+    _event.listen(_Session, "after_rollback", _forget_map_mark)
 except Exception:  # pylint: disable=broad-except
     log.warning("supagent: the map's search pieces are refreshed at the indexing only", exc_info=True)
 
 
+def _map_stamp() -> str:
+    """The last change of the map ("" before any), as the database has it (read at most every MAP_READ_S)."""
+    import time
+
+    now = time.time()
+    if now - float(_MAP_SEEN["at"]) < MAP_READ_S:
+        return str(_MAP_SEEN["value"])
+    from supagent.models import Meta
+
+    try:
+        value = db.session.query(Meta.value).filter(Meta.key == MAP_KEY).scalar() or ""
+    except Exception:  # pylint: disable=broad-except   (tables not created yet)
+        db.session.rollback()
+        value = ""
+    _MAP_SEEN.update(at=now, value=value)
+    return value
+
+
 def refresh_map() -> dict[str, Any] | None:
     """(0.10) The map's search pieces written again when a value or a link changed (an approval, an edit on the map,
-    a learning run): before the next search, at once, for the map's pieces only (a few thousand at most)."""
-    if not _MAP_CHANGED[0]:
+    a learning run), before the next search, for the map's pieces only (a few thousand at most): a change made in this
+    process at once, one made in another (the web server for a Celery worker) once its stamp is read (0.10.1)."""
+    stamp = _map_stamp()
+    if not _MAP_CHANGED[0] and stamp == _MAP_SEEN["stamp"]:
         return None
     _MAP_CHANGED[0] = False
+    _MAP_SEEN["stamp"] = stamp
     try:
         out = sync(("map:",))
         embed_few(out)
@@ -469,6 +523,20 @@ def _map_pieces() -> Iterator[dict[str, Any]]:
             words = " ".join(t for t in ((x.note or "").strip(), (x.detail or "").strip()) if t)
             lines.append(f"- {head}" + (f": {words}" if words else ""))
         yield {"ref": f"map:{fid}", "kind": "map", "title": f"System map: {cat} {f.value}", "text": "\n".join(lines)}
+    from supagent.knowledge.facets import about
+
+    said = about(True)                               # (0.10.6) each category with its values: "which applications..."
+    by_cat: dict[str, list[str]] = {}
+    for f in values.values():
+        by_cat.setdefault(f.facet, []).append(f.value)
+    for cat, names in sorted(by_cat.items()):
+        names = sorted(names, key=str.lower)
+        head = f"category {cat}" + (f" (inside a {nest[cat]})" if nest.get(cat) else "") + f": {len(names)} values"
+        lines = [head] + ([said[cat]] if said.get(cat) else []) + \
+            ["Its values: " + ", ".join(names[:30]) + (f" and {len(names) - 30} more (system_links of the category's "
+                                                       f"name lists them)" if len(names) > 30 else "")]
+        yield {"ref": f"map:category:{cat}", "kind": "map", "title": f"System map: the category {cat}",
+               "text": "\n".join(lines)}
 
 
 def _filters_text(params: dict) -> str:

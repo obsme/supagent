@@ -175,12 +175,13 @@ def apply(auto_metrics: bool | None = None) -> dict[str, int]:
                     out["proposed"] += 1
     days = max(14, int(settings.get("categories.data_link_days") or 21))
     old = now - dt.timedelta(days=days)
+    from supagent.knowledge.sysmap import kept_reasons, propose_drop
+
+    kept = kept_reasons()                       # (0.10.5) a reason a person answered Keep to: not proposed again
     for x in links.values():
         if (x.source == "data" and x.status == "approved" and x.seen_at is not None and x.seen_at < old
                 and not x.proposed_drop):
-            x.proposed_drop = (f"not seen in the data since {x.seen_at:%Y-%m-%d} (it was read from: "
-                               f"{(x.evidence or '?')[:300]})")
-            x.proposed_drop_at = now
-            out["stale"] += 1
+            out["stale"] += propose_drop(x, f"not seen in the data since {x.seen_at:%Y-%m-%d} (it was read from: "
+                                            f"{(x.evidence or '?')[:300]})", kept)
     db.session.flush()
     return out

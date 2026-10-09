@@ -86,7 +86,11 @@ CODE_FILES = (".py", ".pyi", ".java", ".kt", ".kts", ".scala", ".groovy", ".grad
               ".jinja", ".tpl", ".tmpl", ".dockerfile", ".cfg", ".ini", ".conf", ".properties", ".xml", ".sql",
               ".yaml", ".yml", ".json", ".service", ".timer", ".socket", ".env.example")
 CODE_NAMES = {"dockerfile", "containerfile", "makefile", "jenkinsfile", "vagrantfile", "procfile", "gemfile",
-              "rakefile", "build", "workspace", "cmakelists.txt"}
+              "rakefile", "build", "workspace", "cmakelists.txt", "caddyfile", "corefile", "monitrc", "crontab"}
+# (0.10.4) the files an Ansible role copies or renders named after the path they go to (etc_monit_conf.d_postfix,
+# etc_apache2_sites-available_blog): its configuration, read with the code; never one whose name speaks of a secret
+ROLE_FILE = re.compile(r"(^|/)roles/[^/]+/(files|templates)/(?![^/]*(secret|passw|token|key|cert|crt|pem|vault|"
+                       r"credential|id_rsa|id_ed25519|htpasswd|shadow))(etc|usr|var|opt|srv)_[^/.]*(\.[^/.]+)*$", re.I)
 SKIP_DIRS = {"node_modules", "vendor", "dist", "build", "target", "out", "bin", "obj", ".git", "__pycache__",
              ".venv", "venv", "site-packages", "bower_components", ".idea", ".vscode", "coverage", ".gradle", ".mvn",
              ".terraform", ".next", ".nuxt"}
@@ -252,6 +256,8 @@ class _Text(HTMLParser):
             self.parts.append("\n")
             if tag in HEADINGS and not self._skip:    # a heading stays one (0.9.6): the pieces are cut at sections
                 self.parts.append("#" * int(tag[1]) + " ")
+            elif tag == "li" and not self._skip:      # (0.10.4) an item of a list stays one: no sentence runs on
+                self.parts.append("- ")               # from one item into the next
         elif tag in ("td", "th"):
             self.parts.append(" | ")                  # the cells of a row stay apart
 
@@ -1060,8 +1066,18 @@ def bitbucket_target(url: str) -> dict[str, Any] | None:
             "web": f"{base}/{owner}/repos/{q(repo)}", "name": f"{project}/{repo}"}
 
 
+SAMPLE_SUFFIX = re.compile(r"\.(sample|example|dist|default)$", re.I)
+
+
+def sample_base(path: str) -> str:
+    """(0.10.1) A file given as a sample to copy (site.yml.sample, all.yml.example, hosts.dist): the path it stands
+    for."""
+    base = SAMPLE_SUFFIX.sub("", path or "")
+    return base if "." in base.rsplit("/", 1)[-1] else path
+
+
 def is_text_file(path: str) -> bool:
-    name = path.rsplit("/", 1)[-1].lower()
+    name = sample_base(path).rsplit("/", 1)[-1].lower()
     return name.endswith(TEXT_FILES) or (name.startswith("readme") and "." not in name) or bool(ANSIBLE_FILE.search(path))
 
 
@@ -1074,7 +1090,8 @@ def wanted_file(path: str, files: str = "docs") -> bool:
         return False
     if is_text_file(path):
         return True
-    return files == "code" and (parts[-1].endswith(CODE_FILES) or parts[-1] in CODE_NAMES)
+    name = sample_base(parts[-1])
+    return files == "code" and (name.endswith(CODE_FILES) or name in CODE_NAMES or bool(ROLE_FILE.search(path)))
 
 
 def doc_rank(path: str) -> tuple[int, int, str]:
@@ -1422,10 +1439,29 @@ def _join(found: list) -> tuple[str, list[dict[str, Any]]]:
     return "\n\n".join(texts), pages
 
 
+def _read_by_another(doc: Doc, reader: str, found: list) -> tuple[list, int]:
+    """(0.10.1) The pages of a wiki or a site that another document already reads are left to it: a wiki read to the
+    last page its links lead to, given as several documents (one per space) whose pages link to each other, had every
+    page read, cut, embedded and understood once per document. A page is the document's with the lowest id that
+    reaches it (each refresh, so that a document removed or disabled gives its pages to the next one); a document all
+    of whose pages another reads keeps its own address. A repository's files are never shared."""
+    if reader not in ("confluence", "web") or doc.id is None:
+        return found, 0
+    held: set[str] = set()
+    for other in db.session.query(Doc).filter(Doc.enabled.is_(True), Doc.kind == "url", Doc.id < doc.id):
+        if reader_of(other) not in ("confluence", "web"):
+            continue
+        held.update(str(p["url"]) for p in other.pages or [] if isinstance(p, dict) and p.get("url"))
+    kept = [f for f in found if not (f[0] and f[0] in held)]
+    if found and not kept:
+        kept = found[:1]
+    return kept, len(found) - len(kept)
+
+
 def refresh(doc: Doc) -> dict[str, Any]:
     """Read a document's address again with its reader (and its sign-in, if it has one)."""
     reader = reader_of(doc)
-    skipped, changed = 0, False
+    skipped, changed, shared = 0, False, 0
     token = None
     try:
         sign = sign_in(doc)
@@ -1433,6 +1469,7 @@ def refresh(doc: Doc) -> dict[str, Any]:
         read = {"web": _read_web, "confluence": _read_confluence, "bitbucket": _read_bitbucket}[reader]
         found, title, skipped = read(doc, sign)
         found = [(u, ti, mask_secrets(tx)[0], *more) for u, ti, tx, *more in found]   # every page's secrets (0.10)
+        found, shared = _read_by_another(doc, reader, found)
         content, pages = _join(found)
         h = hashlib.sha256(content.encode()).hexdigest()[:40]
         changed = h != doc.content_hash
@@ -1449,7 +1486,7 @@ def refresh(doc: Doc) -> dict[str, Any]:
     doc.fetched_at = dt.datetime.utcnow()
     db.session.commit()
     return {"id": doc.id, "status": doc.status, "reader": reader, "pages": len(doc.pages or []), "skipped": skipped,
-            "changed": changed, "error": doc.error}
+            "changed": changed, "error": doc.error, **({"read_by_another": shared} if shared else {})}
 
 
 def due_docs() -> list[Doc]:

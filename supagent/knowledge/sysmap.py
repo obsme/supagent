@@ -329,14 +329,26 @@ def _lease(take: bool) -> bool:
         return False
 
 
+def name_forms(name: str) -> set[str]:
+    """(0.10.5) A name and its writings with other separators (tix_api, tix-api, tix api): a page writes a part as it
+    likes, the map as it was read."""
+    n = str(name or "").lower()
+    out = {n}
+    if re.search(r"[_\-\s]", n.strip()):
+        words = [w for w in re.split(r"[_\-\s]+", n) if w]
+        out |= {"_".join(words), "-".join(words), " ".join(words)}
+    return out
+
+
 def _wanted() -> set[str]:
-    """The names to explain: the approved values of the categories with no description (3 letters at least)."""
+    """The names to explain: the approved values of the categories with no description (3 letters at least), with
+    their other writings (0.10.5)."""
     from supagent.knowledge.facets import editable
     from supagent.models import Facet
 
     rows = db.session.query(Facet.value, Facet.description).filter(Facet.status == "approved",
                                                                   Facet.facet.in_(list(editable())))
-    return {v.lower() for v, d in rows if v and not (d or "").strip() and len(v) >= 3}
+    return {f for v, d in rows if v and not (d or "").strip() and len(v) >= 3 for f in name_forms(v)}
 
 
 def refresh_hints(extra: Any = (), pace: bool = False) -> dict[str, Any]:
@@ -420,7 +432,8 @@ def hints(values: dict[int, Any]) -> dict[int, list[tuple[str, str, str]]]:
     by_name: dict[str, list[int]] = {}
     for fid, v in values.items():
         if not (v.description or "").strip() and len(v.value) >= 3:
-            by_name.setdefault(v.value.lower(), []).append(fid)
+            for form in name_forms(v.value):              # (0.10.5) tix_api's sentences say "tix-api"
+                by_name.setdefault(form, []).append(fid)
     if not by_name:
         return {}
     if not current_app.config.get("SUPAGENT_MAP_HINTS_BACKGROUND", True):
@@ -429,8 +442,13 @@ def hints(values: dict[int, Any]) -> dict[int, list[tuple[str, str, str]]]:
     else:
         known = _snapshot()["names"]
         _poke(soon=any(n not in known for n in by_name))
-    return {fid: [tuple(h) for h in known[n]] for n, fids in by_name.items() for fid in fids  # type: ignore[misc]
-            if known.get(n)}
+    out: dict[int, list[tuple[str, str, str]]] = {}
+    for n, fids in by_name.items():
+        for fid in fids:
+            for h in known.get(n) or []:
+                if tuple(h) not in out.setdefault(fid, []) and len(out[fid]) < 3:
+                    out[fid].append(tuple(h))         # type: ignore[arg-type]
+    return {fid: hs for fid, hs in out.items() if hs}
 
 
 def _visible_refs(refs: set[str]) -> set[str]:
@@ -588,16 +606,63 @@ def propose_removal(link_id: int, why: str, by: str) -> dict[str, Any]:
     return {"id": x.id, "drop": x.proposed_drop}
 
 
+KEPT_KEY = "kept_drops"     # (0.10.5) supagent_meta: {link id: [the reasons a person answered Keep to, digested]}
+
+
+def _digest(why: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(" ".join(str(why or "").split()).lower().encode()).hexdigest()[:16]
+
+
+def kept_reasons() -> dict[str, list[str]]:
+    """(0.10.5) The reasons a person answered Keep to, by link: never proposed again for that link."""
+    from supagent.models import Meta
+
+    row = db.session.get(Meta, KEPT_KEY)
+    try:
+        out = json.loads(row.value) if row is not None and row.value else {}
+    except ValueError:
+        out = {}
+    return out if isinstance(out, dict) else {}
+
+
+def propose_drop(x: Any, why: str, kept: dict[str, list[str]] | None = None) -> bool:
+    """(0.10.5) A link's removal proposed with its reason (it stays in use until someone who may remove links
+    decides), unless a person kept the link for that very reason: another reason is proposed. True when proposed."""
+    import datetime as dt
+
+    why = " ".join(str(why or "").split())[:500]
+    if _digest(why) in (kept if kept is not None else kept_reasons()).get(str(x.id), []):
+        return False
+    x.proposed_drop, x.proposed_drop_at = why, dt.datetime.utcnow()
+    return True
+
+
 def decide_removal(link_id: int, remove: bool, by: str) -> bool:
-    """The answer to a proposed removal: the link removed, or kept (and the proposal gone)."""
-    from supagent.models import Link
+    """The answer to a proposed removal: the link removed, or kept (and the proposal gone; (0.10.5) its reason
+    remembered: the same reason is not proposed again for this link)."""
+    from supagent.models import Link, Meta
 
     x = db.session.get(Link, link_id)
     if x is None:
         return False
     if remove:
+        kept = kept_reasons()
+        if kept.pop(str(x.id), None) is not None:          # (an id given again to another link remembers nothing)
+            db.session.get(Meta, KEPT_KEY).value = json.dumps(kept)
         db.session.delete(x)
     else:
+        if x.proposed_drop:
+            kept = kept_reasons()
+            mine = kept.setdefault(str(x.id), [])
+            if _digest(x.proposed_drop) not in mine:
+                mine.append(_digest(x.proposed_drop))
+            row = db.session.get(Meta, KEPT_KEY)
+            if row is None:
+                db.session.add(Meta(key=KEPT_KEY, value=json.dumps(kept)))
+            else:
+                row.value = json.dumps(kept)
         x.proposed_drop, x.proposed_drop_at, x.reviewed_by = None, None, by
     db.session.commit()
     return True
@@ -832,6 +897,8 @@ def map_data(admin: bool) -> dict[str, Any]:
         v["source"] = (f.source if f is not None else None) or ""
         v["synonyms"] = list((f.synonyms or []) if f is not None else [])
         v["gone"] = bool(v.get("tagged")) and not v.get("items")
+        v["description_by"] = ((f.suggested or {}).get("description_by") if f is not None and v.get("description")
+                               else None)                 # (0.10.5) "llm": written by the AI, until a person saves one
         v["hint"] = None
         if not (v.get("description") or "").strip():
             for ref, title, sentence in found.get(v["id"], []):

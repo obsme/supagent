@@ -34,6 +34,8 @@ WINDOWS = 4               # of one text per run (the rest at the next run)
 NAMES = 60                # known parts given with a window
 QUOTE_CHARS = 400
 KINDS = ("depends_on", "runs_on", "reads_from", "sends_to", "calls", "triggers", "monitors")
+TOPICS = ("subject", "aspect")             # (0.10.6) categories of topics, not of parts
+SERVERISH = ("server", "servers", "host", "hosts", "node", "nodes", "machine", "machines", "vm", "vms")
 SHORT_CHARS = 90
 LONG_CHARS = 700
 SHORT_SAYS = ("what the interaction is, in a few words, from the first part's side: what it waits for, reads, "
@@ -85,7 +87,16 @@ def items() -> Iterator[dict[str, Any]]:
         yield {"ref": f"note:{n.id}", "title": n.title or "", "text": n.text or ""}
 
 
+def read_mark(text_hash: str, read: int, total: int) -> str:
+    """(0.10.6) What is kept of a text's reading: its hash alone when it is read whole in at most WINDOWS windows
+    (as before), else its hash, "@" and the windows read (all of them: read whole)."""
+    return text_hash if read >= total and total <= WINDOWS else f"{text_hash}@{read}"
+
+
 def pending(limit: int, again: bool = False) -> list[dict[str, Any]]:
+    """The texts to read, each with the window it starts at (0.10.6): a text read in part goes on at its next
+    window; a changed text is read again from its start; a long text marked by its hash alone (before 0.10.6 its
+    first WINDOWS windows only were read) goes on after them."""
     from supagent.knowledge.facets import _hash
     from supagent.models import Classified
 
@@ -95,10 +106,20 @@ def pending(limit: int, again: bool = False) -> list[dict[str, Any]]:
         if len(it["text"]) < 80:
             continue
         it["hash"] = _hash(it["title"], it["text"])
-        if again or done.get(it["ref"] + "#links") != it["hash"]:
-            out.append(it)
-            if len(out) >= limit:
-                break
+        it["start"] = 0
+        seen = done.get(it["ref"] + "#links") or ""
+        if not again and (seen == it["hash"] or seen.startswith(it["hash"] + "@")):
+            if seen == it["hash"]:
+                read = WINDOWS
+            else:
+                after = seen[len(it["hash"]) + 1:]
+                read = int(after) if after.isdigit() else 0
+            if read >= len(windows(it["text"])):
+                continue
+            it["start"] = read
+        out.append(it)
+        if len(out) >= limit:
+            break
     return out
 
 
@@ -152,8 +173,15 @@ def apply(found: list[dict[str, Any]], text: str, g: dict[str, Any], origin: str
         if kind not in KINDS or not a or not b or a[0] == b[0] or len(quote) < 15 or _norm(quote) not in plain:
             continue
         said = set(named(quote, g))
-        if a[0] not in said and b[0] not in said:       # the sentence names neither: it says something else
+        if a[0] not in said or b[0] not in said:        # (0.10.6) the sentence names both, or it says something else
             continue
+        ca, cb = V[a[0]].get("cat"), V[b[0]].get("cat")
+        if ca in TOPICS or cb in TOPICS:                # (0.10.6) a subject is a topic, no part of a flow
+            continue
+        if kind == "runs_on" and ca in SERVERISH and cb not in SERVERISH:
+            a, b = b, a                                  # (0.10.6) what runs is the part, where it runs the server
+        elif kind != "runs_on" and kind != "monitors" and cb in SERVERISH:
+            continue                                     # (0.10.6) a flow goes to the service there, not the server
         a_ref, b_ref = f"facet:{a[0]}", f"facet:{b[0]}"
         if db.session.query(Link.id).filter(Link.a_ref == a_ref, Link.b_ref == b_ref, Link.kind == kind).first():
             continue
@@ -179,8 +207,10 @@ def stale() -> int:
     texts: dict[str, list[str]] = {}
     for it in items():
         texts.setdefault(it["title"][:80] or it["ref"], []).append(_norm(it["text"]))
+    from supagent.knowledge.sysmap import kept_reasons, propose_drop
+
     n = 0
-    now = dt.datetime.utcnow()
+    kept = kept_reasons()                       # (0.10.5) a reason a person answered Keep to: not proposed again
     for x in db.session.query(Link).filter(Link.source == "llm", Link.status == "approved", Link.proposed_drop.is_(None),
                                            Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%")):
         m = EVIDENCE.match((x.evidence or "").strip())
@@ -189,20 +219,22 @@ def stale() -> int:
         quote, origin = _norm(m.group(1)), m.group(2)
         here = texts.get(origin)
         if here is None:
-            x.proposed_drop = f"the text it was read from is gone ({origin[:120]})"
+            why = f"the text it was read from is gone ({origin[:120]})"
         elif not any(quote in t for t in here):
-            x.proposed_drop = f"the sentence it was read from is no longer in {origin[:120]}: \"{m.group(1)[:200]}\""
+            why = f"the sentence it was read from is no longer in {origin[:120]}: \"{m.group(1)[:200]}\""
         else:
             continue
-        x.proposed_drop_at = now
-        n += 1
+        n += propose_drop(x, why, kept)
     db.session.flush()
     return n
 
 
 def run(llm: Any, seconds: float = 600.0, limit: int = 50, again: bool = False) -> dict[str, Any]:
     """The texts not read yet, until `seconds` or `limit`; the next run continues. First, the interactions whose
-    sentence or text is gone are proposed for removal (stale)."""
+    sentence or text is gone are proposed for removal (stale). (0.10.6) The time is checked before each window of
+    a text, not only between texts (a text has up to WINDOWS windows, a slow LLM takes minutes for one: the
+    explanations that follow lost their time), and a text longer than WINDOWS windows goes on at its next window
+    in the next run (it was marked read after its first WINDOWS)."""
     from supagent.knowledge.brief import _graph, named
     from supagent.knowledge.stopping import check
     from supagent.models import Classified
@@ -222,7 +254,15 @@ def run(llm: Any, seconds: float = 600.0, limit: int = 50, again: bool = False) 
             out["left"] = True
             break
         check()
-        for piece in windows(it["text"])[:WINDOWS]:
+        pieces = windows(it["text"])
+        start = min(it.get("start", 0), len(pieces))
+        nxt = start
+        while nxt < min(len(pieces), start + WINDOWS):
+            if nxt > start and time.time() - t0 > seconds:
+                out["left"] = True
+                break
+            piece = pieces[nxt]
+            nxt += 1
             known = named(piece, g)[:NAMES]
             if len(known) < 2:                       # an interaction needs two parts
                 continue
@@ -239,11 +279,20 @@ def run(llm: Any, seconds: float = 600.0, limit: int = 50, again: bool = False) 
                 return out
             out["calls"] += 1
             out["proposed"] += apply(_args(msg), piece, g, it["title"][:80] or it["ref"])
+        whole = nxt >= len(pieces)
         c = db.session.get(Classified, it["ref"] + "#links") or Classified(ref=it["ref"] + "#links")
-        c.content_hash, c.classified_at = it["hash"], dt.datetime.utcnow()
+        c.content_hash = read_mark(it["hash"], nxt, len(pieces))
+        c.classified_at = dt.datetime.utcnow()
         db.session.merge(c)
         db.session.commit()
-        out["texts"] += 1
+        if whole:
+            out["texts"] += 1
+        else:
+            out["texts_in_part"] = out.get("texts_in_part", 0) + 1
+            out["left"] = True
+        if time.time() - t0 > seconds:
+            out["left"] = True
+            break
     return out
 
 

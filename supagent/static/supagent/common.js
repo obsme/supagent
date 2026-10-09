@@ -75,8 +75,10 @@
     opts = opts || {};
     var S = window.supagent, box = el("div", { class: "links-box" }), list = el("ul", { class: "links-list" });
     var state = el("div", { class: "muted", text: "Loading the links…" });
+    var inData = el("div", { class: "part-data", hidden: "hidden" });   // (0.10.2) where it is in the data
     box.appendChild(state);
     box.appendChild(list);
+    box.appendChild(inData);
     var changed = function () { load(); if (opts.onchange) opts.onchange(); };
     function dirOf(x) { return x.both ? "both" : x.out ? "out" : "in"; }
     function form(x, done) {                                  // what it is, what it does, which way
@@ -128,6 +130,19 @@
       S.dict("GET", "map/links?id=" + part.id).then(function (d) {
         list.innerHTML = "";
         if (d.error) { state.textContent = d.error; return; }
+        inData.innerHTML = "";
+        inData.hidden = !(d.data || []).length;
+        if ((d.data || []).length) {
+          inData.appendChild(el("div", { class: "part-data-title", text: "In the data (where the agent filters on it)" }));
+          inData.appendChild(el("ul", { class: "links-list" }, d.data.map(function (p) {
+            var of = p.of.slice(0, 3).join(", ") + (p.count > 3 ? " and " + (p.count - 3) + " more" : "");
+            return el("li", { class: "link-item" }, [
+              el("strong", { text: (p.kind === "label" ? "label " : "field ") + p.name }),
+              el("span", { text: " = \u201c" + p.written + "\u201d" }),
+              el("span", { class: "muted", text: " \u00b7 " + (p.kind === "label" ? (p.count > 1 ? "metrics " : "metric ") :
+                                                       (p.count > 1 ? "indices " : "index ")) + of + " (" + p.database + ")" })]);
+          })));
+        }
         var links = d.links || [];
         state.textContent = links.length ? "" : "No link yet.";
         state.hidden = !links.length ? false : true;

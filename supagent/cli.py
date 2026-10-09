@@ -549,6 +549,23 @@ def understand(show: bool, do_propose: bool) -> None:
             click.echo(f"{r['part']} {r['kind']} {r['object_kind']} {r['object']}  [{', '.join(r['sources'])}]")
 
 
+@supagent.command(help="What in the knowledge would confuse the agent or the search (one name for two things, a value "
+                  "named by a common word, documents reading the same pages, a term defined twice), each with a "
+                  "proposed fix (0.10.2)")
+@click.option("--json", "as_json", is_flag=True)
+@with_appcontext
+def lint(as_json: bool) -> None:
+    from supagent.knowledge.lint import warnings
+
+    found = warnings()
+    if as_json:
+        click.echo(json.dumps(found, indent=2, default=str))
+        return
+    for w in found:
+        click.echo(f"[{w['kind']}] {w['subject']}\n  why: {w['why']}\n  fix: {w['fix']}")
+    click.echo(f"{len(found)} warning{'s' if len(found) != 1 else ''}")
+
+
 @supagent.command(help="Update the searchable knowledge: pieces that changed, then their vectors")
 @click.option("--refresh-docs", is_flag=True, help="Also fetch the sites that are due")
 @with_appcontext

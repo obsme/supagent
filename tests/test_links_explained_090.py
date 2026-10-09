@@ -112,7 +112,8 @@ def test_the_map_the_review_and_the_agent_get_the_explanations(system, app):  # 
         assert (card["note"], card["detail"], card["evidence"]) == ("starts it", "Check it started.", '"..." (doc)')
         done = c.post(f"/supagent/admin/api/links/{p.id}", json={"status": "approved", "note": "releases it",
                                                                  "detail": "Check its release time."}).get_json()
-        assert done == {"id": p.id, "status": "approved", "note": "releases it", "detail": "Check its release time."}
+        assert {k: done[k] for k in ("id", "status", "note", "detail")} == {
+            "id": p.id, "status": "approved", "note": "releases it", "detail": "Check its release time."}   # (0.10.6: + kind, a, b)
         assert db.session.get(Link, p.id).explained_by == "admin"
     lines = "\n".join(build("Why is Billing late today?")["lines"])
     assert "- They read from: ledger db (service: only Invoicing, reads the customers)." in lines

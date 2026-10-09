@@ -1,5 +1,210 @@
 # Changes
 
+## 0.10.6 — 2026-10-09
+
+The learning proposes what the texts say, To review corrects what it proposes, and the agent's knowledge search follows
+the System map. A team collecting and preparing its data with this release reviews fewer proposals that no text
+supports, corrects the others in place instead of rejecting them, adds links of any kind from the Categories page, and
+asks the agent questions that follow the map's paths. It is the release after 0.10.0: 0.10.4 and 0.10.5, measured and
+not released, come with it (below). The agent's checks written after 0.10.0 are still off; what it reads is richer
+(the map's paths, what a failure reaches, a metric's usage kept whole) and a reply about its no-tool check keeps the
+answer.
+
+Measured before release under a rule written before any result (totals; the held-out sets are never read). The first candidate (4d88f33) failed the learning clause on a fresh held-out corpus: link precision 0.687 against the 0.10.5 candidate's 0.750, beyond the 0.03 allowed. The cause, found on a development corpus written the same way (Promtail's configuration read as Prometheus'), was fixed, and the fixed candidate (ec7447b) was measured again from the start under the same clauses, on another fresh corpus (a port's container-terminal platform: an Ansible repository of 33 files with tests/, molecule/ and examples/ folders, and a wiki of 10 pages; 49 relations): 39 of 49 relations found (0.10.5 candidate: 37, 0.10.0: 30), 106 of 148 links right (0.716; 0.627, 0.509), no value from tests, molecule or examples on the map (5, 5), no more denied statements than the 0.10.5 candidate (2), and a second learning over the approved map removed nothing. Upgrade from 0.10.0 on a copy of a lab: tables unchanged (v18), every setting kept, health 200. The agent (the same model as 0.10.0's measurement): held-out set 69 and 65 answers right of 75, with 4 and 9 wrong answers not marked; main set 150 and 146 of 156, with 5 and 9 (0.10.0: held 73 and 71 with 1 and 3, main 149 and 147 with 5 and 5). The agent's clauses were NOT met (held: 13 wrong answers not marked over its two runs where 9 were allowed; 430 answers right over the four runs where 432 were required; 27 not marked where 20 were allowed): 0.10.6 is released by the owner's decision, for its learning and its knowledge search; on questions it was not developed on, the agent's answers are less reliable than 0.10.0's.
+
+Known gaps: the agent's answers on questions it was not developed on are less reliable than 0.10.0's (above); a question asking what to check about parts whose data the agent cannot see ("search results are stale: what should be checked?") runs a whole investigation (more than 15 minutes on a slow model) before answering from the runbook; the main set's known misses remain (an average taken over the wrong rows, a follow-up keeping the filter of the turn before, "one week earlier" taken as the day before); the LLM's classification and its reading of the interactions were not measured again for this release (0.10.4's figures, below).
+
+What the learning proposes: what the texts say
+* **"Part of" from the AI only with its sentence**: the classification's LLM proposed "X belongs to Y" with no text
+  saying it (on a lab map 33 parts "belonging to" a web application); now a proposal comes only with a sentence of the
+  texts it read that names both and says it ("is part of", "one of", "inside", "consists of"...), quoted with it.
+* **Interactions read by the AI**: the quote must name both parts; a subject (a topic) is no end of a link; "the
+  server runs postgresql" is turned round (postgresql runs on the server); no flow (calls, reads, sends) to a server.
+* **One name, one value**: a value waiting in To review under one category is the value of its name for the next
+  batches (no twin proposed in another category); a subject the AI proposed with the name of a part the code or a
+  configuration names becomes that part (its items with it); a group named like a subject is "name (group)"; a
+  subject a person approved keeps its name.
+* **Tests, fixtures and examples are no fact of the map**: a repository's `tests/`, `test/`, `testing/`, `testdata/`,
+  `fixtures/`, `molecule/`, `examples/`, `e2e/`, `spec/` stay in the search but give no server, no group and no link
+  (`tests/functional/all_daemons/hosts` gave "mon0 part of ceph-monitoring"); a group a real play names that only a
+  test inventory holds stays the play's place, none of its test hosts read.
+* **Where a part runs ends with its clause**: "the job running on the app group is responsible for reading from the
+  DB" runs on the app group, not on the DB's; "reading from", "pushing to" and the other -ing verbs are read.
+* **A scrape target that is a service** (a Compose service of another file of the repository) is no host the job's
+  part runs on ("prometheus runs on otel").
+* **Promtail ships logs**: a configuration with `scrape_configs` was read as Prometheus'; Promtail's (told by its
+  positions file or its Loki push URL) is a log shipper's, its jobs (named after the services whose logs it reads)
+  no "monitors" link.
+* The reading's rules are version 0.10.6: the first reading after the upgrade reads every unit again once (a proposal
+  the new rules no longer make is withdrawn).
+
+To review corrects; the Categories page links
+* **A proposed link is edited before it is approved**: its kind (belongs to, runs on, connects to, relies on, reads
+  from, sends data to, monitors, triggers, is related to), its direction, its short and full explanations;
+  *Approve* takes it as corrected.
+* **Each warning with its own actions**: a value proposed twice (merge it, or reject the proposed one), a loop (keep
+  one direction: the other is rejected), pages shared by two documents (disable one), besides *Set aside*.
+* **"+ Link" at the top of the Categories page**, beside "+ Category": two parts found by typing, the kind from a list
+  or in one's own words (the words people used before offered too, to edit), what to do when following it, one way or
+  both.
+
+The knowledge the agent searches
+* **Paths in one call**: `system_links(names, depth=2|3)` gives "leads_to" (what the parts depend on, call, read,
+  send to, and further, each step a link, the server at its end) and "led_from" (what leads to them: a failure's
+  impact); never a circle.
+* **What a server's failure reaches, in an answer's words**: a server or a group named comes with "if_it_fails", at
+  any depth: what runs on it, on each of its servers (a group), on its group (it may go on on the group's other
+  servers), then what depends on, calls, reads from or sends to those, and further, each with its step. "If db-01 is
+  down, which applications stop working?" was answered with what runs on db-01 although the applications depending
+  on those were in the paths; with it, the three applications are named. A part that runs on other servers too says
+  so ("postgresql (component; also runs on db-02)": it may go on there), the server's own group and its own servers
+  left out (they fail with it).
+* **A metric's usage kept whole**: the knowledge given with a question shows a window of each piece around the
+  question's words; a metric whose labels have long descriptions lost its last lines there ("SQL: a counter: use the
+  column rate or increase, never SUM", the catalog's formulas), and "how many requests ended with a 503" was summed
+  from the per-second rate. When the window leaves them out, they are given whole and the room is taken from the
+  labels' descriptions (the labels and their values kept): on the lab's main suite, 23 metric lines gain the hint.
+* **From a category**: `system_links(["applications"])` lists a category's values (80, with the count); the search has
+  a piece per category (its count and 30 of its values).
+* **A question about the system's build** (its parts, a chain, what depends on what, what a failure reaches, with no
+  data word in it) gets the System map's, the documents' and the Context's pieces first, the data's objects after
+  them, and no "where the value is" first: on the lab's demonstration map, of 40 such questions' expected names
+  78 of 80 are in what the tools give (70 before these changes).
+* The reading of the texts for interactions keeps to its time and reads long texts to their end (a long text went on
+  at its next window in the next run; it was marked read after its first windows).
+
+The agent
+* **A reply to the no-tool check that speaks of the check keeps the answer**: an answer written without a tool is sent
+  back once ("if the question really needs no data, give the same answer again"); a reply that spoke of the check
+  ("No data query was needed ... provided based on the glossary") replaced the definition the user never saw. The
+  answer it was sent on is kept, only when it holds no figure: a made-up number is never brought back.
+
+0.10.5 (measured, not released; its content comes with 0.10.6): its knowledge clauses were met (on its fresh held-out corpus, kn15: 31 of 43 relations found, 99 of 109 links right; a second learning over an approved map removed nothing), and its agent was held: on the held set 68 of 75 twice, with 6 and 4 answers wrong and not marked, above the bar of 5 its rule had set (the agent's code was 0.10.0's; what it reads had changed).
+
+What a team makes, kept
+* **No removal for lack of evidence**: values, links, what is inside what and items added by hand are never removed
+  nor proposed for removal because the documents, the LLM or the data say nothing of them; only evidence proposes a
+  change, with approval: a link a person drew whose other direction the code or a configuration states (quoting the
+  file and its line), a sentence that denies a link or puts it in the past (quoted), a text saying a value was retired.
+* **Keep is remembered** with its reason, for every proposed removal: the same reason is not proposed again for that
+  link; another reason (another sentence, another file) is.
+* **A learning again changes nothing by itself**: a learned link a person approved is proposed for removal only once a
+  document's text changed after the documents last stated it (`supagent_meta` understand_texts_at, the link's
+  seen_at) and its words are gone from every enabled document. New proposals can still come (a name approved since is
+  recognised in more sentences), never against what was approved: no link the other way round of an approved one from
+  a page's words, no call from what holds data or messages to its clients, no link to a VIP (the service behind it
+  gets it), no flow from a server or a group.
+* **What is understood of a part added by hand**: its links get the AI's short and long explanations when they have
+  none (a person's words kept); the sentences that say what a part is are found whatever its separators. A
+  description written by the AI for a part with none (from the sentences that name it, its links and where the data
+  has it, shown as *written by the AI* until a person saves one) is OFF (`learn.describe_values`): judged by hand
+  against the lines each was given on the lab's demonstration map, 2 of 154 gave a part a role no line states, 1
+  said a link the other way round, 7 said nothing of the part; the next release fixes that and measures again.
+
+The documents and the code, read better (the reading's rules versioned: the first reading after the upgrade reads
+every unit once)
+* **YAML**: a file written as several documents ("---", comments, "---" again) is read; a playbook so written was
+  ignored.
+* **Ansible**: a play deploying with its own tasks places the services they start; a role carrying a Compose file of
+  several services is no part (its files speak for their own tool); a table's "Target Group" column says where a role
+  runs (its "all": every server).
+* **Addresses**: an environment file is a configuration; an address naming a server or a VIP is the service there its
+  line says (scheme, port, key's name); a templated password keeps an address whole; a fully qualified name is the
+  inventory's host; an upstream `orders_backend` is orders; what holds a VIP is never behind it.
+* **Prometheus**: a job's targets are its targets' list only (no label's value, no template's expression, no commented
+  target, no localhost); a scraped part is no host its job runs on; each target quoted on its own line.
+* **Pages and diagrams**: a PlantUML box is named by its label's first line, a box holding other boxes stands for the
+  one it holds; an arrow with no word from a scraper monitors, from a dashboard reads, from a log shipper sends; a
+  table with a holder's column ("Keepalived on") is a VIP table; a server or a group is where parts run, never what a
+  page, a row or a flow is about; a server named after its service hides no part's name; "(... on host)" reads the
+  hosts in its brackets only; a verb inside a part's name ("photo-store") is no verb; a denial stays in its clause; a
+  diagram's box for many ("Services") is no part.
+
+0.10.4 (measured, not released; its content comes with 0.10.6): The learning, on a fresh corpus written for this release by an LLM from a specification the reader's author did not phrase (an Ansible repository of 20 files and a wiki of 10 pages): 29 of its 45 relations found (0.10.0: 23), 83 of 91 links right (0.912; 0.10.0: 58 of 63), no denied or past statement read as a link, every server inside its own group (17 of 17), 2 of its 3 VIPs on the map with the service they front (0.10.0: none). Three earlier held-out sets: right links up on each (4 to 5, 3 to 4, 22 to 24), precision up on each. A question's part names: written with other separators 93 of 93 found (0.10.0: 14), with a one-letter slip 65 of 69 (0.10.0: 0), no part named wrongly (0.10.0: 28), ordinary questions naming a part by accident 4 of 121 (as 0.10.0). A value of the data named in another case or with other separators: 98.3%, 98.3%, 96.7% found (fresh sample). No planted secret stored on nine corpora; the two literal passwords of the fresh corpus stored nowhere. Upgrade from 0.10.0 on a copy of a lab: tables unchanged (v18), every setting kept, the first reading after it reads every unit once. With the LLM on the same fresh corpus (reported, not gated: the categories, what is inside what and the links' explanations are gated only through the map's structure, by rules): every link of the map explained short and long (91 of 91; the 75 "inside" relations are shown as nesting), 6 of the 91 explanations name a third part of the map, each a relation the corpus states (one adds a detail it does not: "point-in-time recovery"); 9 applications, 12 components, in the servers' category the 17 servers, 14 groups, the 3 VIPs and their 3 addresses, 27 values inside another; the LLM's reading of the texts proposes links of which about 4 in 10 are right (12 of 29 here, 8 of 18 on an earlier held-out corpus), in To review only; relations found after the whole chain 30 of 45 (stated in the repository 29 of 39, in the wiki 28 of 41). The agent (its checks written after 0.10.0 off): held-out set 69 and 68 answers right of 75 with 3 and 4 wrong answers not marked; main set 151 and 151 of 156 with 4 and 3; corrections (the held half: 8 cases of a first answer, then a user's correction, true or false): right then right 4, wrong then right 1, wrong twice 1, and right then wrong once, giving in to a false correction where the rule allowed none (the three builds before it: none); so 0.10.4 was not released, by its rule. The learning's figures here are 0.10.4's reader's; 0.10.5's was measured against it on the earlier held-out sets (above).
+
+0.10.4: the documents and the code, read better (the reading's rules versioned: the first reading after the upgrade
+reads every unit once)
+* **Pages**: a denied or past statement is no link ("never calls", "used to read", "n'utilise plus"); the subject of a
+  verb is the part before it, a clause after a colon or a "which" has its own; arrows between parts; a table of hosts
+  ("Host | Role | Services"); a route ("through the proxy to the app server"); where a part runs and what it calls,
+  writes or reads in French, Spanish, German, Portuguese and Italian; a misspelled part (a letter missing, one too many,
+  two swapped); a list item stays one sentence (a page with lists gets new search pieces once, at its next reading).
+* **Configuration**: Prometheus' scrape jobs and alertmanagers, Grafana's data sources, the Beats' modules and
+  monitors, Monit's checks, Caddy's upstreams, in their own files or in a deployment's variables; a public address is
+  its organisation's; `http://${CATALOGUE_HOST}:8080` is the catalogue; an address variable's default in code is a call.
+* **Compose and Kubernetes**: a service's build folder and the folders it mounts speak for it; network aliases are its
+  other names; extension files and Swarm stacks are read; a workload versioned after its application is that
+  application; a templated manifest is read.
+* **Ansible**: a role's services are other names of its part; a role making accounts or databases uses that database;
+  a role publishing a web site is an application; the files a role copies named after their path are read, never one
+  whose name speaks of a secret.
+* **VIPs**: an address whose name says vip, a VIP variable, keepalived's `virtual_ipaddress`, a table's VIP column, a
+  sentence naming a VIP: on the System map a VIP is an address (the servers' category) linked to the service it fronts,
+  with the servers behind it in it; a caller's address on a VIP is a call to its service.
+* **A question's part names**: written with other separators ("node exporter", `node_exporter`) or with a one-letter
+  slip (6 letters or more, one part only, never a plural), the system around the question starts from that part.
+* **What a person made**: never removed nor proposed for removal because the documents, the LLM or the data say
+  nothing of it (a text saying a value was retired proposes its retirement, with the sentence); `reset-knowledge
+  --categories` keeps the learned values a person's work rests on (a link drawn to one, a value put inside one, an item
+  given to one); in 0.10.0 such a link went with its learned end.
+* **The agent's checks written after 0.10.0, off** (to turn on after measuring them on your data): an answer that says
+  a query ran when none did (`agent.claimed_query_check`), a doubt with nothing new (`agent.bare_doubt_check`), an
+  announced step in -ing (`agent.announce_ing`), the limit a System map link names (`agent.link_limit_hint`),
+  `check_health`'s brief crossings (`tools.brief_crossings`); 0.10.3's correction checked again on another path
+  (`agent.correction_check`). README, *Checks of an answer before it is shown*.
+
+0.10.2: the data and the categories
+* **A value of the data found by the search, however it is written**: a question naming a server, a service, a status
+  or any value the learning read (up to 1,000 per label or field) gets first which metrics' labels and indices' fields
+  hold it, written as the data writes it (its case: a filter needs it), and the category values named so; written in
+  another case or with other separators ("web shop", "WEB_SHOP" for "Web-Shop"; up to five words read together, the
+  longest match first: a word inside a value is not a value alone); a category value named by one of its other names
+  says where it is in the data. These pieces come on top of the documents' pieces, never in their place, and only for
+  the databases the user may query (`search.values`, on).
+* **Where each part is in the data**: the links panel of a part (Categories page, System map) says, per label or
+  field, the value as written there and its metrics or indices, for the databases the user may query.
+* **The category a label holds, proposed**: a label or a field holding several values of a category (3 at least and
+  a fifth of them, a good part of its own values being the category's), not read for it yet, waits in To review
+  (*Where the categories are in the data*); an admin reads the category from it (`categories.fields`: the agent knows
+  where the category is in the data, and the next learning proposes the label's other values as values of the
+  category) or sets it aside.
+* **What could confuse the agent or the search, in To review** (`superset supagent lint`): a value proposed again in
+  another category ("X is an application already and is proposed as a subject": merge it in one click, or reject or
+  rename it), one name for two things, one thing written two ways in a category ("web-shop" and "Web Shop", "invoice"
+  and "invoices": merged in one click, the other writing kept as another name; a value inside or running on another
+  is not proposed), the System map in a circle (parts of each other, two parts each running on the other), documents
+  holding the same pages (a document whose every page another holds: disable it), a term defined twice differently.
+  Each says why and what to do; *Set aside*: not said again.
+* **The values' index built in a fraction of a second** on a large dictionary (a label kept once per metric is read
+  once: 3,000 metrics with 10 labels, two at the 1,000-value cap, and 300 indices: 0.21 s instead of 7.9 s).
+
+0.10.1: what measuring 0.10.0 showed
+* **Three Ansible idioms read**: a play's hosts written with Jinja (a variable from the play, the inventory or a role's
+  defaults, its `default('x')`, `groups['x']`), a role kept to one group by its condition (`when: inventory_hostname
+  in groups[...]`, `'x' in group_names`), a playbook, an inventory or variables given as a sample to copy
+  (`site.yml.sample`, `hosts.example`). Measured against 0.10.0's reader by a rule written first: on held-out classic
+  Ansible projects where each role runs 19 of 25 found at 86% right -> 100% right, the repositories' links 18 -> 20 of
+  22, nothing lower on two other sets; on a large community project (sample plays, templated hosts) 4 -> 31 of 32.
+* **An approval reaches every process's search**: a value or a link of the System map approved, edited or removed
+  is in the search before the next question of every server process (a stamp in supagent_meta written after the
+  change's commit, read at most every 2 s); in 0.10.0 the chat's answers, which run in the Celery workers, saw it at
+  the hourly indexing only (or after `superset supagent index`).
+* **Each wiki page read once**: a wiki read to the last page its links lead to, given as one document per space whose
+  pages link to each other, had every page read, cut, embedded and understood once per document; a page is now the
+  document's with the lowest id that reaches it (a document removed or disabled gives its pages to the next one at
+  its next reading). On a development wiki of three spaces: 66 pages read, pieces and units -> 24. The Context's
+  wiki pages are made per space whatever document read its pages (they were per document, each listing every page).
+* **To review filtered by a word**: a part, a repository, a document (what a proposal names or where it was read);
+  the counts are the filter's and *Approve all shown* / *Reject all shown* (values and links) act on what it shows,
+  so that what one repository proposed is reviewed at once. The short explanation's hint follows the link's kind.
+* **A classification run keeps time for the links**: the items given to the LLM take half the run at most when the
+  links are read and explained after them, a quarter of the run is kept for the explanations, the reading has the
+  rest (on a big platform the items used the whole run and the explanations were left a minute).
+
+Upgrade from 0.10.0: the wheel on every host, `superset supagent init` once (no table changes: v18), restart; the first
+reading after it reads every unit once. From 0.9.6.x: the same, the tables go from v17 to v18. INSTALL.txt,
+*From 0.10.0 to 0.10.5* and *From 0.9.6.x to 0.10.5*.
+
 ## 0.10.0 — 8 October 2026
 
 The knowledge release: the search finds what the documents, the code, the catalog, the data dictionary and the System

@@ -6,7 +6,9 @@ descriptions").
                was linked to them
   categories   the values of the categories the learning read or proposed (from the data, by the LLM) with what they
                were given (the items' categories) and their links; every item is classified again; a value a person
-               added stays, with its description, and keeps the items a person gave it (the LLM's are made again)
+               added stays, with its description, and keeps the items a person gave it (the LLM's are made again);
+               (0.10.4) a learned value that a person's work rests on stays too (a link a person drew to it or
+               described, a value a person put inside it, an item a person gave it): only its learned links and items go
   links        the links of the System map the learning read or proposed, with their descriptions; a link a person
                drew, or whose description a person wrote, stays
   everything   (--all) what people made goes too: every value, link and Context page, the categories' descriptions
@@ -39,6 +41,23 @@ def _by_person(link: Any) -> bool:
     return link.source == "admin" or bool(link.explained_by and link.explained_by not in ("llm", "data"))
 
 
+def _held() -> set[int]:
+    """(0.10.4) The values a person's work rests on: an end of a link a person drew or described (a value a person put
+    inside another included), a value a person gave an item."""
+    from supagent.models import Link, Tag
+
+    out: set[int] = set()
+    for x in db.session.query(Link).filter(Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%")):
+        if _by_person(x):
+            for ref in (x.a_ref, x.b_ref):
+                try:
+                    out.add(int(ref.split(":", 1)[1]))
+                except ValueError:
+                    pass
+    out |= {i for (i,) in db.session.query(Tag.facet_id).filter(Tag.source == "admin")}
+    return out
+
+
 def _scope(context: bool, categories: bool, links: bool, everything: bool) -> dict[str, Any]:
     """The rows that go {"pages": [...], "values": [...], "links": [...], "tags": [...]} and the counts of what stays."""
     from supagent.models import ContextPage, Facet, Link, Tag
@@ -51,9 +70,12 @@ def _scope(context: bool, categories: bool, links: bool, everything: bool) -> di
     gone_values: set[int] = set()
     if categories:
         values = db.session.query(Facet).all()
-        out["values"] = [f for f in values if everything or (f.source or "") not in PEOPLE]
+        learned = [f for f in values if everything or (f.source or "") not in PEOPLE]
+        held = set() if everything else _held()
+        out["values"] = [f for f in learned if f.id not in held]
         gone_values = {f.id for f in out["values"]}
-        out["kept"]["values a person added"] = len(values) - len(out["values"])
+        out["kept"]["values a person added"] = len(values) - len(learned)
+        out["kept"]["learned values a person's work rests on"] = len(learned) - len(out["values"])
         tags = db.session.query(Tag).all()
         out["tags"] = [t for t in tags if everything or t.facet_id in gone_values or (t.source or "") != "admin"]
         out["kept"]["items a person gave a value"] = len(tags) - len(out["tags"])

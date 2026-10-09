@@ -48,12 +48,13 @@ def test_a_wipe_keeps_what_people_made_and_the_backup_puts_it_back(ctx, tmp_path
         assert p["kept"]["values a person added"] >= 2 and p["kept"]["context pages a person wrote"] >= 1
         assert db.session.query(Facet).filter(Facet.value.in_(names)).count() == 4     # nothing changed
         out = R.run(context=True, categories=True, links=True, by="test")
-        assert out["backup"] and out["values"] >= 2
+        assert out["backup"] and out["values"] >= 1
 
         left = {f.value: f for f in db.session.query(Facet).filter(Facet.value.in_(names))}
-        assert set(left) == {names[0], names[1]} and left[names[0]].description == "Written by a person"
+        # (0.10.4) the data's value stays: a link a person drew rests on it
+        assert set(left) == {names[0], names[1], names[3]} and left[names[0]].description == "Written by a person"
         kept_links = {k for k, i in ids["links"].items() if db.session.get(Link, i) is not None}
-        assert kept_links == {"drawn", "described"}                   # (the other end of the last one is gone)
+        assert kept_links == {"drawn", "described", "to a learned value"}
         assert {k for k, i in ids["tags"].items() if db.session.get(Tag, i) is not None} == {"given by a person"}
         assert {k for k, i in ids["pages"].items() if db.session.get(ContextPage, i) is not None} == {"person"}
         assert db.session.query(Classified).count() == 0              # every item classified again

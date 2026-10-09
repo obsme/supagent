@@ -15,6 +15,20 @@ import pytest
 from test_stop import FakeAgent, _running
 
 _IDS = itertools.count(1)
+CHECKS = ("agent.correction_check", "agent.claimed_query_check", "agent.bare_doubt_check", "agent.announce_ing")
+
+
+@pytest.fixture(autouse=True)
+def _agent_checks_on(ctx):
+    """(0.10.4) The checks these tests describe are off by default in 0.10.4 (measured): on here."""
+    from supagent import settings
+
+    before = {k: settings.get(k) for k in CHECKS}
+    for k in CHECKS:
+        settings.set_value(k, True)
+    yield
+    for k, v in before.items():
+        settings.set_value(k, v)
 
 
 def call(name: str, args: dict | None = None) -> dict:
@@ -135,6 +149,8 @@ def test_an_empty_llm_answer_without_any_result_still_fails(ctx, monkeypatch):
     "The index is batch-jobs. I will now query it for yesterday.",
     "J'ai trouvé la métrique. Je vais lancer la requête.",
     "Next, I'll create the chart in Superset:",
+    'Let me also try searching for "risk" or "limit" to see if there are any other dashboards related to PnL.',  # 0.10.4
+    "No dashboard has PnL in its name. Let me try looking for the charts about it instead.",
     "I'll do this in three steps:\n1. Update chart 277 to show 23 September\n2. Add it to the dashboard\n"
     "3. E-mail a screenshot of the dashboard",                          # a plan and nothing done (lab)
 ])
@@ -556,3 +572,152 @@ def test_an_action_said_done_with_no_tool_is_sent_back_to_be_done(ctx, monkeypat
             m["content"].startswith("(Check before answering: your answer says that")]
     assert sent and "a dashboard was made or changed" in sent[0]
     assert ran and ran[0][0] == "add_chart_to_existing_dashboard" and "required" in a.llm.choices
+
+
+@pytest.mark.parametrize("text, disputed", [
+    ("That doesn't look right. Check again.", True), ("That's wrong, the team opened 30 tickets that week.", True),
+    ("No, SHOES made more than 400,000 euros in September.", True), ("You included cancelled trades. Leave them out.", True),
+    ("I meant the sold orders, without the test channel.", True), ("Are you sure? Check it again.", True),
+    ("Hmm, that seems wrong to me.", True), ("C'est faux, vérifie.", True), ("That is not our definition.", True),
+    ("Not the models: which pricer had the most failed requests?", True),
+    ("Leave the warehouses aside: which carrier had the most late parcels?", True),
+    ("Only the refunded ones, please: the others don't count.", True),
+    ("No thanks, that's all.", False), ("No problem, now show me the trend by day.", False),
+    ("No orders were placed on Sunday?", False), ("Which carrier had the most late ones?", False),
+    ("And on 22 September?", False), ("Check the load of the servers again tomorrow morning.", False),
+    ("Noted, thank you.", False)])
+def test_a_reply_that_disputes_the_answer_is_told_apart(text, disputed):
+    from supagent.agent import pushback
+
+    assert pushback(text) is disputed
+
+
+def test_a_disputed_answer_gets_its_queries_and_must_query_again(ctx, monkeypatch):
+    """"That doesn't look right": the previous answer's queries are given with what to do (another assumption, the
+    knowledge searched again, a new query); an answer with no tool is sent back with a query made compulsory."""
+    from supagent.agent import CORRECTION_NOTE, NO_TOOL_NUDGE
+
+    history = [{"role": "user", "content": "How many orders were sold on 16 September?"},
+               {"role": "assistant", "content": "413 orders were sold on 16 September.",
+                "queries": [{"query": "SELECT COUNT(*) FROM orders WHERE ORDER_DATE = '2026-09-16'"}]}]
+    sql = {"request": {"database_id": 1, "sql": "SELECT COUNT(*) AS n FROM orders WHERE ORDER_DATE >= '2026-09-16' "
+                                                "AND ORDER_DATE < '2026-09-17'"}}
+    a, ran = agent_with(monkeypatch, [say("It is 413."), call("execute_sql", sql), say("Checked again: 413 orders.")],
+                        results=lambda n, args: json.dumps({"success": True, "rows": [{"n": 413}], "row_count": 1}))
+    a.follow_up = True
+    answer, _trace = a.ask("That doesn't look right. Check again.", history)
+    first = a.llm.seen[0][-1]["content"]
+    from supagent.agent import BARE_DOUBT_NOTE      # (0.10.4) a bare doubt has its own note, the queries in it too
+
+    assert BARE_DOUBT_NOTE.split("\n")[0][:60] in first and "SELECT COUNT(*) FROM orders" in first
+    sent = [m["content"] for m in a.llm.seen[-1] if m["role"] == "user" and m["content"] == NO_TOOL_NUDGE]
+    assert sent and ran and answer.startswith("Checked again") and "required" in a.llm.choices
+
+
+def test_a_disputed_answer_checked_with_the_same_query_is_sent_back_once(ctx, monkeypatch):
+    from supagent.agent import SAME_QUERY_NUDGE
+
+    q = "SELECT COUNT(*) AS n FROM returns WHERE RETURN_DATE >= '2026-09-01'"
+    history = [{"role": "user", "content": "How many returns were there in September?"},
+               {"role": "assistant", "content": "589 returns.", "queries": [{"query": q}]}]
+    same = {"request": {"database_id": 1, "sql": q}}
+    other = {"request": {"database_id": 1, "sql": q + " AND STATUS = 'REFUNDED'"}}
+    counted = lambda n, args: json.dumps({"success": True, "row_count": 1, "rows": [
+        {"n": 537 if "REFUNDED" in json.dumps(args) else 589}]})
+    a, ran = agent_with(monkeypatch, [call("execute_sql", same), say("589 returns."), call("execute_sql", other),
+                                      say("537 refunded returns.")], results=counted)
+    a.follow_up = True
+    answer, _trace = a.ask("Only the refunded ones, please: the others don't count.", history)
+    sent = [m["content"] for m in a.llm.seen[-1] if m["role"] == "user" and m["content"] == SAME_QUERY_NUDGE]
+    assert sent and len(ran) == 2 and answer.startswith("537")
+    # not disputed: no such check
+    b, _ran = agent_with(monkeypatch, [call("execute_sql", same), say("589 returns.")], results=counted)
+    b.follow_up = True
+    answer, _trace = b.ask("And how many in August?", history)
+    assert answer == "589 returns."
+
+
+def test_a_follow_up_answered_without_a_query_that_says_one_ran_is_sent_back(ctx, monkeypatch):
+    """(0.10.4) "Back to the returns: how many of them were refunded?" answered with no tool, the chat's own figure
+    given again ("of the 589 returns, 589 were refunded") and the text saying a query was run: sent back with a query
+    made compulsory (before: one reminder, and the same made-up answer given again went through)."""
+    from supagent import settings
+    from supagent.agent import NO_TOOL_NUDGE
+
+    q = "SELECT COUNT(*) AS n FROM returns WHERE RETURN_DATE >= '2026-09-01' AND RETURN_DATE < '2026-10-01'"
+    history = [{"role": "user", "content": "How many returns were there in September?"},
+               {"role": "assistant", "content": "There were 589 returns in September (a return's STATUS: RECEIVED, "
+                                                "INSPECTED or REFUNDED).", "queries": [{"query": q}]},
+               {"role": "user", "content": "What is the first-response target of a P1 ticket?"},
+               {"role": "assistant", "content": "The first-response target of a P1 ticket is 4 hours."}]
+    made_up = "Of the 589 returns, 589 were refunded. I ran a query to count the returns with STATUS = 'REFUNDED'."
+    sql = {"request": {"database_id": 1, "sql": q + " AND STATUS = 'REFUNDED'"}}
+    counted = lambda n, args: json.dumps({"success": True, "row_count": 1, "rows": [{"n": 537}]})
+    a, ran = agent_with(monkeypatch, [say(made_up), call("execute_sql", sql), say("537 of the 589 returns were refunded.")],
+                        results=counted)
+    a.follow_up = True
+    answer, _trace = a.ask("Back to the September returns: how many of them were refunded?", history)
+    sent = [m["content"] for m in a.llm.seen[-1] if m["role"] == "user" and m["content"] == NO_TOOL_NUDGE]
+    assert sent and ran and answer.startswith("537") and "required" in a.llm.choices
+    # the check turned off, as before: one reminder without a compulsory query; the same made-up answer given again
+    # is kept, only marked
+    from supagent.agent import UNSUPPORTED_NOTE
+
+    settings.set_value("agent.claimed_query_check", False)
+    try:
+        b, ran_b = agent_with(monkeypatch, [say(made_up), say(made_up)], results=counted)
+        b.follow_up = True
+        answer, _trace = b.ask("Back to the September returns: how many of them were refunded?", history)
+        assert answer.startswith(made_up) and answer.endswith(UNSUPPORTED_NOTE) and not ran_b
+        assert "required" not in b.llm.choices
+    finally:
+        settings.set_value("agent.claimed_query_check", True)
+
+
+def test_an_answer_saying_a_query_ran_when_none_did_is_marked():
+    """(0.10.4) Whatever path the answer took, "I ran a query" with no query run in this answer is marked."""
+    from supagent.agent import claimed_not_run
+
+    said = "Of the 589 returns, 589 were refunded. I ran a query to count them."
+    assert claimed_not_run(said, [])
+    assert claimed_not_run(said, [{"tool": "describe_data", "status": "done"}])
+    assert not claimed_not_run(said, [{"tool": "execute_sql", "status": "done"}])
+    assert not claimed_not_run("Of the 589 returns, 537 were refunded.", [])
+    assert claimed_not_run("The query executed returns 537 rows.", [])
+
+
+@pytest.mark.parametrize("text, bare", [
+    ("Are you sure? Check it again.", True), ("That doesn't look right. Check again.", True),
+    ("C'est faux, vérifie.", True), ("Hmm, that seems wrong to me.", True), ("Are you sure?", True),
+    ("That's wrong, the team opened 30 tickets that week.", False),
+    ("No: the ALL rows are desk totals, not books. Leave them out and answer again.", False),
+    ("That is not our definition. Use the glossary's definition of the refunds.", False),
+    ("You included cancelled trades. Leave them out.", False), ("I meant the sold orders.", False),
+    ("Not the models: which pricer had the most failed requests?", False),
+    ("And on 22 September?", False)])
+def test_a_reply_that_only_doubts_is_told_apart(text, bare):
+    """(0.10.4) A doubt that brings nothing new gets its own note: no assumption changed without evidence."""
+    from supagent.agent import bare_doubt
+
+    assert bare_doubt(text) is bare
+
+
+def test_a_bare_doubt_gets_the_note_that_keeps_an_undefined_reading(ctx, monkeypatch):
+    from supagent.agent import BARE_DOUBT_NOTE, CORRECTION_NOTE
+
+    history = [{"role": "user", "content": "What was the average value of a sold order on 22 September?"},
+               {"role": "assistant", "content": "133.40 EUR.",
+                "queries": [{"query": "SELECT AVG(AMOUNT_EUR) FROM orders WHERE STATUS != 'CANCELLED'"}]}]
+    sql = {"request": {"database_id": 1, "sql": "SELECT STATUS, AVG(AMOUNT_EUR) FROM orders GROUP BY STATUS"}}
+    a, _ran = agent_with(monkeypatch, [call("execute_sql", sql), say("Checked: 133.40 EUR (every order not cancelled).")],
+                         results=lambda n, args: json.dumps({"success": True, "row_count": 1, "rows": [{"avg": 133.4}]}))
+    a.follow_up = True
+    a.ask("Are you sure? Check it again.", history)
+    first = a.llm.seen[0][-1]["content"]
+    assert BARE_DOUBT_NOTE.split("\n")[0][:60] in first and CORRECTION_NOTE.split("\n")[0][:60] not in first
+    b, _ran = agent_with(monkeypatch, [call("execute_sql", sql), say("Without them: 131.20 EUR.")],
+                         results=lambda n, args: json.dumps({"success": True, "row_count": 1, "rows": [{"avg": 131.2}]}))
+    b.follow_up = True
+    b.ask("You included the test orders. Leave them out.", history)
+    first = b.llm.seen[0][-1]["content"]
+    assert CORRECTION_NOTE.split("\n")[0][:60] in first and BARE_DOUBT_NOTE.split("\n")[0][:60] not in first

@@ -80,3 +80,46 @@ def test_days_without_data_do_not_count_and_no_breach_costs_nothing(world, monke
     noisy = next(b for b in out["breaches"] if b["labels"]["node"] == "srv-noisy")
     assert noisy["earlier_days"] == "1 of the 1 previous days" and "usual" not in noisy and out["note"] == ""
     assert quiet["note"] == "no breach" and [k for expr, k in conn.calls if "cpu_pct" in expr] == [0, 0]
+
+
+class _SpikeConn(_Conn):
+    """A load that crosses its limit for one step only: no breach for a check that needs 10 minutes."""
+
+    def query_range(self, expr, start, end, step):
+        self.calls.append((expr, 0))
+        n = (end - start) // step + 1
+        spike = [1.0] * n
+        spike[n // 2] = 2.9
+        s = _Series("srv-a", spike, start, step)
+        s.labels = {"__name__": "node_load1", "node": "srv-a"}
+        other = _Series("srv-b", [1.0] * n, start, step)
+        other.labels = {"__name__": "node_load1", "node": "srv-b"}
+        return [s, other]
+
+
+def test_a_brief_crossing_of_a_named_server_is_shown_not_counted(world, monkeypatch):  # noqa: F811
+    """(0.10.4) The team's check needs 10 minutes above 2; the server went to 2.9 for one step: no breach, but the
+    crossing is given (worst value and time) when the servers are named: a System map link may call any load above 2
+    too high."""
+    from supagent import tools
+    from supagent.security import acting_as
+
+    from supagent import settings
+
+    monkeypatch.setattr(tools, "_catalog", lambda: {"checks": {
+        "load_high": {"promql": "node_load1", "above": 2, "for": "10m", "description": "load too high"}}})
+    monkeypatch.setattr(tools, "_metrics_database", lambda ref: world["metrics"])
+    monkeypatch.setattr(tools, "_promagg_connection", lambda database: _SpikeConn())
+    with acting_as("admin"):
+        off = tools.check_health("2026-09-24 02:00", "2026-09-24 05:00", entities=["srv-a", "srv-b"])
+        settings.set_value("tools.brief_crossings", True)    # (off by default in 0.10.4: not measured enough)
+        try:
+            named = tools.check_health("2026-09-24 02:00", "2026-09-24 05:00", entities=["srv-a", "srv-b"])
+            everyone = tools.check_health("2026-09-24 02:00", "2026-09-24 05:00")
+        finally:
+            settings.set_value("tools.brief_crossings", False)
+    assert "brief_crossings" not in off and off["note"] == "no breach"
+    assert named["breach_count"] == 0 and [(x["labels"]["node"], x["worst"]) for x in named["brief_crossings"]] == [
+        ("srv-a", 2.9)]
+    assert "brief_crossings: 1 threshold(s) crossed" in named["note"]
+    assert "brief_crossings" not in everyone and everyone["note"] == "no breach"     # only for named entities

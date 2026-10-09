@@ -664,6 +664,27 @@ def _table_refs() -> dict[str, str]:
     return out
 
 
+INSIDE_CUES = re.compile(r"\b(?:part of|parts of|belongs? to|member of|members of|one of|in the|inside|within|under|"
+                         r"contains?|includes?|holds?|consists? of|made of|groups?|clusters?|pools?|among)\b", re.I)
+
+
+def said_inside(child: str, parent: str, batch: list[dict[str, Any]]) -> str | None:
+    """(0.10.6) The sentence of the classified texts that names both values and says one holds the other ("part
+    of", "one of", "in the", "contains"...), or None: the LLM's "part of" is proposed only with such a sentence (on
+    a lab map it said 33 parts "belong to" a web application that no text put them in)."""
+    from supagent.knowledge.sysmap import name_forms
+
+    def finds(name: str, text: str) -> bool:
+        return any(re.search(r"(?<![\w-])" + re.escape(f) + r"(?![\w-])", text) for f in name_forms(name) if len(f) >= 2)
+
+    for it in batch:
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", it.get("text") or ""):
+            low = sentence.lower()
+            if len(low) < 400 and finds(child, low) and finds(parent, low) and INSIDE_CUES.search(low):
+                return " ".join(sentence.split())[:300]
+    return None
+
+
 def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[str, str]) -> dict[str, int]:
     """The LLM's answer written: new values proposed, tags and links (confident ones used at once)."""
     from supagent.models import Classified, Facet, Link, Tag
@@ -689,12 +710,19 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
 
     def elsewhere(facet: str, value: str) -> Any:
         """The approved value of another category that has this name: the same part of the system, which the team
-        filed elsewhere (a "component" X when X is a service of theirs): the item is about that one. A subject
-        is a topic: it may share its name with a part."""
-        if facet in ("subject", "aspect"):
+        filed elsewhere (a "component" X when X is a service of theirs): the item is about that one. (0.10.6) A
+        subject of the same name as an approved part is that part too (proposed as a subject it split what is
+        known of it, and To review warned of it); and a value waiting in To review under another category (one
+        name, one value: a name was proposed as an application and as a component by two batches of one run). A
+        subject is no server's twin (a topic "backup" and the servers "backup")."""
+        if facet == "aspect":
             return None
         hit = known(value)
-        return hit if hit is not None and hit.facet not in (facet, "subject") and hit.status == "approved" else None
+        if hit is None or hit.facet in (facet, "subject") or hit.status not in ("approved", "proposed"):
+            return None
+        from supagent.knowledge.datalinks import SERVERISH
+
+        return None if facet == "subject" and SERVERISH.search(hit.facet or "") else hit
 
     for nv in args.get("new_values") or []:
         if data_name(str(nv.get("facet") or ""), str(nv.get("value") or "")):
@@ -709,8 +737,9 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
                 if not f.origins:
                     f.origins = ["proposed by the LLM from the texts it read"]
                 for p in (known(x, f.id) for x in (nv.get("part_of") or [])[:6]):
-                    if p is not None:                 # shown with the value in the review, approved with it
-                        suggest_link(f.id, p.id, PART_OF, "llm", "the LLM, from the texts it read")
+                    said = said_inside(f.value, p.value, batch) if p is not None else None
+                    if said:                          # shown with the value in the review, approved with it
+                        suggest_link(f.id, p.id, PART_OF, "llm", f"\"{said}\" (the LLM, from the texts it read)")
                 same = known(nv.get("same_as"), f.id) if nv.get("same_as") else None
                 if same is not None and same.facet == f.facet:
                     f.suggested = {**(f.suggested or {}), "same_as": same.id}     # one click: merge
@@ -719,7 +748,8 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
         if f is None:
             continue
         for p in (known(x, f.id) for x in (kv.get("part_of") or [])[:6]):
-            if p is not None and suggest_link(f.id, p.id, PART_OF, "llm", "the LLM, from the texts it read") \
+            said = said_inside(f.value, p.value, batch) if p is not None else None
+            if said and suggest_link(f.id, p.id, PART_OF, "llm", f"\"{said}\" (the LLM, from the texts it read)") \
                     and f.status != "proposed":
                 n["relations"] = n.get("relations", 0) + 1
     by_ref = {it["ref"]: it for it in batch}

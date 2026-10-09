@@ -217,7 +217,9 @@ def test_the_learning_says_what_new_and_known_values_are_part_of(world):
                          ("component", "risk grid"), ("subject", "Settlement")):
         known[value] = F._ensure(facet, value, "approved", "admin")
     db.session.commit()
-    batch = [{"ref": f"entry:{world['entry']}", "hash": "h"}]
+    batch = [{"ref": f"entry:{world['entry']}", "hash": "h",            # (0.10.6) a part of: said by a sentence
+              "text": "The jvm is part of LEDGER and of PAYMENTS. The jvm is in the posting engine and in the risk "
+                      "grid. The posting engine is part of LEDGER."}]
     args = {"items": [], "new_values": [
         {"facet": "component", "value": "jvm", "description": "the Java virtual machines",
          "part_of": ["LEDGER", "PAYMENTS", "posting engine", "Risk Grid", "nothing known"]},

@@ -1116,6 +1116,13 @@ LOOKUP_TOOLS = QUERY_TOOLS + ("describe_data", "data_changes", "search_knowledge
 RESULT_CLAIM = re.compile(r"```json|\b(sql|query|requ[êe]te|promql)\s+(run|ran|executed|ex[ée]cut[ée]e?)\b|"
                           r"\bI (ran|executed|queried)\b", re.I)
 TABLE_WITH_NUMBERS = re.compile(r"^\s*\|[^\n]*\d[^\n]*\|\s*$", re.M)
+# (0.10.6) a reply to the no-tool check that speaks of the check or of the answer before it instead of answering
+# ("No data query was needed as the question only asked for the definition, which was provided based on the glossary")
+CHECK_TALK = re.compile(r"\b(?:no\s+(?:data\s+)?(?:query|queries|tool|tools|lookup)\s+(?:was|were|is|are)\s+"
+                        r"(?:needed|required|necessary|called)|(?:was|were|is|has\s+been)\s+(?:already\s+)?"
+                        r"(?:provided|given|answered|explained)\s+(?:above|before|earlier|based\s+on)|"
+                        r"(?:the|my)\s+(?:previous|above|first|earlier)\s+answer|as\s+(?:stated|said|given|explained)"
+                        r"\s+(?:above|before|earlier)|(?:this|the)\s+check\b)", re.I)
 NO_TOOL_NUDGE = ("(Check before answering: you called no tool. The knowledge given with the question is only a "
                  "summary, not an answer. Call describe_data for what the data contains and its fields, and run "
                  "the query (execute_sql, promql_query...) for any number or list. If the question really needs "
@@ -1667,6 +1674,79 @@ ECHO_NUDGE = ("(Check before answering: your answer gives the previous answer ag
               "question is a new one: \"{question}\". Answer this question, from the tools (a query for any number "
               "or name it asks for). Write the answer for the user as if for the first time: they see neither the one "
               "above nor this check.)")
+# (0.10.3) the user disputes or corrects the previous answer ("that's wrong", "check again", "no, I meant the sold
+# ones", "you included the cancelled trades", "c'est faux"): the answer is checked again on another path, not defended
+# as it was (a reply that only says "no thanks", "no problem" is none)
+PUSHBACK = re.compile(
+    r"^\W*(?:no|nope|non|wrong|incorrect|faux)\s*(?:[,.!:;\u2014\u2013-]|$)(?!\s*(?:thanks?|thank you|merci|that'?s all|"
+    r"c'est tout|problem|probl[eè]me|worries|need|souci))"
+    r"|^\W*not\s+(?:the|that|this|those|these)\b|^\W*hmm+\W"
+    r"|\b(?:that'?s|this is|it'?s|that is|it is|c'est|ce n'est)\s+(?:not\s+)?(?:wrong|incorrect|not right|not correct|"
+    r"not what i (?:meant|asked)|faux|pas (?:juste|correct|bon|[cç]a|ce que))\b"
+    r"|\b(?:doesn'?t|does not|don'?t|do not)\s+(?:look|seem|sound)\s+(?:right|correct)\b"
+    r"|\bseems?\s+(?:wrong|off|too (?:high|low))\b|\b(?:are|r) you sure\b"
+    r"|\b(?:check|verify|look at)\s+(?:it\s+|that\s+|this\s+)?again\b|\bdouble[- ]check\b|\bre-?check\b"
+    r"|\byou\s+(?:included|forgot|missed|mixed|left out)\b|\byou(?:'re| are)\s+wrong\b"
+    r"|\bi meant\b|\bnot (?:our|the) definition\b|\bnot what i (?:meant|asked)\b"
+    r"|\b(?:leave|take)\s+(?:them|it|those|these)\s+out\b|\bleave\s+(?:the\s+)?\w+(?:\s+\w+)?\s+aside\b"
+    r"|\bthe others? (?:don'?t|do not|doesn'?t|does not) count\b"
+    r"|\bv[ée]rifie\w*|\b(?:es-tu|[êe]tes-vous) s[ûu]r|\bc'est faux\b|\bce n'est pas (?:[cç]a|ce que)\b",
+    re.I)
+CORRECTION_NOTE = (
+    "(The user disputes or corrects your previous answer. Do not repeat it as it was, and do not simply defend it. "
+    "First say, in one sentence, which assumption of your previous answer the user's reply changes (a filter, a "
+    "field, a table, a definition, the rows counted, the period) or, if they only say it is wrong, check each of "
+    "those assumptions again. When they name a definition, a value or a part, search the knowledge again with their "
+    "words (the glossary's definitions, the catalog, the System map). Then run a NEW query that applies their reply; "
+    "never the same query again. If the figure stays the same after that check, say so and show the query that "
+    "confirms it; if they state a figure the data does not confirm, give the data's figure and how it was counted. "
+    "Your previous answer's queries:\n{queries})")
+BARE_DOUBT_NOTE = (
+    "(The user doubts your previous answer without saying what is wrong. Check it again: verify the query and each of "
+    "its assumptions (a filter, a field, a definition, the rows counted, the period) against the knowledge and the "
+    "data, with a new query. A doubt alone is no evidence: change an assumption only when the knowledge or the data "
+    "shows it was wrong. When a word of the question has no definition in the knowledge (what counts as sold, as "
+    "active, as late), keep your reading and say which one you used; if another reading is as likely, give its "
+    "figure too and ask which one they mean. Your previous answer's queries:\n{queries})")
+DOUBT_WORDS = re.compile(r"\b(?:no|nope|non|wrong|incorrect|faux|not right|right|correct|sure|s[uû]r|check|verify|"
+                         r"v[ée]rifie[rz]?|again|encore|that|this|it|is|isn'?t|doesn'?t|does|look|looks|seem|seems|to|"
+                         r"me|you|are|re|hmm+|please|c'est|ce|n'est|pas|[çc]a|es-tu|[êe]tes-vous|double-check|re-check|"
+                         r"recheck|it'?s|that'?s|answer|figure|number|result|think|i|don'?t|quite|really|so|ok|"
+                         r"okay|well|but|and|one|more|time|look again|thing)\b", re.I)
+
+
+def bare_doubt(question: str) -> bool:
+    """(0.10.4) A disputing reply that brings nothing new ("Are you sure? Check it again.", "That doesn't look right",
+    "c'est faux, vérifie"): no figure, no value, no field or definition named."""
+    q = str(question or "")
+    if not pushback(q) or re.search(r"\d", q) or re.search(r"\b(?:defin|glossar|includ|exclud|leave|only|meant|without|"
+                                                           r"instead|not the|rows?|field|column|table|period|"
+                                                           r"d[ée]finition|sans|seulement)\w*", q, re.I):
+        return False
+    rest = DOUBT_WORDS.sub(" ", q)
+    return len(re.findall(r"[^\W\d_]{3,}", rest)) <= 1
+
+
+SAME_QUERY_NUDGE = ("(Check before answering: the user disputed your previous answer and you ran the same query as "
+                    "before. Run a query that applies what they said (another filter, field, table or definition), or "
+                    "show why the earlier one already does. The user does not see this check: never mention it.)")
+
+
+def pushback(question: str) -> bool:
+    """The message disputes or corrects the previous answer (said once, short or long)."""
+    return bool(PUSHBACK.search(question or ""))
+
+
+def _norm_query(q: str) -> str:
+    return re.sub(r"\s+", " ", str(q or "")).strip().lower()
+
+
+def _call_query(args: dict) -> str:
+    """The query a tool call ran (an execute_sql request's sql, a PromQL query)."""
+    req = args.get("request") if isinstance(args.get("request"), dict) else args
+    return str((req or {}).get("sql") or (req or {}).get("query") or "")
+
+
 AGAIN = re.compile(r"\b(again|repeat|once more|same answer|summar\w*|recap\w*|encore|répète|redis|rappelle|"
                    r"résum\w*)\b", re.I)
 
@@ -1708,6 +1788,14 @@ UNSUPPORTED_NOTE = ("\n\n(Check: no query ran in this answer: numbers or rows sh
                     "data. Ask again to have them read from the data.)")
 SHOWN_SQL_NOTE = ("\n\n(Check: the query shown here was not run in this answer: its figures come from other queries. "
                   "Ask again to have it run.)")
+
+
+def claimed_not_run(answer: str, trace: list[dict]) -> bool:
+    """(0.10.4) The answer says a query was run ("I ran a query", "the query executed", a JSON result) while no query
+    tool ran in this answer (agent.claimed_query_check)."""
+    if not RESULT_CLAIM.search(answer or "") or not _setting_on("agent.claimed_query_check"):
+        return False
+    return not {t.get("called") or t.get("tool") for t in trace if t.get("status") == "done"} & set(QUERY_TOOLS)
 
 
 def unsupported_note(answer: str, trace: list[dict], question: str = "") -> str:
@@ -1837,6 +1925,13 @@ ANNOUNCE = re.compile(
     r"compute|calculate|retrieve|pull|save|draw|plot)\b"
     r"|\b(?:je vais|laissez-moi|je lance|lan[çc]ons)\b[^.!?\n]{0,60}\b(?:lancer|ex[ée]cuter|v[ée]rifier|chercher|"
     r"cr[ée]er|interroger|calculer|r[ée]cup[ée]rer|envoyer|exporter|enregistrer|tracer)\b)[^.!?\n]*[.:!…]?\s*$", re.I)
+# (0.10.4, agent.announce_ing, off until measured) the same steps written in -ing after "try" or "start" ("Let me also
+# try searching for ...")
+ANNOUNCE_ING = re.compile(
+    r"\b(?:I(?:'ll| will| am going to| shall)|let me|let's|now,? I(?:'ll| will)|next,? I(?:'ll| will))\b[^.!?\n]{0,60}\b"
+    r"(?:running|querying|checking|calling|creating|fetching|looking up|looking for|searching|executing|generating|"
+    r"exporting|sending|building|computing|calculating|retrieving|pulling|saving|drawing|plotting)\b[^.!?\n]*[.:!…]?\s*$",
+    re.I)
 ANNOUNCE_NUDGE = ("(Check before answering: your text ends by announcing a step (\"{step}\") but you called no "
                   "tool. Take that step now with the tool, or, if it is not needed, write the final answer without "
                   "announcing anything. The user sees neither the text above nor this check: never mention it.)")
@@ -1965,7 +2060,7 @@ def announces_action(answer: str) -> str | None:
     if not last or last.rstrip().endswith("?") or re.search(r"\b(if you|let me know|would you|do you want|shall I|"
                                                             r"si vous|souhaitez|voulez|dites-moi)\b", last, re.I):
         return None
-    m = ANNOUNCE.search(last)
+    m = ANNOUNCE.search(last) or (settings.get("agent.announce_ing") and ANNOUNCE_ING.search(last))
     if m:
         return last.strip()[:160]
     return announced_plan(answer)
@@ -2410,6 +2505,9 @@ class Agent:
         # the chat's results may answer it only when it asks nothing new (no other day, value or period)
         self.follow_up = answered or (follow and not adds)
         self.asks_new = bool(before) and adds
+        # (0.10.3) the previous answer disputed or corrected: checked again on another path, its queries given
+        self.disputed = bool(before) and bool(said) and pushback(question) and \
+            bool(settings.get("agent.correction_check"))
         self.wants_saved_chart = bool(SAVED_CHART_ASK.search(f"{before}\n{question}" if follow else question or ""))
         # "what charts are in it?": the tools, instructions and checks of the question it refers to, too
         self.intent_text = f"{before}\n{question}" if follow else question
@@ -2500,6 +2598,12 @@ class Agent:
         if (getattr(self, "understood", None) or {}).get("as"):   # the system's reading, in the team's names
             reading = UNDERSTOOD_NOTE.format(restated=self.understood["as"])
             blocks = f"{blocks}\n\n{reading}" if blocks else reading
+        if getattr(self, "disputed", False):            # (0.10.3) another path, the previous queries in sight
+            queries = "\n".join(f"- {q[:500]}" for q in (self.prev_queries or [])[:4]) or \
+                "- (none: the previous answer came from the knowledge or the chat)"
+            note = (BARE_DOUBT_NOTE if bare_doubt(question) and _setting_on("agent.bare_doubt_check")
+                    else CORRECTION_NOTE).format(queries=queries)
+            blocks = f"{blocks}\n\n{note}" if blocks else note
         messages.append({"role": "user", "content": (blocks + "\n\n" if blocks else "") +
                          f"(Now: {now():%A %Y-%m-%d %H:%M}.{hint})\n{asked}"})
         try:                                            # what was said: the conditions of the queries come from it
@@ -2596,7 +2700,8 @@ class Agent:
         trace: list[dict] = []
         nudged = announced = numbers_asked = rules_asked = count_asked = looped = limit_asked = notes_asked = False
         named_asked = carry_asked = tie_asked = echoed = action_asked = future_asked = source_asked = False
-        keep_asked = False
+        keep_asked = repeat_asked = False
+        before_check: tuple[str, int] | None = None    # (0.10.6) the answer the no-tool check was sent on, the trace then
         about_notes = notes_request(getattr(self, "intent_text", None) or question)
         done: set[str] = set()                         # identical successful calls: not run twice
         saved_calls: set[str] = set()                   # identical saving calls: not run again either
@@ -2649,7 +2754,7 @@ class Agent:
                 looped = notes_asked = unclear_asked = nudged = announced = rules_asked = carry_asked = echoed = True
                 named_asked = tie_asked = numbers_asked = limit_asked = ledger_asked = stage_asked = future_asked = True
                 suspect_asked = records_asked = period_kept = map_asked = which_asked = buckets_asked = True
-                source_asked = keep_asked = True
+                source_asked = keep_asked = repeat_asked = True
                 grain_asked = definition_asked = count_asked = forced = action_asked = True
             if (i >= steps - 2 or cap - used <= 2) and steps >= 4 and trace and not last_said:
                 last_said = True                       # the answer before the calls run out (once: a plan-only turn
@@ -2701,6 +2806,11 @@ class Agent:
                     continue
                 if cut is not None:                    # again: cut there, and said
                     answer = answer[:cut].rstrip()
+                if before_check and len(trace) == before_check[1] and CHECK_TALK.search(answer or ""):
+                    log.info("supagent: the reply to the no-tool check speaks of the check: the answer before it kept")
+                    answer = before_check[0]           # (0.10.6) "No data query was needed: the definition was given":
+                    #                                    the answer the user never saw, kept as it was
+                before_check = None
                 claimed = None if notes_asked else note_claim(answer, trace)
                 if claimed:                            # once: "the note has been deleted" with no such call
                     notes_asked = True
@@ -2764,8 +2874,10 @@ class Agent:
                     log.info("supagent: answer sent back (the previous answer given again)")
                     messages.append({"role": "user", "content": ECHO_NUDGE.format(question=(question or "")[:300])})
                     continue
+                claims_run = bool(RESULT_CLAIM.search(answer or "")) and _setting_on("agent.claimed_query_check")
                 if nudge in (NO_TOOL_NUDGE, NO_QUERY_NUDGE) and self.follow_up and \
-                        not getattr(self, "new_fields", None) and \
+                        not getattr(self, "new_fields", None) and not getattr(self, "disputed", False) and \
+                        not claims_run and \
                         settings.get("agent.check_numbers") and previous and not self._ungrounded(answer, previous) \
                         and not self._invented(answer, previous + [{"role": "user", "content": question}]):
                     nudge = None                       # (never a "no such field" or a query written, not run, nor
@@ -2773,14 +2885,29 @@ class Agent:
                 if nudge:                              # once: an answer from the tools, not from the summary
                     nudged = True
                     if (nudge in (WRITTEN_SQL_NUDGE, SHOWN_SQL_NUDGE) or (nudge in (NO_TOOL_NUDGE, NO_QUERY_NUDGE) and
-                                                         (self.asks_new or getattr(self, "new_fields", None)))) \
+                                                         (self.asks_new or getattr(self, "new_fields", None) or
+                                                          getattr(self, "disputed", False) or claims_run))) \
                             and not forced and settings.get("agent.force_tool"):
                         forced = force_tool = True     # a query written, not run, or a follow-up that asks for
                         #                                another day, value or period: the next step runs one
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
                     log.info("supagent: answer sent back (no tool / no query): %r", answer[-200:])
+                    if nudge == NO_TOOL_NUDGE and not _has_data(answer):   # "if it needs no data, the same answer
+                        before_check = (answer, len(trace))   # again" (a figure or rows: never brought back)
                     messages.append({"role": "user", "content": nudge})
                     continue
+                if getattr(self, "disputed", False) and not repeat_asked and trace and self.prev_queries:
+                    mine = {_norm_query(_call_query(t.get("args") or {}))
+                            for t in trace if t.get("status") == "done" and t.get("tool") in QUERY_TOOLS}
+                    mine.discard("")
+                    if mine and mine <= {_norm_query(q) for q in self.prev_queries}:   # once: the same query again
+                        repeat_asked = True
+                        if not forced and settings.get("agent.force_tool"):
+                            forced = force_tool = True
+                        self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                        log.info("supagent: answer sent back (a disputed answer checked with the same query)")
+                        messages.append({"role": "user", "content": SAME_QUERY_NUDGE})
+                        continue
                 step = None if announced else announces_action(answer)
                 if step:                               # once: "Let me run the query." with no tool call
                     announced = True
@@ -2965,6 +3092,9 @@ class Agent:
                     if any(t.get("full") for t in trace):
                         answer = trim_tables(answer)   # every row is in the page's result view
                 note = unsupported_note(answer, trace, question) if nudged else ""
+                if not note and claimed_not_run(answer, trace):
+                    note = UNSUPPORTED_NOTE            # (0.10.4) it says a query ran and none did: marked, whatever
+                    #                                    path the answer took (a check skipped, a reminder ignored)
                 if nudged and not note and self.asks_new and _has_data(answer) and \
                         not {t.get("called") or t["tool"] for t in trace if t.get("status") == "done"} & set(QUERY_TOOLS):
                     note = UNSUPPORTED_NOTE            # "And on 22 September?" answered with the chat's numbers

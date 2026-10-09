@@ -338,6 +338,12 @@ SPECS: list[Spec] = [
          "notes for how the parts of the system interact (depends on, runs on, reads from, calls...) and proposes "
          "what they state for the System map, each with its sentence, word for word; nothing is drawn or used "
          "before an admin approves it (To review)"),
+    Spec("learn.describe_values", False, "bool", "(0.10.5, off: measured on a lab map, 2 descriptions of 154 gave "
+         "a part a role no line states, 1 said a link the other way round, 7 said nothing) The classification "
+         "writes what a part is for the parts with no description (one added by hand too), from what the "
+         "documents say of it, its links and where the data has it, and from that only; a part with none of these "
+         "gets nothing; shown as written by the AI until a person saves a description; a person's description is "
+         "never written over"),
     Spec("backup.enabled", True, "bool", "Every day, the whole knowledge is saved in one file (the categories and "
          "the System map, the catalog, the memory, the documents, the notes, the Context, the learned answers and "
          "paths, the descriptions of the data, the settings; no secret): the history to go back to. Restored whole "
@@ -357,9 +363,31 @@ SPECS: list[Spec] = [
     Spec("learn.agent_catalog_docs", True, "bool", "... and reads the definitions of the documents (the LLM, once "
          "per new or changed document)"),
     # ---- knowledge search (retrieval): words (PostgreSQL full-text) and vectors (embedding model)
+    Spec("agent.bare_doubt_check", False, "bool", "(0.10.4, off: measured with more silent "
+         "mistakes on a held set) A reply that only doubts the answer (\"are you "
+         "sure?\", \"check again\") gets its own note: check it again with a new query, change an assumption "
+         "only on evidence, keep an undefined word's reading and ask"),
+    Spec("agent.claimed_query_check", False, "bool", "(0.10.4, off: measured with more silent "
+         "mistakes on a held set) A follow-up answered without any query while its "
+         "text says a query was run (\"I ran a query\", \"the query executed\") is sent back with a query made "
+         "compulsory: the chat's own figures no longer let it through"),
+    Spec("agent.correction_check", False, "bool", "(0.10.3, off in 0.10.4: measured with more "
+         "silent mistakes on a held set) A reply that disputes or corrects the previous answer (\"that's "
+         "wrong\", \"check again\", \"I meant the sold ones\") gets the previous answer's queries and is checked "
+         "again on another path: the assumption it changes named, the knowledge searched again, a new query (an answer "
+         "with no query, or with the same query again, sent back once) (0.10.3)"),
+    Spec("agent.announce_ing", False, "bool", "(0.10.4, off until measured) An answer ending by announcing a step "
+         "written in -ing (\"let me try searching for ...\") is sent back like the other announcements"),
+    Spec("agent.link_limit_hint", False, "bool", "(0.10.4, off until measured) The system picture's head says to "
+         "check a link's limit on the peaks of its metrics over the period"),
+    Spec("tools.brief_crossings", False, "bool", "(0.10.4, off until measured) check_health also shows the "
+         "thresholds crossed too briefly to be a breach, on the servers or applications it is asked about"),
     Spec("search.enabled", True, "bool", "Give the agent the knowledge relevant to each question (dictionary, "
          "notes, rules, learned answers, memories, documents)"),
     Spec("search.top_k", 6, "int", "Pieces of knowledge given with each question"),
+    Spec("search.values", True, "bool", "A question that names a value of the data (a server, a service, a status: "
+         "3 characters at least, held by the labels or fields the learning read) gets first which metrics' labels "
+         "and indices' fields hold it, and the category values named so (0.10.2)"),
     Spec("search.terms_uncapped", True, "bool", "The terms of a glossary and the rules of an entry are each a piece of "
          "their own in a search's results (the cap of two pieces per page applies to pages and notes only)"),
     Spec("search.spelling", True, "bool", "Read a searched word that no piece of the knowledge holds (a letter missing, "

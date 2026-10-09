@@ -538,6 +538,11 @@ tr.backup-restore td { background: var(--bg); }
 .rgroup-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .rgroup-head h2 { margin: 0; font-size: 15px; }
 .rbulk { margin-left: auto; }
+/* (0.10.1) To review filtered by a word; approve or reject what is shown */
+.rbulks { margin-left: auto; display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.rbulks .rbulk { margin-left: 0; }
+.rfilter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0 10px; }
+.rfilter { width: min(34em, 100%); }
 .section-title.later { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--ink-2); }
 .rlist { display: grid; gap: 6px; }
 .rcard { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: flex-start; justify-content: space-between;
@@ -908,3 +913,6 @@ details.plan pre { white-space: pre-wrap; margin: 4px 0 0; }
 /* one kind of relation (0.9.6): every link light until hovered or chosen */
 .map-link .map-link-line { stroke-opacity: .5; }
 .map-link:hover .map-link-line, .map-link.on .map-link-line, .map-link:focus .map-link-line { stroke-opacity: 1; }
+/* (0.10.2) where a part is in the data, under its links */
+.part-data { margin-top: 8px; }
+.part-data-title { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 2px; }

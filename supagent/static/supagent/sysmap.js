@@ -1135,6 +1135,69 @@
       } }), res])]));
     name.focus();
   }
+  /* (0.10.6) A link drawn from the top of the map (the user's request: like "+ Category"): two parts found by typing,
+     its kind from a list (belongs to, runs on, connects to, relies on, reads from, sends data to, monitors, triggers, is
+     related to) or one's own words, its few words (they start as the kind's, to edit), what to do when following it,
+     one way or both. */
+  var LINK_KINDS = [["part_of", "belongs to"], ["runs_on", "runs on"], ["calls", "connects to"], ["depends_on", "relies on"],
+                    ["reads_from", "reads from"], ["sends_to", "sends data to"], ["monitors", "monitors"],
+                    ["triggers", "triggers"], ["about", "is related to"], ["", "other: in my own words"]];
+  function newLink() {
+    unselect();
+    var box = $("map-side");
+    box.innerHTML = "";
+    box.hidden = false;
+    box.appendChild(el("button", { type: "button", class: "close", "aria-label": "Close", text: "×", onclick: unselect }));
+    box.appendChild(el("div", { class: "muted", text: "Link" }));
+    box.appendChild(el("h3", { text: "A new link" }));
+    var res = el("span", { class: "result", role: "status" });
+    var from = valuePick("From: type a part's name"), to = valuePick("To: type a part's name");
+    /* the words people gave their own links before, most used first: options too, to edit */
+    var used = {};
+    (st.data.links || []).forEach(function (x) {
+      var w = String(x.note || "").trim();
+      if (w && /^link(:|$)/.test(x.kind || "") && w.length <= 60) used[w] = (used[w] || 0) + 1;
+    });
+    var before = Object.keys(used).sort(function (p, q) { return used[q] - used[p] || (p < q ? -1 : 1); }).slice(0, 20);
+    var kind = el("select", { "aria-label": "Kind of link" }, LINK_KINDS.map(function (k) { return el("option", { value: k[0], text: k[1] }); })
+      .concat(before.length ? [el("optgroup", { label: "Words used before" }, before.map(function (w, i) {
+        return el("option", { value: "words:" + i, text: w }); }))] : []));
+    var note = el("input", { type: "text", maxlength: "500", "aria-label": "What the link is, in a few words",
+                             placeholder: "What the link is, in a few words" });
+    note.value = LINK_KINDS[0][1];
+    var typed = false;
+    note.addEventListener("input", function () { typed = true; });
+    kind.addEventListener("change", function () {
+      if (kind.value.indexOf("words:") === 0) {                  // words used before: a link in those words
+        note.value = before[+kind.value.slice(6)] || "";
+        typed = false;
+        return;
+      }
+      var k = LINK_KINDS.filter(function (x) { return x[0] === kind.value; })[0];
+      if (!typed) note.value = kind.value ? k[1] : "";
+      if (!kind.value) note.focus();
+    });
+    var detail = el("textarea", { rows: "3", maxlength: "2000", "aria-label": "What the link does",
+                                  placeholder: "What it does (optional): what to check on the other part, what a problem there does here" });
+    var dir = el("select", { "aria-label": "Direction" }, [el("option", { value: "ab", text: "from \u2192 to" }),
+      el("option", { value: "both", text: "both ways \u2194" })]);
+    box.appendChild(el("div", { class: "map-edit" }, [from.el, kind, to.el, note, detail, dir, el("div", { class: "actions" }, [
+      el("button", { type: "button", class: "btn small primary", text: "Add the link", onclick: function () {
+        var a = from.ids()[0], b = to.ids()[0];
+        if (!a || !b) { res.textContent = "choose the two parts"; res.className = "result bad"; return; }
+        if (a === b) { res.textContent = "a link joins two different parts"; res.className = "result bad"; return; }
+        var own = !kind.value || kind.value.indexOf("words:") === 0;
+        if (own && !note.value.trim()) { res.textContent = "say what the link is, in your words"; res.className = "result bad"; return; }
+        var body = { a: +a, b: +b, note: note.value, detail: detail.value, both: dir.value === "both" };
+        if (!own) body.kind = kind.value;
+        S.dict("POST", "map", { interaction: body }).then(function (r) {
+          if (r.error) { res.textContent = r.error; res.className = "result bad"; return; }
+          if (D.saved) D.saved();
+          st.sel = +a;
+          load();
+        });
+      } }), el("button", { type: "button", class: "btn small", text: "Cancel", onclick: unselect }), res])]));
+  }
   /* (0.9.6.5) the line at the bottom of a box with parts inside it: a click opens them under it or closes them
      (kept in the browser) */
   function treeToggle(n, C) {
@@ -1181,6 +1244,10 @@
     if (st.data.is_admin) box.appendChild(el("button", { type: "button", class: "chip", id: "map-new-cat",
       title: "A category of your own, in a column of its own or inside another (a subcategory)",
       text: "+ Category", onclick: newCategory }));
+    if (st.data.can_edit || st.data.is_admin) box.appendChild(el("button", { type: "button", class: "chip", id: "map-new-link",
+      title: "A link between two parts: belongs to, runs on, connects to, relies on, reads from, sends data to, monitors, " +
+             "triggers, is related to, or your own words",
+      text: "+ Link", onclick: newLink }));
     if (st.edit && st.data.is_admin) box.appendChild(el("button", { type: "button", class: "chip", id: "map-groups",
       title: "Put categories in a group drawn around them (display only: nothing changes for the agent)",
       text: st.groups.length ? "Groups (" + st.groups.length + ")…" : "Group categories…", onclick: groupsPanel }));
@@ -1386,7 +1453,11 @@
     box.appendChild(el("div", { class: "muted", text: catLabel(v.facet, 1) }));
     box.appendChild(el("h3", { text: v.value }));
     if ((v.synonyms || []).length) box.appendChild(el("div", { class: "muted", text: "also called " + v.synonyms.join(", ") }));
-    if (v.description) box.appendChild(el("p", { text: v.description }));
+    if (v.description) {
+      box.appendChild(el("p", { text: v.description }));
+      if (v.description_by === "llm") box.appendChild(el("div", { class: "muted small-note",
+        text: "Written by the AI from the documents, its links and the data; edit it to make it yours." }));
+    }
     else if (v.hint) box.appendChild(el("p", {}, [el("em", { text: "“" + v.hint.text + "”" }),
       el("span", { class: "muted", text: " (from " + v.hint.from + ")" })]));
     else box.appendChild(el("p", { class: "muted", text: "No description yet." }));

@@ -83,3 +83,51 @@ def test_the_search_writes_the_map_again_first():
     from supagent.knowledge import search as S
 
     assert "refresh_map()" in inspect.getsource(S.search)
+
+
+def test_a_change_made_in_another_process_is_searched_too(app):
+    """(0.10.1) The chat's answers run in the Celery workers: an approval made in the web server must reach their
+    next search, through the stamp in supagent_meta, not only the process that made it."""
+    from superset.extensions import db
+
+    from supagent.knowledge import index as I
+    from supagent.models import Chunk, Facet, Link, Meta
+
+    with app.app_context():
+        a = Facet(facet="application", value="Harborledger", status="approved", source="admin")
+        b = Facet(facet="component", value="Tidecache", status="approved", source="admin")
+        db.session.add_all([a, b])
+        db.session.flush()
+        x = Link(a_ref=f"facet:{a.id}", b_ref=f"facet:{b.id}", kind="reads_from", status="approved",
+                 note="reads the tide tables")
+        db.session.add(x)
+        db.session.commit()
+        try:
+            I.refresh_map()
+            stamp = db.session.get(Meta, I.MAP_KEY)
+            assert stamp is not None and stamp.value                   # written after the commit
+            before = stamp.value
+
+            x.note = "reads the harbour's tide tables every hour"      # changed in "the web server"...
+            db.session.commit()
+            db.session.expire_all()
+            assert db.session.get(Meta, I.MAP_KEY).value != before
+            I._MAP_CHANGED[0] = False                                  # ... this process (a "worker") did not see it
+            I._MAP_SEEN["at"] = 0.0                                    # (its stamp read again now)
+            assert I.refresh_map() is not None                         # the stamp says: written again
+            row = db.session.query(Chunk).filter(Chunk.ref == f"map:{a.id}").first()
+            assert row is not None and "every hour" in row.text
+            assert I.refresh_map() is None                             # nothing new: nothing written
+
+            now = db.session.get(Meta, I.MAP_KEY).value
+            x.note = "never committed"
+            db.session.flush()
+            db.session.rollback()                                      # a change rolled back: no stamp
+            db.session.expire_all()
+            assert db.session.get(Meta, I.MAP_KEY).value == now
+        finally:
+            db.session.rollback()
+            db.session.query(Link).filter(Link.id == x.id).delete(synchronize_session=False)
+            db.session.query(Facet).filter(Facet.id.in_([a.id, b.id])).delete(synchronize_session=False)
+            db.session.commit()
+            I.refresh_map()

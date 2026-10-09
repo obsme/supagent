@@ -93,17 +93,20 @@ def _graph() -> dict[str, Any]:
                 in_links.setdefault(y, []).append((kind, x, (note or "").strip()))
                 if (detail or "").strip():
                     long[(x, kind, y)] = " ".join(detail.split())
+    loose, slips = loose_index(names)
     g = {"values": values, "names": names, "children": children, "out": out_links, "in": in_links, "rank": cats,
-         "long": long}
+         "long": long, "loose": loose, "slips": slips}
     with _LOCK:
         _CACHE.update(stamp=s, graph=g)
     return g
 
 
-def named(text: str, g: dict[str, Any] | None = None) -> list[int]:
+def named(text: str, g: dict[str, Any] | None = None, loose: bool = False) -> list[int]:
     """The values a text names, in its order: a value's name or one of its other names written as words of
     their own (the longest name wins: "risk engine" before "risk"); a name that is a common word counts only
-    written as the value is (NOVA, not "nova")."""
+    written as the value is (NOVA, not "nova"). (0.10.4) `loose` (a question): also written with other separators
+    ("node exporter", node_exporter, nodeexporter for node-exporter) or misspelled by a letter missing, one too many
+    or two swapped (6 letters or more, one value only, never a plural)."""
     from supagent.knowledge.describe import STOP
 
     g = g or _graph()
@@ -117,6 +120,8 @@ def named(text: str, g: dict[str, Any] | None = None) -> list[int]:
             words = [a for a, _at in atoms[i:i + n]]
             key = " ".join(w.lower() for w in words)
             ids = g["names"].get(key)
+            if not ids and loose:
+                ids = _loosely(key, n, g)
             if not ids:
                 continue
             if n == 1 and (len(key) < 3 or key in STOP) and not any(g["values"][x]["name"] == words[0] for x in ids):
@@ -126,6 +131,48 @@ def named(text: str, g: dict[str, Any] | None = None) -> list[int]:
             break
         i += hit or 1
     return found
+
+
+LOOSE = re.compile(r"[\s_.\-/]+")
+
+
+def loose_index(names: dict[str, list[int]]) -> tuple[dict[str, list[int]], dict[str, set[int]]]:
+    """(0.10.4) The values by their names without separators ("node exporter", node_exporter, nodeexporter are
+    node-exporter), and by those names with a letter missing or two swapped (6 letters or more)."""
+    loose: dict[str, list[int]] = {}
+    for n, ids in names.items():
+        k = LOOSE.sub("", n)
+        if len(k) >= 4:
+            for i in ids:
+                if i not in loose.setdefault(k, []):
+                    loose[k].append(i)
+    slips: dict[str, set[int]] = {}
+    for k, ids in loose.items():
+        if len(k) >= 6:
+            for v in {k[:i] + k[i + 1:] for i in range(len(k))} | \
+                    {k[:i] + k[i + 1] + k[i] + k[i + 2:] for i in range(len(k) - 1) if k[i] != k[i + 1]}:
+                slips.setdefault(v, set()).update(ids)
+    return loose, slips
+
+
+def _loosely(key: str, n: int, g: dict[str, Any]) -> list[int]:
+    """(0.10.4) The values a question's words name written another way: the same letters without separators, else
+    (one word of 6 letters or more) a letter missing, one too many or two swapped, when one value only is so named."""
+    from supagent.knowledge.describe import STOP
+
+    k = LOOSE.sub("", key)
+    if len(k) < 4 or (n == 1 and key in STOP):
+        return []
+    ids = (g.get("loose") or {}).get(k) or []
+    if ids or n > 1 or len(k) < 6 or not k.isalpha():
+        return list(ids)
+    cands = set((g.get("slips") or {}).get(k) or set())          # a letter missing in the word, two swapped
+    for j in range(len(k)):                                       # a letter too many in the word (a name of 6
+        if len(k) - 1 >= 6:                                       # letters or more: "cached" is no "cache")
+            cands.update((g.get("loose") or {}).get(k[:j] + k[j + 1:]) or [])
+    plurals = {x for x in cands if any(LOOSE.sub("", nm) + s == k for nm in [g["values"][x]["name"]] for s in ("s", "es"))}
+    cands -= plurals
+    return sorted(cands) if len(cands) == 1 else []
 
 
 def says_something(i: int, g: dict[str, Any]) -> bool:
@@ -260,7 +307,7 @@ def build(question: str, full: bool = True) -> dict[str, Any] | None:
     if not g["values"]:
         return None
     V, kids = g["values"], g["children"]
-    seeds = [s for s in named(question, g) if says_something(s, g)][:SEEDS]
+    seeds = [s for s in named(question, g, loose=True) if says_something(s, g)][:SEEDS]
     if not seeds:
         return None
     rank = {c: i for i, c in enumerate(g["rank"])}
@@ -435,9 +482,14 @@ def brief_block(question: str, full: bool = True) -> str:
         return ""
     if not b or not b["lines"]:
         return ""
+    from supagent import settings
+
+    limit = ("; when a link's explanation says what to check on a part with a limit, read those metrics over the period "
+             "and compare their highest or lowest value with that limit, with its time: the team's health checks may "
+             "need a breach to last") if settings.get("agent.link_limit_hint") else ""   # (0.10.4, off until measured)
     head = ("\n\nThe system around this question (from the team's categories, the interactions of the system map and "
-            "the catalog: names are exact; start from it, and follow it when a finding points to another part):"
-            if full else "\n\nWhat the question names (from the team's categories: names are exact):")
+            "the catalog: names are exact; start from it, and follow it when a finding points to another part"
+            + limit + "):" if full else "\n\nWhat the question names (from the team's categories: names are exact):")
     budget = BRIEF_CHARS if full else SCOPE_CHARS
     kept, used = [], 0
     for line in b["lines"]:
@@ -453,7 +505,7 @@ def named_line(question: str) -> str:
     those categories are ("" when it names no part). Short: the router's call is before every answer."""
     try:
         g = _graph()
-        ids = [i for i in named(question, g) if says_something(i, g)][:SEEDS]
+        ids = [i for i in named(question, g, loose=True) if says_something(i, g)][:SEEDS]
         if not ids:
             return ""
         from supagent.knowledge.facets import about
@@ -525,16 +577,185 @@ def members(names: list[str]) -> dict[str, list[str]]:
     return out
 
 
-def links_of(names: list[str]) -> dict[str, Any]:
+CHAINED = ("depends_on", "reads_from", "calls", "sends_to", "triggers", "routes_to", "link")   # a flow, a route
+CHAIN_MAX = 40                  # chains given, each way
+
+
+def chains(ids: list[int], g: dict[str, Any], depth: int) -> dict[str, list[str]]:
+    """(0.10.6) The paths of the map from these parts, `depth` links at most (the user: "follow many paths while
+    investigating"): "leads_to", what each part depends on, calls, reads, sends to, routes to, and so on further,
+    each a chain "a calls b > b reads from c" with where its last part runs; "led_from", what leads to them, the same
+    way back (what a failure of theirs reaches): what runs on them (a server's parts), the whole they are part of (a
+    server's group: what runs on the group; an application's service: the application), free of the depth, and what
+    depends on those. A part already in a chain ends it (no circle)."""
+    V = g["values"]
+
+    def where(i: int) -> str:
+        on = [V[b]["name"] for k, b, _n in g["out"].get(i, []) if k == "runs_on"][:3]
+        return f" (runs on {', '.join(on)})" if on else ""
+
+    def verb(k: str) -> str:
+        return ONE.get(k, "is linked to" if str(k).startswith("link") else str(k).replace("_", " "))
+
+    def nexts(i: int, back: bool, seen: list[int]) -> list[tuple[int, str, bool]]:
+        """(the next part, the step's words, whether the step counts in the depth)"""
+        if not back:
+            return [(b, f'{V[i]["name"]} {verb(k)} {V[b]["name"]}', True) for k, b, _n in g["out"].get(i, [])
+                    if (k in CHAINED or str(k).startswith("link")) and b not in seen]
+        out = [(a, f'{V[a]["name"]} {verb(k)} {V[i]["name"]}', True) for k, a, _n in g["in"].get(i, [])
+               if (k in CHAINED or k == "runs_on" or str(k).startswith("link")) and a not in seen]
+        out += [(w, f'{V[i]["name"]} is part of {V[w]["name"]}', False) for w in V[i].get("parents", [])
+                if w in V and w not in seen]
+        return out
+
+    def ended(steps: list[str], last: int) -> str:
+        return " > ".join(steps) + ("" if " runs on " in steps[-1] else where(last))
+
+    out: dict[str, list[str]] = {"leads_to": [], "led_from": []}
+    for key, back in (("leads_to", False), ("led_from", True)):
+        got = out[key]
+        stack = [(i, [i], [], 0) for i in ids]
+        while stack and len(got) < CHAIN_MAX:
+            i, seen, steps, hops = stack.pop(0)
+            nxt = nexts(i, back, seen)
+            if not nxt:
+                if steps:
+                    got.append(ended(steps, i))
+                continue
+            for b, step, counts in nxt:
+                n = hops + (1 if counts else 0)
+                if n >= depth and counts:
+                    got.append(ended(steps + [step], b))
+                else:
+                    stack.append((b, seen + [b], steps + [step], n))
+                if len(got) >= CHAIN_MAX:
+                    break
+    return {k: v for k, v in out.items() if v}
+
+
+IMPACT_MAX = 30                 # parts listed as reached, per server or group
+
+
+def impact(places: list[int], g: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """(0.10.6) What the failure of a server or a group reaches, in the words an answer takes ("if db-01 is down,
+    which applications stop working?" was answered with what runs on db-01: the applications depending on those
+    were in the chains of "led_from", not read): what runs on it (with where else it runs: it may go on there), on
+    its servers (a group), on the group it is part of (it may go on on the group's other servers), then what
+    depends on, calls, reads from or sends to those, and what does so to these, each with the step that reaches it."""
+    from supagent.knowledge.datalinks import SERVERISH
+
+    V = g["values"]
+
+    def label(i: int) -> str:
+        return f'{V[i]["name"]} ({V[i]["cat"]})'
+
+    def on(i: int) -> list[int]:
+        return [a for k, a, _n in g["in"].get(i, []) if k == "runs_on"]
+
+    def placed(a: int, here: int) -> str:            # a part that runs elsewhere too may go on there: not on
+        mine = {here, *V[here].get("parents", []), *g["children"].get(here, [])}   # what fails with it (its own
+        other = [V[b]["name"] for k, b, _n in g["out"].get(a, []) if k == "runs_on" and b not in mine][:3]  # group,
+        return f'{V[a]["name"]} ({V[a]["cat"]}; also runs on {", ".join(other)})' if other else label(a)  # members)
+
+    res: dict[str, dict[str, Any]] = {}
+    for p in places[:3]:
+        seen = {p}
+        mine = [a for a in on(p) if a not in seen]
+        seen.update(mine)
+        groups: dict[str, list[int]] = {}
+        for w in V[p].get("parents", []):
+            if w in V and w not in seen and SERVERISH.search(V[w]["cat"] or ""):
+                theirs = [a for a in on(w) if a not in seen]
+                seen.update(theirs)
+                if theirs:
+                    groups[V[w]["name"]] = theirs
+        members: dict[str, list[int]] = {}           # a group: what runs on each of its servers
+        for c in g["children"].get(p, [])[:20]:
+            if c in V and SERVERISH.search(V[c]["cat"] or ""):
+                theirs = [a for a in on(c) if a not in mine and a != p]
+                if theirs:
+                    members[V[c]["name"]] = theirs
+        seen.update(a for ids in members.values() for a in ids)
+        item: dict[str, Any] = {}
+        if mine:
+            item["runs_on_it"] = [placed(a, p) for a in mine[:IMPACT_MAX]]
+        if members:
+            item["runs_on_its_servers"] = {c: [label(a) for a in ids[:IMPACT_MAX]] for c, ids in members.items()}
+        if groups:
+            item["runs_on_its_group (may go on on the group's other servers)"] = {
+                w: [label(a) for a in ids[:IMPACT_MAX]] for w, ids in groups.items()}
+        frontier = list(dict.fromkeys(mine + [a for ids in members.values() for a in ids]
+                                      + [a for ids in groups.values() for a in ids]))
+        for key in ("then_through_them", "and_further"):
+            reached, nxt = [], []
+            for b in frontier:
+                for k, a, _n in g["in"].get(b, []):
+                    if (k in CHAINED or str(k).startswith("link")) and a not in seen and len(reached) < IMPACT_MAX:
+                        seen.add(a)
+                        nxt.append(a)
+                        verb = ONE.get(k, "is linked to" if str(k).startswith("link") else str(k).replace("_", " "))
+                        reached.append(f'{label(a)} {verb} {V[b]["name"]}')
+            if reached:
+                item[key] = reached
+            frontier = nxt
+        if item:
+            res[V[p]["name"]] = item
+    return res
+
+
+CATEGORY_VALUES = 80             # the values a category's listing gives
+
+
+def category_named(raw: str, g: dict[str, Any]) -> str | None:
+    """(0.10.6) The category a name is ("application", "applications", "the servers"), or None."""
+    w = " ".join(re.sub(r"^(the|all|every|our|which)\s+", "", str(raw).strip().lower()).split())
+    have = {c.lower() for c in g.get("rank") or []}
+    for c in (w, w[:-1] if w.endswith("s") else w, w[:-2] if w.endswith("es") else w):
+        if c in have:
+            return c
+    return None
+
+
+def category_values(cat: str, g: dict[str, Any]) -> dict[str, Any]:
+    """(0.10.6) A category of the System map as the agent goes on from it: what it is, its values (the ones of
+    another value of it named "a > b"), and how many."""
+    from supagent.knowledge.facets import about, inside
+
+    V = g["values"]
+    mine = sorted((v for v in V.values() if v["cat"] == cat), key=lambda v: v["name"].lower())
+    ids = {v["id"] for v in mine}
+
+    def label(v: dict[str, Any]) -> str:
+        ups = [V[p]["name"] for p in v["parents"] if p in ids][:1]
+        return f"{ups[0]} > {v['name']}" if ups else v["name"]
+
+    out: dict[str, Any] = {"values": [label(v) for v in mine][:CATEGORY_VALUES], "count": len(mine)}
+    said = about(True).get(cat)
+    if said:
+        out["what"] = said
+    if inside().get(cat):
+        out["inside"] = inside()[cat]
+    if len(mine) > CATEGORY_VALUES:
+        out["note"] = f"the first {CATEGORY_VALUES} of {len(mine)}: search_knowledge finds the others by their words"
+    return out
+
+
+def links_of(names: list[str], depth: int = 1) -> dict[str, Any]:
     """What the system map says of these parts (the tool system_links): each one's category, what it is, what it
-    is part of and consists of, its interactions both ways, where its category is in the data."""
+    is part of and consists of, its interactions both ways, where its category is in the data; (0.10.6) with
+    `depth` 2 or 3, the chains of links from them and to them (chains())."""
     g = _graph()
     V, kids = g["values"], g["children"]
     out: list[dict[str, Any]] = []
     unknown: list[str] = []
     cats: dict[str, list[str]] = {}
+    listed: dict[str, Any] = {}
     for raw in names[:8]:
         ids = named(str(raw), g) or g["names"].get(" ".join(str(raw).lower().split()), [])
+        cat = None if ids else category_named(str(raw), g)
+        if cat:                                       # (0.10.6) a category's name: its values, to go on from
+            listed[cat] = category_values(cat, g)
+            continue
         if not ids:
             unknown.append(str(raw))
             continue
@@ -567,6 +788,23 @@ def links_of(names: list[str]) -> dict[str, Any]:
                 item["what_to_do_when_following"] = follow
             out.append(item)
     res: dict[str, Any] = {"parts": out}
+    if listed:
+        res["categories_listed"] = listed
+    ids = [i for raw in names[:8] for i in (named(str(raw), g) or g["names"].get(" ".join(str(raw).lower().split()), []))[:2]]
+    from supagent.knowledge.datalinks import SERVERISH   # (0.10.6) a server or a group named: what its failure
+
+    places = [i for i in ids if SERVERISH.search(V[i]["cat"] or "")]   # reaches comes with it ("if db-01 is down,
+    if depth and int(depth) > 1 and out:                                # which applications stop?": what runs on it
+        paths = chains(ids, g, min(int(depth), 4))                      # was not the answer)
+        if paths:
+            res["paths"] = paths
+    elif places:
+        led = chains(places, g, 2).get("led_from")
+        if led:
+            res["paths"] = {"led_from": led}
+    reach = impact(places, g) if places else {}
+    if reach:
+        res["if_it_fails"] = reach
     if unknown:
         res["not_in_the_map"] = unknown
     try:

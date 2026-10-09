@@ -55,3 +55,27 @@ def test_the_pages_are_written_and_searched(world, monkeypatch):  # noqa: F811
             db.session.query(Chunk).filter(Chunk.ref.like(f"context:{p.id}%")).delete(synchronize_session=False)
             db.session.delete(p)
         db.session.commit()
+
+
+def test_a_page_per_wiki_space_whatever_document_read_its_pages(app):
+    """(0.10.1) A wiki given as one document per space reads each page once, by the first document that reaches it:
+    the Context has a page per space (titled after the document that starts in it), not one per document."""
+    from types import SimpleNamespace as N
+
+    from supagent.knowledge.context_docs import _space_pages
+
+    arch = N(id=1, title="Architecture", url="u1", pages=[
+        {"id": "1", "title": "Architecture", "space": "ARCH", "links": ["2"]},
+        {"id": "2", "title": "Operations", "space": "OPS", "links": ["3"]},
+        {"id": "3", "title": "Runbook: restart", "space": "OPS", "diagram_edges": [["a", "b"]]}])
+    ops = N(id=2, title="Operations", url="u2", pages=[{"id": "2", "title": "Operations", "space": "OPS"}])
+    units = [N(id=10 + i, doc_id=d.id, ukey=p["id"], kind="page") for d in (arch, ops) for i, p in enumerate(d.pages)]
+    with app.app_context():
+        got = {p["title"]: p for p in _space_pages({1: arch, 2: ops}, units, {"restart": {12}}, {"restart": "restart"})}
+    assert sorted(got) == ["Wiki: Architecture", "Wiki: Operations"]
+    o = got["Wiki: Operations"]["content"]
+    assert "A wiki space (OPS): 2 pages read." in o and o.count("- Operations") == 1        # its home once
+    assert "- Operations (links to: Runbook: restart)" in o and "(1 arrows in its diagrams)" in o
+    assert "## The parts its pages describe" in o and "restart" in o
+    assert [x["ref"] for x in got["Wiki: Operations"]["sources"]] == ["doc:1", "doc:2"]
+    assert "A wiki space (ARCH): 1 page read." in got["Wiki: Architecture"]["content"]

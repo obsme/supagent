@@ -7,6 +7,10 @@
   var S = window.supagent, el = S.el, D = S.dictionary;
   var $ = function (id) { return document.getElementById(id); };
   var admin = S.canEdit, canDelete = S.canDelete;   // an editor writes; deleting is an admin's (0.9.6)
+  // (0.10.6) the kinds of a link of the System map, as people say them (To review's corrections, the Categories page)
+  var LINK_KINDS = [["part_of", "belongs to"], ["runs_on", "runs on"], ["calls", "calls, connects to"],
+                    ["depends_on", "relies on, depends on"], ["reads_from", "reads from"], ["sends_to", "sends data to"],
+                    ["monitors", "monitors"], ["triggers", "triggers, starts"], ["about", "is related to"]];
   if (!D) return;
 
   function result(node, r, good) {
@@ -260,14 +264,30 @@
     ["tags", "Categories given to items", "The LLM was not sure enough to give these alone."],
     ["links", "Relations and interactions", "What the LLM found related (explains, about, depends on), and the interactions between parts of the system that your documents state (each with its sentence): approved, they are drawn on the System map and followed by the agent's investigations."],
     ["routes", "Kinds of work learned from the chats", "Already used as examples by the router; set the right kind, or remove a wrong one."],
+    ["fields", "Where the categories are in the data", "Labels and fields that hold several values of a category and are not read for it yet (0.10.2). Read it: the agent knows where the category is in the data, and the next learning proposes the label's other values as values of the category (here, to approve). Set aside: not proposed again."],
+    ["warnings", "What could confuse the agent or the search", "Found in the knowledge each time this page is read (0.10.2): one name for two things (or a proposal naming a value of another category), one thing written two ways, the System map in a circle, documents holding the same pages, a term defined twice. Each says why and what to do; Set aside: not said again."],
     ["context", "Context pages written by the agent", "The nightly Context build proposes each change of a page (and the removal of a page whose subject is gone): the page shown stays as it is until you approve. A newer change of the same page replaces the one you did not review yet; what that one said and this one no longer does is listed, so nothing is lost silently. A new page is shown at once and listed here until someone has read it."]
   ];
   var TITLES = {};
   GROUPS.forEach(function (g) { TITLES[g[0]] = g[1]; });
 
+  function reviewFilter() {
+    var input = el("input", { type: "search", class: "rfilter", value: reviewQ, "aria-label": "Filter what waits",
+                              placeholder: "Filter: a part, a repository, a document, a word (Enter)" });
+    var go = function () { var v = input.value.trim(); if (v !== reviewQ) { reviewQ = v; reviewLoad(); } };
+    input.addEventListener("keydown", function (e) { if (e.key === "Enter") go(); });
+    input.addEventListener("search", go);           // (the field's clear button)
+    return el("div", { class: "rfilter-row" }, [input, reviewQ ? el("span", { class: "muted", text: " only what names or was read in “" + reviewQ + "”; Approve or Reject all shown applies to these" }) : null]);
+  }
+
   function summaryLine(waiting) {
     var box = $("review-summary");
     box.innerHTML = "";
+    if (waiting || counts.routes || reviewQ) box.appendChild(reviewFilter());
+    if (!waiting && !counts.routes && reviewQ) {
+      box.appendChild(el("p", { class: "lead", text: "Nothing that waits names or was read in “" + reviewQ + "”." }));
+      return;
+    }
     if (!waiting && !counts.routes) {
       box.appendChild(el("p", { class: "lead", text: "Nothing waits for you. What the chats and the daily learning propose shows here, each with its actions." }));
       return;
@@ -334,11 +354,12 @@
     return box;
   }
 
-  function bulk(label, key, items, fn) {        // "Approve all shown": a second click confirms
+  function bulk(label, key, items, fn, reject) {   // "Approve all shown" (or reject): a second click confirms
     var box = el("span", { class: "rbulk" });
     var go = el("button", { type: "button", class: "btn small", text: label, onclick: function () {
-      S.confirm(go, label + ": the " + items.length + " shown?", { yes: "Approve " + items.length, no: "Cancel",
-        detail: "Each one is used by the agent at once; you can still change or retire them in Categories." }).then(function (ok) {
+      S.confirm(go, label + ": the " + items.length + " shown?", { yes: (reject ? "Reject " : "Approve ") + items.length, no: "Cancel",
+        detail: reject ? "Each one is set aside and never proposed again; you can still add it by hand." :
+          "Each one is used by the agent at once; you can still change or retire them in Categories." }).then(function (ok) {
         if (ok) all();
       });
     } });
@@ -351,7 +372,7 @@
         if (!c || c.classList.contains("done")) return;           // already decided one by one
         chain = chain.then(function () { return fn(it); }).then(function (r) {
           if (r && r.error) return;
-          c.classList.add("done", "leaving"); c._acts.innerHTML = ""; c._acts.appendChild(el("span", { class: "rdone", text: "approved" }));
+          c.classList.add("done", "leaving"); c._acts.innerHTML = ""; c._acts.appendChild(el("span", { class: "rdone", text: reject ? "rejected" : "approved" }));
           n++;
         });
       });
@@ -361,11 +382,12 @@
     return box;
   }
 
+  var reviewQ = "";                             // (0.10.1) the filter: a part, a repository, a document, a word
   function reviewLoad() {
     var box = $("review");
     box.innerHTML = "";
     box.appendChild(el("p", { class: "muted", text: "Loading…" }));
-    return S.admin("GET", "review?limit=50").then(function (d) {
+    return S.admin("GET", "review?limit=50" + (reviewQ ? "&q=" + encodeURIComponent(reviewQ) : "")).then(function (d) {
       box.innerHTML = "";
       if (d.error) { box.appendChild(el("p", { class: "result bad", text: d.error })); return; }
       counts = Object.assign({}, d.counts || {});
@@ -539,7 +561,9 @@
           }));
           var from = v.source === "data" ? "found in the data" + ((v.origins || []).length ? ": " + v.origins[0] : "") : "proposed by the LLM";
           return card([name, desc, parts, same], S.num(v.items) + " item" + (v.items === 1 ? "" : "s") + " · " + from, acts);
-        }, { bulk: foundBulk(d.found || {}) }),
+        }, { bulk: el("span", { class: "rbulks" }, [foundBulk(d.found || {}),
+          (d.values || []).length > 1 ? bulk("Approve all shown", "values", d.values, function (v) { return S.admin("POST", "facets/" + v.id, { status: "approved" }); }) : null,
+          (d.values || []).length > 1 ? bulk("Reject all shown", "values", d.values, function (v) { return S.admin("POST", "facets/" + v.id, { status: "rejected" }); }, true) : null]) }),
         group("removals", d.removals || [], function (x) {
           return card([el("div", { class: "rtext" }, [document.createTextNode(x.a_title + (x.both ? " \u2194 " : " \u2192 ") + x.b_title + ": "),
                          el("span", { class: "link-kind", text: x.label || String(x.kind || "").replace(/_/g, " ") })]),
@@ -592,24 +616,84 @@
           // an interaction between two parts of the system, read in a text: its short and long explanations (an
           // admin corrects them here before approving), and the sentence that says it
           var shortIn = el("input", { type: "text", maxlength: "500", value: x.note || "", "aria-label": "Short explanation",
-                                      placeholder: "In a few words: what it waits for, reads, sends, uses" });
+                                      placeholder: x.kind === "runs_on" ? "In a few words: what it is or does on that place" :
+                                        x.kind === "monitors" ? "In a few words: what it watches" :
+                                        "In a few words: what it waits for, reads, sends, uses" });
           var longIn = el("textarea", { rows: "2", maxlength: "2000", "aria-label": "Long explanation",
                                         placeholder: "What an investigation checks on the other part, and what a problem there does here" });
           longIn.value = x.detail || "";
+          // (0.10.6) corrected before approving: its kind (from the list) and its direction
+          var kindSel = x.parts ? el("select", { "aria-label": "Kind of link" }, LINK_KINDS.map(function (k) {
+            return el("option", { value: k[0], text: k[1], selected: k[0] === x.kind ? "selected" : null }); })) : null;
+          if (kindSel && LINK_KINDS.every(function (k) { return k[0] !== x.kind; })) {
+            kindSel.insertBefore(el("option", { value: x.kind, text: x.label || String(x.kind || "").replace(/_/g, " "), selected: "selected" }), kindSel.firstChild);
+          }
+          var turn = x.parts ? el("input", { type: "checkbox", "aria-label": "Turn the link round" }) : null;
+          var editBox = x.parts ? el("div", { class: "link-edit", hidden: "hidden" }, [
+            el("label", {}, [el("span", { class: "muted", text: "Kind: " }), kindSel]),
+            el("label", {}, [turn, el("span", { text: " turn it round (" + x.b_title + " \u2192 " + x.a_title + ")" })])]) : null;
+          function edits() {
+            var body = {};
+            if (kindSel && kindSel.value !== x.kind) body.kind = kindSel.value;
+            if (turn && turn.checked) body.reverse = true;
+            if (x.parts && (shortIn.value !== (x.note || "") || longIn.value !== (x.detail || ""))) { body.note = shortIn.value; body.detail = longIn.value; }
+            return body;
+          }
           return card([el("div", { class: "rtext" }, [document.createTextNode(x.a_title + (x.both ? " \u2194 " : " \u2192 ") + x.b_title + ": "),
                                                     el("span", { class: "link-kind", text: x.parts ? x.label : String(x.kind || "").replace(/_/g, " ") })]),
+                       editBox,
                        x.parts ? el("label", { class: "link-explain" }, [el("span", { class: "muted", text: "Short: " }), shortIn]) :
                          (x.note ? el("div", { class: "muted", text: "“" + x.note + "”" }) : null),
                        x.parts ? el("details", { class: "link-explain" }, [el("summary", { text: "In full: what to do when following it" }), longIn]) : null,
                        x.evidence ? el("div", { class: "muted small-note", text: "Said in: " + x.evidence }) : null],
             (x.parts ? "a link of the System map" : x.a + " → " + x.b) + (x.confidence !== null && x.confidence !== undefined ? " · confidence " + Math.round(x.confidence * 100) + "%" : ""), [
               act("Approve", "primary", "links", function () {
-                var body = { status: "approved" };
-                if (x.parts && (shortIn.value !== (x.note || "") || longIn.value !== (x.detail || ""))) { body.note = shortIn.value; body.detail = longIn.value; }
-                return S.admin("POST", "links/" + x.id, body).then(function (r) { return r.error ? r : { done: "approved" }; }); }),
+                var body = edits();
+                body.status = "approved";
+                return S.admin("POST", "links/" + x.id, body).then(function (r) { return r.error ? r : { done: "approved" + (body.kind || body.reverse ? " as corrected" : "") }; }); }),
+              x.parts ? el("button", { type: "button", class: "btn small", text: "Edit", onclick: function () { editBox.hidden = !editBox.hidden; } }) : null,
+              x.parts ? act("Save", "", "links", function () {
+                var body = edits();
+                if (!Object.keys(body).length) return Promise.resolve({ error: "nothing changed" });
+                return S.admin("POST", "links/" + x.id, body).then(function (r) { return r.error ? r : { done: "saved (still to approve)", reload: true }; }); }) : null,
               act("Reject", "", "links", function () { return S.admin("POST", "links/" + x.id, { status: "rejected" }).then(function (r) { return r.error ? r : { done: "rejected" }; }); })
             ]);
-        }, { bulk: (d.links || []).length > 1 ? bulk("Approve all shown", "links", d.links, function (x) { return S.admin("POST", "links/" + x.id, { status: "approved" }); }) : null }),
+        }, { bulk: (d.links || []).length > 1 ? el("span", { class: "rbulks" }, [
+          bulk("Approve all shown", "links", d.links, function (x) { return S.admin("POST", "links/" + x.id, { status: "approved" }); }),
+          bulk("Reject all shown", "links", d.links, function (x) { return S.admin("POST", "links/" + x.id, { status: "rejected" }); }, true)]) : null }),
+        group("fields", d.fields || [], function (x) {
+          return card([el("div", { class: "rtext" }, [el("span", { class: "facet-chip", text: x.subject })]),
+                       el("div", { class: "muted", text: "Why: " + x.why }),
+                       el("div", { class: "rtext small-note", text: "What it does: " + x.fix })],
+            x.held + " of " + x.of + " values of " + x.category + (x.others ? " · " + x.others + " other values" : ""),
+            (S.isAdmin ? [act("Read " + x.category + " from " + x.name, "primary", "fields", function () {
+              return S.admin("POST", "fields/decide", { category: x.category, name: x.name, read: true }).then(function (r) {
+                return r.error ? r : { done: "read from " + x.name + " (the next learning proposes its values)" }; }); })] : []).concat([
+              act("Set aside", "", "fields", function () {
+                return S.admin("POST", "fields/decide", { category: x.category, name: x.name, read: false }).then(function (r) {
+                  return r.error ? r : { done: "set aside: not proposed again" }; }); })]));
+        }),
+        group("warnings", d.warnings || [], function (w) {
+          return card([el("div", { class: "rtext" }, [el("span", { class: "facet-chip", text: w.subject })]),
+                       el("div", { class: "muted", text: "Why: " + w.why }),
+                       el("div", { class: "rtext small-note", text: "What to do: " + w.fix })],
+            String(w.kind || "").replace(/_/g, " ") + ((w.refs || []).length ? " · " + w.refs.join(", ") : ""),
+            (canDelete ? (w.merge || []).map(function (m) {      // one thing written two ways: the fix in one click
+              return act(m.label, "primary", "warnings", function () {
+                return S.admin("POST", "facets/" + m.from, { merge_into: m.into }).then(function (r) { return r.error ? r : { done: "merged", reload: true }; }); });
+            }) : []).concat((w.keep || []).map(function (k) {   // (0.10.6) a loop: one direction kept, the other rejected
+              return act(k.label, "primary", "warnings", function () {
+                return S.admin("POST", "links/" + k.reject, { status: "rejected" }).then(function (r) { return r.error ? r : { done: "done: the other one rejected", reload: true }; }); });
+            })).concat((w.reject || []).map(function (k) {      // (0.10.6) a proposal named as an approved value: rejected
+              return act(k.label, "", "warnings", function () {
+                return S.admin("POST", "facets/" + k.facet, { status: "rejected" }).then(function (r) { return r.error ? r : { done: "rejected", reload: true }; }); });
+            })).concat((w.disable || []).map(function (k) {     // (0.10.6) a document holding only pages read before
+              return act(k.label, "", "warnings", function () {
+                return S.admin("POST", "docs/" + k.doc, { enabled: false }).then(function (r) { return r.error ? r : { done: "disabled", reload: true }; }); });
+            })).concat([
+              act("Set aside", "", "warnings", function () { return S.admin("POST", "lint/dismiss", { key: w.key }).then(function (r) { return r.error ? r : { done: "set aside: not said again" }; }); })
+            ]));
+        }),
         counts.routes ? el("h2", { class: "section-title later", text: "When you have time (already used by the agent)" }) : null,
         group("routes", d.routes || [], function (r) {
           var sel = el("select", { "aria-label": "Kind of work" }, ROUTES.map(function (k) { return el("option", { value: k, text: k, selected: k === r.route ? "selected" : null }); }));

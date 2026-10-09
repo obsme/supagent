@@ -169,19 +169,43 @@ PLANT_EDGE = re.compile(r"^\s*(\"[^\"]+\"|\[[^\]]+\]|[A-Za-z0-9_.:-]+)\s*(?:<?-+
                         r"(\"[^\"]+\"|\[[^\]]+\]|[A-Za-z0-9_.:-]+)\s*(?::\s*(.*))?$")
 
 
+def _plant_name(raw: str) -> str:
+    """(0.10.6) A PlantUML box's name: its label's first line ("rider-web\\n(Node.js :3000)" -> rider-web)."""
+    first = next((x for x in re.split(r"\\n|\n", str(raw or "").strip('"[]')) if x.strip()), "")
+    return _clean(re.sub(r"<<[^>]*>>", "", first))
+
+
 def plantuml(text: str, name: str = "") -> dict[str, Any]:
-    """The arrows of a PlantUML diagram (components, sequences: A -> B : label)."""
+    """The arrows of a PlantUML diagram (components, sequences: A -> B : label); (0.10.6) a box holding other boxes
+    ("component Balancers { component HAProxy }") stands, in an arrow, for the one box it holds, else for no one."""
     aliases: dict[str, str] = {}
-    for m in re.finditer(r"^\s*(?:component|node|database|queue|actor|participant|rectangle|cloud|frame|package)\s+"
-                         r"(\"[^\"]+\"|\[[^\]]+\]|[\w.-]+)\s+as\s+([\w.-]+)", text or "", re.M | re.I):
-        aliases[m.group(2)] = m.group(1).strip('"[]')
+    holds: dict[str, list[str]] = {}
+    stack: list[str] = []
+    for line in (text or "").splitlines()[:5000]:
+        m = re.match(r"^\s*(?:component|node|database|queue|actor|participant|rectangle|cloud|frame|package)\s+"
+                     r"(\"[^\"]+\"|\[[^\]]+\]|[\w.-]+)(?:\s+as\s+([\w.-]+))?", line, re.I)
+        if m:
+            key = m.group(2) or m.group(1).strip('"[]')
+            aliases[key] = _plant_name(m.group(1))
+            if stack:
+                holds.setdefault(stack[-1], []).append(key)
+            if line.rstrip().endswith("{"):
+                stack.append(key)
+        elif line.strip() == "}" and stack:
+            stack.pop()
     edges = []
     for line in (text or "").splitlines()[:5000]:
         m = PLANT_EDGE.match(line)
         if m:
-            a, b = (aliases.get(x.strip('"[]'), x.strip('"[]')) for x in (m.group(1), m.group(2)))
-            edges.append((a, b, _clean(m.group(3) or "")))
-    return _result("PlantUML", name, list(dict.fromkeys([x for e in edges for x in e[:2]])), edges)
+            ends = []
+            for x in (m.group(1), m.group(2)):
+                key = x.strip('"[]')
+                inner = holds.get(key)
+                if inner is not None:                       # a box of boxes: the one it holds, or no one
+                    key = inner[0] if len(inner) == 1 else ""
+                ends.append(aliases.get(key, _plant_name(key)) if key else "")
+            edges.append((ends[0], ends[1], _clean(m.group(3) or "")))
+    return _result("PlantUML", name, list(dict.fromkeys([x for e in edges for x in e[:2] if x])), edges)
 
 
 def _result(kind: str, name: str, nodes: list[str], edges: list[tuple[str, str, str]]) -> dict[str, Any]:

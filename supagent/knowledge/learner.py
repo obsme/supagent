@@ -34,6 +34,8 @@ from supagent import settings
 from supagent.models import Run
 
 log = logging.getLogger(__name__)
+CLASSIFY_SHARE = 0.5   # (0.10.1) of a classification run's time at most for the items, when the links are read and
+EXPLAIN_FLOOR = 0.25   # explained after them; a quarter of the run kept for the explanations, the reading the rest
 BACKENDS = ("osagg", "promagg")
 START_LOCK = "learn:start"
 FINISHING = "relations, catalog and AI descriptions"
@@ -547,12 +549,14 @@ def _categories(run_id: int, steps: Steps, seconds: float, limit: int) -> dict[s
 
     out: dict[str, Any] = {}
     t0 = time.time()
+    links_too = bool(settings.get("learn.interactions"))
     try:
         if limit <= 0:                                   # learn.classify_per_run = 0: no item given to the LLM
             out["classified"] = {"off": "learn.classify_per_run = 0"}
-        else:
-            with llm_task("classify", run_id=run_id):
-                out["classified"] = classify(LLM(), seconds=seconds, limit=limit, steps=steps)
+        else:                                            # (0.10.1) half the time at most when the links are read
+            with llm_task("classify", run_id=run_id):    # and explained after it (what is not done: the next run)
+                out["classified"] = classify(LLM(), seconds=seconds * (CLASSIFY_SHARE if links_too else 1.0),
+                                             limit=limit, steps=steps)
     except LearningStopped:
         raise
     except Exception as ex:  # pylint: disable=broad-except
@@ -577,8 +581,9 @@ def _categories(run_id: int, steps: Steps, seconds: float, limit: int) -> dict[s
 
         steps.begin("interactions the documents state")
         try:
-            with llm_task("interactions", run_id=run_id):
-                out["interactions"] = read_interactions(LLM(), seconds=max(60.0, seconds - (time.time() - t0)))
+            with llm_task("interactions", run_id=run_id):    # (0.10.1) a quarter of the run kept to explain
+                out["interactions"] = read_interactions(
+                    LLM(), seconds=max(60.0, seconds - (time.time() - t0) - seconds * EXPLAIN_FLOOR))
         except LearningStopped:
             raise
         except Exception as ex:  # pylint: disable=broad-except
@@ -611,6 +616,19 @@ def _categories(run_id: int, steps: Steps, seconds: float, limit: int) -> dict[s
             db.session.rollback()
             out["explained"] = {"error": str(ex)[:300]}
         steps.end(**_flat(out["explained"]))
+    if settings.get("learn.describe_values"):
+        from supagent.knowledge.value_about import describe_values
+
+        steps.begin("parts with no description: written by the AI")   # (0.10.5) a part added by hand too
+        try:
+            with llm_task("value_about", run_id=run_id):
+                out["described"] = describe_values(LLM(), seconds=max(30.0, min(180.0, seconds - (time.time() - t0))))
+        except LearningStopped:
+            raise
+        except Exception as ex:  # pylint: disable=broad-except
+            db.session.rollback()
+            out["described"] = {"error": str(ex)[:300]}
+        steps.end(**_flat(out["described"]))
     return out
 
 

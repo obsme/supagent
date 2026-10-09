@@ -65,7 +65,9 @@ def test_what_the_documents_state_waits_in_to_review(world):  # noqa: F811
         db.session.commit()
         out = propose()
         assert out["removals"] >= 1 and "other way" in (db.session.get(Link, back.id).proposed_drop or "")
-        assert db.session.get(Link, mine.id).proposed_drop is None
+        # (0.10.5) a person's: only on the code's or a configuration's word, quoting it, and it waits for approval
+        why = db.session.get(Link, mine.id).proposed_drop or ""
+        assert "other way" in why and "(" in why and db.session.get(Link, mine.id).status == "approved"
     finally:
         db.session.rollback()
         ids = [f.id for f in db.session.query(Facet).filter(Facet.source.in_(("docs",)))]
