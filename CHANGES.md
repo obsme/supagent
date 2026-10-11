@@ -15,10 +15,12 @@ figures: these sets were used to find the fixes):
 * Main open set (156 questions + 6 written for the team's requests: 162): **159 right (98.1%), 3 wrong without a
   mark**; of the 156, 155 (0.10.7's final run: 154 and 154).
 * Observability open set (25 steps + 4 written for the team's requests: 29): **24 right (82.8%), 5 wrong without a
-  mark**; of the 25, 21 (0.10.7's final run: 23 and 24; an earlier build of 0.10.8 the same evening: 25). Read by hand,
-  none of the four comes from this release's changes (no name rewritten, no question asked back in them): an
-  investigation that missed one of its causes, and its follow-up's count; a route asked to "the payment gateway"
-  looked for to another part; a question whose queries two checks refused in turn (known gaps, below).
+  mark**; of the 25, 21 (0.10.7's final run: 23 and 24; an earlier build of 0.10.8 the same evening: 25). Read by
+  hand: no name was rewritten and no question was asked back in them (an investigation that missed one of its causes,
+  and its follow-up's count; a route asked to "the payment gateway" looked for to another part; a question whose
+  queries two checks refused in turn: known gaps, below). Asked again three times each after the release, these four
+  were answered right 11 times of 12 on the release's code and 10 of 12 on the earlier build of the same evening: a
+  run's variance, not a regression of this release.
 * The team's requests (10 questions): 7 right. A short question that names nothing was asked back with no call each
   time; two were asked back with kinds of errors as suggestions instead of the System map's parts, one with its
   list of choices after the question. A server given by its full name where the metrics write name:port is answered
