@@ -286,6 +286,11 @@
       if (r.ok) {
         res.textContent = "OK: model " + r.model + (r.token ? ", middleware token " + r.token : "") + ", answer “" + r.answer + "” in " + r.seconds + " s";
         res.className = "result good";
+        var said = (r.profile && r.profile.said) || [];       // (0.10.7) what supagent adapts to this LLM
+        if (said.length) {
+          res.appendChild(el("div", { class: "muted", text: "Adapted to this LLM:" }));
+          res.appendChild(el("ul", { class: "llm-profile" }, said.map(function (t) { return el("li", { text: t }); })));
+        }
       } else {
         res.textContent = r.error || "failed";
         res.className = "result bad";

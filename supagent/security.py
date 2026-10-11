@@ -51,14 +51,15 @@ def acting_as(username: str) -> Iterator[Any]:
 
 def service_username(app: Any) -> str:
     """The user of the MCP server mode and of the CLI tools: setting mcp.user, else
-    SUPAGENT_MCP_USER / TOOLS_USER (environment), else MCP_DEV_USERNAME of the config."""
+    SUPAGENT_MCP_USER / TOOLS_USER (environment), else SUPAGENT_MCP_USER / MCP_DEV_USERNAME of the config."""
     from supagent import settings
 
     try:
         name = settings.get("mcp.user")
     except Exception:  # pylint: disable=broad-except
         name = ""
-    return (name or os.environ.get("TOOLS_USER") or app.config.get("MCP_DEV_USERNAME") or "")
+    return (name or os.environ.get("SUPAGENT_MCP_USER") or os.environ.get("TOOLS_USER")
+            or app.config.get("SUPAGENT_MCP_USER") or app.config.get("MCP_DEV_USERNAME") or "")
 
 
 @contextmanager
@@ -77,7 +78,8 @@ def current_actor() -> Iterator[tuple[Any, Any]]:
 
         name = service_username(app)
         if not name:
-            raise NotAllowed("no service user: set SUPAGENT_MCP_USER (or MCP_DEV_USERNAME) in superset_config.py")
+            raise NotAllowed("no service user: set the setting mcp.user, or SUPAGENT_MCP_USER (or MCP_DEV_USERNAME) "
+                             "in superset_config.py or the environment")
         try:
             with acting_as(name) as user:
                 yield app, user

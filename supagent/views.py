@@ -1784,6 +1784,7 @@ class AdminView(BaseView):
         "classify_now": "write", "backups": "write", "backup_file": "write", "backup_restore": "write",
         "stop_learning": "write", "runs": "write", "status": "write", "usage": "write", "usage_data": "write",
         "entries": "read", "entry_history": "read", "export_catalog": "read", "team_memory": "read", "docs": "read",
+        "doc_pages": "read",
         "review": "read", "facets": "read", "facet_map": "read", "facet_categories": "read", "apply_status": "read",
         "create_entry": "edit", "update_entry": "edit", "restore_entry": "edit", "put_catalog": "edit",
         "set_memory": "edit", "add_doc": "edit", "edit_doc": "edit", "refresh_doc": "edit", "add_facet": "edit",
@@ -1848,15 +1849,18 @@ class AdminView(BaseView):
     @staticmethod
     def _doc_json(d: Any, pieces: dict[int, int] | None = None) -> dict:
         """A document for the page: never its secret (describe_auth says whether one is set)."""
-        from supagent.knowledge.docs import describe_auth, reader_of
+        from supagent.knowledge.docs import describe_auth, read_log, reader_of
 
+        last = read_log(d.id) if d.kind == "url" else {}
         return {"id": d.id, "kind": d.kind, "title": d.title, "url": d.url, "category": d.category,
                 "pages": [{k: p.get(k) for k in ("url", "title", "chars")} for p in (d.pages or [])],
                 "chars": len(d.content or ""), "max_pages": d.max_pages,
                 "refresh_days": d.refresh_days, "enabled": d.enabled, "status": d.status, "error": d.error,
                 "fetched_at": d.fetched_at, "created_by": d.created_by, "reader": d.reader or "",
                 "reads_as": reader_of(d) if d.kind == "url" else "upload", "auth": describe_auth(d),
-                "pieces": (pieces or {}).get(d.id)}
+                "pieces": (pieces or {}).get(d.id),
+                # (0.10.7) the last reading: pages not read, and the limit reached with pages left unread
+                "read": {k: last.get(k) for k in ("not_read", "left", "limit_reached")} if last else None}
 
     @staticmethod
     def _doc_pieces() -> dict[int, int]:
@@ -1975,6 +1979,28 @@ class AdminView(BaseView):
             _sync_chunks("doc:")
         return _json({"doc": self._doc_json(d, self._doc_pieces())})
 
+    @expose("/api/docs/<int:doc_id>/pages", methods=("GET",))
+    @has_access_api
+    def doc_pages(self, doc_id: int) -> Response:
+        """(0.10.7) Every page of a document, with what each holds, and its last reading: the pages not read and why,
+        the limit (max_pages) reached with pages left unread."""
+        from superset import db
+
+        from supagent.knowledge.docs import read_log
+        from supagent.models import Doc
+
+        d = db.session.get(Doc, doc_id)
+        if d is None:
+            abort(404)
+        pages = [{"url": p.get("url"), "title": p.get("title"), "chars": p.get("chars"), "space": p.get("space"),
+                  "page_id": p.get("id"), "version": p.get("version"), "path": p.get("path"),
+                  "links": len(p.get("links") or []), "images": len(p.get("images") or []),
+                  "diagrams": len(p.get("diagram_edges") or [])}
+                 for p in (d.pages or []) if isinstance(p, dict)]
+        return _json({"id": d.id, "title": d.title, "url": d.url, "status": d.status, "error": d.error,
+                      "fetched_at": d.fetched_at, "max_pages": d.max_pages, "pages": pages,
+                      "last_reading": read_log(d.id) if d.kind == "url" else {}})
+
     @expose("/api/docs/<int:doc_id>/refresh", methods=("POST",))
     @has_access_api
     def refresh_doc(self, doc_id: int) -> Response:
@@ -1999,6 +2025,10 @@ class AdminView(BaseView):
         d = db.session.get(Doc, doc_id)
         if d is None:
             abort(404)
+        from supagent.knowledge.docs import READ_LOG_KEY
+        from supagent.models import Meta
+
+        db.session.query(Meta).filter(Meta.key == READ_LOG_KEY.format(doc_id)).delete(synchronize_session=False)
         db.session.delete(d)
         db.session.commit()
         _sync_chunks("doc:")

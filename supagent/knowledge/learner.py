@@ -266,6 +266,10 @@ def run_learning(reason: str = "manual", databases: list[str] | None = None, llm
     from supagent.llm import background, llm_task
 
     with background(), llm_task("learn"):
+        if llm:                                     # (0.10.7) a server not profiled (or a week ago): profiled first
+            from supagent.llm import ensure_profile
+
+            ensure_profile()
         return _run_learning(reason, databases, llm, max_minutes)
 
 

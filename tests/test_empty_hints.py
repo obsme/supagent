@@ -216,3 +216,19 @@ def test_the_value_elsewhere_hint_has_its_setting(world, monkeypatch):
     monkeypatch.setattr(settings, "get", lambda k: False if k == "agent.value_elsewhere" else real(k))
     hint = why_empty(world["jobs"], 'SELECT COUNT(*) FROM "jobs" WHERE "STATUS" = \'srv-2\'', counted=True)
     assert "is a value of" not in hint and "'srv-2' is not a value" in hint
+
+
+def test_a_value_that_is_the_name_of_another_field():
+    """(0.10.7) "What share of the jobs were relaunched?" filtered on STATUS = 'RELAUNCHED' (no such status) and
+    answered that no job was relaunched: the index has a field RELAUNCHED of true and false."""
+    from supagent.knowledge.empty import _value_hint
+
+    status = {"values": ["SUCCESS", "FAILED", "RUNNING", "KILLED"], "cardinality": 4}
+    others = [("RELAUNCHED", "jobs", {"values": [False, True], "cardinality": 2}),
+              ("NODE", "jobs", {"values": ["n1", "n2"], "cardinality": 2})]
+    hint = _value_hint("STATUS", ["RELAUNCHED"], status, "osagg", others)
+    assert "'RELAUNCHED' is not a value of \"STATUS\"; it is the name of the field \"RELAUNCHED\"" in hint
+    assert 'filter on "RELAUNCHED" = true' in hint
+    hint = _value_hint("STATUS", ["RUN"], status, "osagg", [("RUN_ID", "jobs", {"values": ["a"], "cardinality": 9})])
+    assert "name of the field" not in (hint or "")      # too short a word to name a field
+

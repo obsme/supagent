@@ -257,3 +257,29 @@ def test_a_value_an_investigation_tool_found_supports_its_condition():
     t.add_finding("not json: the switch sw-core-01 had 4997 errors")
     assert _value_said("sw-core-01", "instance", t) and not _value_said(4997.0, "errors", t)
     assert "records_about" in FINDING_TOOLS and "describe_data" not in FINDING_TOOLS
+
+
+def test_a_scrape_target_of_a_host_said_supports_its_condition():
+    """(0.10.7) The servers of a rack read from an inventory (cache-01, k8s-node-02...), then their metric filtered on
+    instance IN ('cache-01:9100', ...): sent back as a condition nobody asked for (the host said, not with its port)."""
+    from supagent.knowledge.conditions import Support, _value_said
+
+    s = Support()
+    s.add("Which servers of the rack had receive errors?", people=True)
+    s.add('{"rows": [{"name": "cache-01"}, {"name": "k8s-node-02"}]}')
+    assert _value_said("cache-01:9100", "instance", s) and _value_said("k8s-node-02:9100", "instance", s)
+    assert not _value_said("db-09:9100", "instance", s)          # a host nobody said
+
+
+def test_data_stores_asked_say_the_kinds_of_store(ctx):
+    """(0.10.7, obs7dev-k) "If the rack loses power, which data stores go down with it?" was refused twice its
+    type IN ('database', 'cache', 'broker', 'storage'): the question asks for data stores, which those kinds are. In the
+    people's words only ("store" alone, a shop's channel, is not it)."""
+    q = "If rack r-1 loses power, which data stores go down with it, and which applications depend on them?"
+    stores = _sql('SELECT "name" FROM "assets" WHERE "rack" = \'r-1\' AND "type" IN (\'database\', \'cache\', '
+                  '\'broker\', \'storage\')')
+    assert refusal(_support(q, q), "execute_sql", stores) is None
+    other = "How many assets are in rack r-1?"
+    assert refusal(_support(other, other), "execute_sql", stores)          # nobody asked for those kinds
+    shop = "How many store orders were placed in rack r-1's city?"
+    assert refusal(_support(shop, shop), "execute_sql", stores)            # a shop's store: not data stores

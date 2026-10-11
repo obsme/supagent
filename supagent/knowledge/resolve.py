@@ -661,6 +661,12 @@ def other_reading(answer: str, tables_read: set[str], places: dict[str, list[dic
     return "\n\n(Not read for this answer: " + "; ".join(notes[:2]) + ". Ask if you meant that data.)"
 
 
+RUN_STATS = re.compile(r"\b(?:average|mean|longest|shortest|maximum|minimum|median|percentile|duration|lasted|took|"
+                       r"ran\s+for|how\s+many\b[^?.]{0,50}\b(?:more\s+than|longer|over|above))\b", re.I)
+PER_RUN = re.compile(r"\bone\s+(?:document|row|record)\s+per\b|\bper\s+(?:run|execution)\b|\bexecutions?\b|"
+                     r"\bjob\s+runs?\b|\bruns\b", re.I)
+
+
 def where_block(question: str, shown: set[str] | None = None) -> str:
     """The candidates as a block of the system prompt ("" when nothing matches). `shown` gets the
     titles of the knowledge pieces of the metrics and indices given with their details."""
@@ -684,6 +690,14 @@ def where_block(question: str, shown: set[str] | None = None) -> str:
         return ""
     lines = ["\n\nWhere the data is (found for this question on names, descriptions and earlier answers, in the "
              "databases you may use; use these exact names and database ids, and do not search for them again):"]
+    if RUN_STATS.search(question or ""):              # (0.10.7) statistics of single runs: the index of the runs
+        runs = [c for c in ranked[:DETAILED] if c["kind"] == "index" and   # first ("the average duration of the
+                PER_RUN.search(f'{c["name"]} {c.get("about") or ""}')]     # jobs" taken from a metric's sum/count,
+        if runs and any(c["kind"] == "metric" for c in ranked[:DETAILED]):  # then its longest run from buckets)
+            ranked = runs + [c for c in ranked if c not in runs]
+            lines.append("- Statistics of single runs (the average, the longest or shortest, how many ran over a "
+                         "limit) come from the index of the runs below, one document per run; a metric's sum and "
+                         "count give an average over its samples only, and its buckets no longest run.")
     lookups = 0
     for c in ranked[:DETAILED]:
         d = c["database"]

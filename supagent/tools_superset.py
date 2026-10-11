@@ -30,7 +30,9 @@ def _plain(v: Any) -> Any:
 
 # What each connector can run, shown next to its databases (list_databases) and with its refusals
 SQL_RULES = {
-    "osagg": ("Not full SQL: OpenSearch runs the WHERE filters and the GROUP BY / aggregates. One index per query; "
+    "osagg": ("Not full SQL: OpenSearch runs the WHERE filters and the GROUP BY / aggregates. One index per query, or "
+              "two joined on equal fields in an aggregating query written with the tables themselves (SELECT "
+              "SUM(a.x) FROM idx_a a JOIN idx_b b ON a.k = b.k WHERE ...); "
               "WHERE with =, IN, ranges, LIKE, IS NULL on single fields joined by AND / OR (pairs of values: "
               "(A = x AND B = y) OR ..., never (A, B) IN ...); "
               "row lists filtered, with ORDER BY and LIMIT; the latest per key = GROUP BY key with MAX(timestamp); "
@@ -51,6 +53,12 @@ STEPS_HINT = (" Do not send this query again, nor a variant of it: rewrite it in
               "2) One query per index with WHERE key IN (the values found), with a LIMIT. Then put the results "
               "together in your answer. (Only for a few keys: a list that misses keys gives a wrong total; to add up "
               "rows of one index that match many rows of another, an aggregating JOIN on the key runs.)")
+# (0.10.7) osagg refuses a JOIN of a raw index (in a WITH, or one side not aggregated): the join that runs, said
+# ("the sales minus the refunds of those orders": a WITH refused, the answer then never tried the join that runs)
+JOIN_REFUSED = re.compile(r"JOIN on an OpenSearch table is not supported|JOIN with a raw OpenSearch table", re.I)
+JOIN_HINT = (" A JOIN of two indices does run when the query aggregates (SUM, COUNT, MIN, MAX of either side) and joins "
+             "them on equal fields, written with the tables themselves, not WITH: SELECT SUM(a.\"X\") FROM \"idx_a\" a "
+             "JOIN \"idx_b\" b ON a.\"KEY\" = b.\"KEY\" WHERE <conditions on a and on b>.")
 # osagg refuses a condition that keeps the empty rows of a LEFT JOIN's right index ("OR r.x IS NULL")
 LEFT_WHERE = re.compile(r"on the right index of a LEFT JOIN", re.I)
 LEFT_WHERE_HINT = (" A LEFT JOIN keeps the left rows that have no match; a condition in WHERE on the right index's "
@@ -141,6 +149,8 @@ def execute_sql(request: ExecuteSqlRequest) -> dict:
                     text += WHERE_HINT
                 elif backend == "osagg" and LEFT_WHERE.search(text):
                     text += LEFT_WHERE_HINT
+                elif backend == "osagg" and JOIN_REFUSED.search(text):
+                    text += JOIN_HINT
                 elif backend == "osagg" and re.search(r"pushed down|cannot run in OpenSearch|JoinRefused|safety cap",
                                                       text):
                     text += STEPS_HINT

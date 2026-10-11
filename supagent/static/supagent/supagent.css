@@ -916,3 +916,10 @@ details.plan pre { white-space: pre-wrap; margin: 4px 0 0; }
 /* (0.10.2) where a part is in the data, under its links */
 .part-data { margin-top: 8px; }
 .part-data-title { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 2px; }
+
+/* (0.10.7) the pages of a document, under its row */
+tr.doc-pages > td { background: var(--line-2); }
+.doc-pages-head { font-weight: 600; margin: 6px 0 4px; }
+table.grid.compact { min-width: 480px; }
+table.grid.compact th, table.grid.compact td { padding: 4px 8px; }
+.result.warn { color: var(--warn, var(--bad)); margin: 4px 0; }

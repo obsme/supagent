@@ -1017,7 +1017,8 @@ def describe_data(topic: str | None = None, index: str | None = None) -> str:
 
             from supagent.knowledge.describe import describe
 
-            learned = describe(topic, index)           # the dictionary learned every day
+            learned = describe(topic, index, live=_label_values_of(index) if index else   # the dictionary learned
+                               _label_values_of)      # every day; a topic's first metrics read too (0.10.7)
             if learned is not None:
                 return learned
             cat = _catalog()
@@ -1106,35 +1107,52 @@ def describe_data(topic: str | None = None, index: str | None = None) -> str:
         return f"error: {type(ex).__name__}: {str(ex)[:1500]}"
 
 
+DOCUMENTATION = ("guide", "doc")     # (0.10.7) the catalog's guides and the documents and sites: one kind to the agent
+DOC_WORDS = ("guide", "guides", "doc", "docs", "document", "documents", "documentation", "runbook", "runbooks", "wiki",
+             "page", "pages", "procedure", "procedures", "howto", "how-to", "manual", "manuals")
+
+
 @mcp.tool
 def search_knowledge(query: str, kind: str | None = None, limit: int = 8) -> dict:
     """Search what is known about the data and how the team works: metrics and indices (what
-    they mean, labels, fields), the catalog's guides (documentation, runbooks) and the users' notes
-    (meetings, decisions), rules, glossary and formulas (calculated fields), answers that worked
-    before, team and personal preferences, documents and sites. `kind`: metric, index, guide, note
-    (the users' notes and the catalog's guides), rule, glossary, formula, recipe, memory or doc
-    (empty: all)."""
+    they mean, labels, fields), the documentation (runbooks, guides, wiki pages: the catalog's guides
+    and the documents and sites) and the users' notes (meetings, decisions), rules, glossary and
+    formulas (calculated fields), answers that worked before, team and personal preferences. `kind`:
+    metric, index, guide or doc (the documentation: either finds both), note (the users' notes and
+    the catalog's guides), rule, glossary, formula, recipe or memory (empty: all)."""
     try:
         with _as_user():
             from supagent.knowledge.notes import KIND as USERS_NOTES
             from supagent.knowledge.search import search
 
+            asked = str(kind or "").strip().lower()
             kinds = (kind,) if kind else None
-            if kind in ("note", "notes", USERS_NOTES):      # "note": a meeting's note as well as the catalog's guides
+            if asked in ("note", "notes", USERS_NOTES):     # "note": a meeting's note as well as the catalog's guides
                 kinds = ("guide", USERS_NOTES)
-            elif kind in ("guide", "guides"):
-                kinds = ("guide",)
-            from supagent.knowledge.search import excerpt
+            elif asked in DOC_WORDS:                        # (0.10.7) a runbook is a guide of the catalog or a page
+                kinds = DOCUMENTATION                       # of the documents: "guide" found none kept as a wiki page
+            from supagent.knowledge.search import as_shown, excerpt
 
             from supagent.knowledge.judge import judged
 
             lim = max(1, min(int(limit or 8), 20))
             found, verdict = judged(query, lambda q: search(q, k=lim, kinds=kinds), lim)   # weak: written again once
-            out = {"query": query, "results": [{**f, "text": excerpt(f["text"] or "", query)} for f in found]}
+            wider, written = "", DOCUMENTATION + (USERS_NOTES,)     # (0.10.7) a kind guessed wrong: what people
+            if kinds and not found and set(kinds) < set(written):   # write first (the documentation, the notes),
+                found, verdict = judged(query, lambda q: search(q, k=lim, kinds=written), lim)
+                wider = "the documentation and the users' notes searched"
+            if kinds and not found:                                 # then every kind, said so
+                found, verdict = judged(query, lambda q: search(q, k=lim), lim)
+                wider = "every kind searched"
+            shown = as_shown(found)                     # (0.10.7) the map's links the AI explained, said so
+            out = {"query": query, "results": [{**f, "text": excerpt(shown.get(f["ref"], f["text"] or ""), query,
+                                                                     lines=f.get("kind") == "map")} for f in found]}
+            for f in [f for f in out["results"] if f.get("kind") == "metric"][:LIVE_METRICS]:
+                f["text"] += _live_label_note(f)        # (0.10.7) the values its data holds that it does not say
             from supagent.knowledge.spelling import correct, said
 
             read = correct(query)          # the words no piece holds, read as the knowledge spells them (cached)
-            notes = []
+            notes = [f"nothing of the kind {kind!r}: {wider}"] if wider else []
             if read["changes"]:
                 out["searched_for"] = read["query"]
                 out["spelling"] = read["changes"]
@@ -2346,9 +2364,14 @@ def _neighbours(table: str) -> dict[str, str]:
     return out
 
 
+RECORDS_AFTER_HOURS = 4          # (0.10.7) records_about: the records begun just after the time given, apart
+
+
 def _records(run: Any, other: str, db_obj: Any, where: str, until: dt.datetime,
-             days: int = RELATED_DAYS) -> dict[str, Any] | None:
-    """The latest records of a related table that satisfy a condition, over the days before `until`."""
+             days: int = RELATED_DAYS, after_hours: float = 0) -> dict[str, Any] | None:
+    """The latest records of a related table that satisfy a condition, over the days before `until`; with
+    `after_hours`, those begun in the hours just after it too, apart (an effect that began later than the time a
+    model gave: a change begun at 14:00 for a slowdown from 14:05, asked until 12:00)."""
     from superset.extensions import security_manager
 
     from supagent.knowledge import groups as G
@@ -2356,28 +2379,40 @@ def _records(run: Any, other: str, db_obj: Any, where: str, until: dt.datetime,
     if _table_database(other, None).id != db_obj.id:
         return None
     tf = _time_field(other, None)
-    security_manager.raise_for_access(database=db_obj, sql=f'SELECT COUNT(*) FROM "{G.name(other)}"', schema="default")
+    security_manager.raise_for_access(database=db_obj, sql=f'SELECT COUNT(*) FROM "{G.table(other)}"',
+                                      schema="default")   # (0.10.7) a table, a pattern too (k8s-events-*): the
+    #                                                       field-name check refused it and records_about failed whole
     since = until - dt.timedelta(days=days)
-    where = f'{where} AND "{tf}" >= {G.lit(since)} AND "{tf}" < {G.lit(until)}'
+    base = where
+    where = f'{base} AND "{tf}" >= {G.lit(since)} AND "{tf}" < {G.lit(until)}'
     total = run(f'SELECT COUNT(*) AS n FROM "{other}" WHERE {where}')
     n = int(total[0][0] or 0) if total else 0
     out: dict[str, Any] = {"table": other, "since": f"{since:%Y-%m-%d %H:%M}", "records": n}
-    if not n:
-        return out
-    sql = f'SELECT * FROM "{other}" WHERE {where} ORDER BY "{tf}" DESC LIMIT {RELATED_ROWS}'
-    rows, cols = run(sql, described=True)
-    latest = []
-    for r in rows:
-        rec: dict[str, Any] = {}
-        for c, v in zip(cols, r):
-            if v in (None, "") or c.startswith("_") or (c == "@timestamp" and tf != "@timestamp"):
-                continue
-            rec[c] = f"{v:%Y-%m-%d %H:%M}" if isinstance(v, dt.datetime) else (v if isinstance(v, (int, float, bool)) else str(v)[:150])
-        if len({k for k, v in rec.items() if v == rec.get(tf)}) > 1:
-            rec.pop(tf, None)                    # the same time under another name
-        latest.append(dict(list(rec.items())[:9]))
-    out["latest"] = latest
-    out["sql"] = sql
+
+    def shown(rows: Any, cols: list[str]) -> list[dict[str, Any]]:
+        latest = []
+        for r in rows:
+            rec: dict[str, Any] = {}
+            for c, v in zip(cols, r):
+                if v in (None, "") or c.startswith("_") or (c == "@timestamp" and tf != "@timestamp"):
+                    continue
+                rec[c] = f"{v:%Y-%m-%d %H:%M}" if isinstance(v, dt.datetime) else (v if isinstance(v, (int, float, bool)) else str(v)[:150])
+            if len({k for k, v in rec.items() if v == rec.get(tf)}) > 1:
+                rec.pop(tf, None)                # the same time under another name
+            latest.append(dict(list(rec.items())[:9]))
+        return latest
+
+    if n:
+        sql = f'SELECT * FROM "{other}" WHERE {where} ORDER BY "{tf}" DESC LIMIT {RELATED_ROWS}'
+        rows, cols = run(sql, described=True)
+        out["latest"] = shown(rows, cols)
+        out["sql"] = sql
+    if after_hours:                              # (0.10.7) begun just after the time given, apart
+        later = until + dt.timedelta(hours=after_hours)
+        rows, cols = run(f'SELECT * FROM "{other}" WHERE {base} AND "{tf}" >= {G.lit(until)} AND "{tf}" < '
+                         f'{G.lit(later)} ORDER BY "{tf}" LIMIT {RELATED_ROWS}', described=True)
+        if rows:
+            out["just_after"] = shown(rows, cols)
     return out
 
 
@@ -3965,7 +4000,7 @@ def _fitted(res: dict[str, Any], chars: int = GROUP_CHARS) -> dict[str, Any]:
 
 
 @mcp.tool
-def system_links(names: list[str], depth: int = 1) -> dict:
+def system_links(names: list[str], depth: int = 1, to: str | None = None) -> dict:
     """What the team's system map says about parts of the system, by their exact names (an application, a
     server, a pool, a service, a feed, a family...): what each is, what it is part of and consists of, what it
     depends on, runs on, reads and calls, what depends on it, and where its kind is in the data (fields, metric
@@ -3974,7 +4009,11 @@ def system_links(names: list[str], depth: int = 1) -> dict:
     call, read, send to (each step a link, the server at its end), and "led_from", the chains of what leads to them
     (what a failure of theirs reaches: the impact; for a server, what runs on it and on its group, then what depends
     on those: a server's comes at every depth). A server or a group: "if_it_fails" lists what runs on it, on its
-    group, then what depends on, calls or reads those, and further: all of them are what its failure reaches. A
+    group, what uses it, then what depends on, calls or reads those, and further: all of them are what its failure
+    reaches; a place that holds servers (a rack, a room, a cluster): its servers, what runs only on them (goes down
+    with it) and what runs on other servers too (may go on), then what depends on those. `to` (another part): the
+    paths from the named parts to it, each step a link, the shortest first (several when there are several): what a
+    request goes through from one part to another ("a request to a site before it reaches a gateway"). A
     category's name ("applications", "servers") lists its values, to go on from."""
     try:
         with _as_user():
@@ -3982,7 +4021,7 @@ def system_links(names: list[str], depth: int = 1) -> dict:
             from supagent.knowledge.inventory import walk
 
             asked = [str(n) for n in (names or [])][:8]
-            res = links_of(asked, depth=max(1, min(int(depth or 1), 4)))
+            res = links_of(asked, depth=max(1, min(int(depth or 1), 4)), to=str(to) if to else None)
             try:                                  # what an inventory (a CMDB) says they stand on (0.9.5)
                 below = walk(asked)
             except Exception as ex:  # pylint: disable=broad-except   (no inventory read: the map alone)
@@ -4060,6 +4099,36 @@ def _parts_of_named(names: list[str]) -> dict[str, list[str]]:
         return {}
 
 
+def _servers_of_named(names: list[str]) -> list[str]:
+    """(0.10.7) What the System map says these parts run on (a service's servers, a database's hosts), for
+    records_about: the records of a part are often kept under its server (an alert's instance is the server the
+    cache runs on: "the cache" looked up, its eviction alert on its server never found). [] when the map cannot
+    be read."""
+    try:
+        from supagent.knowledge.brief import _graph
+        from supagent.knowledge.datalinks import SERVERISH
+
+        g = _graph()
+        V, out = g["values"], []
+        for n in names:
+            for i in g["names"].get(" ".join(str(n).lower().split()), [])[:2]:
+                for kind, b, _note in g["out"].get(i, []):
+                    name = V[b]["name"]               # a server or a group of servers (not a namespace, a cluster:
+                    if kind == "runs_on" and SERVERISH.search(V[b]["cat"] or "") and name not in out and \
+                            name not in names:        # their words are in every record of what runs there)
+                        out.append(name)
+        return out
+    except Exception as ex:  # pylint: disable=broad-except   (the names as given)
+        log.info("supagent: what %s run on not read: %s", names[:3], str(ex)[:200])
+        try:
+            from superset.extensions import db as meta
+
+            meta.session.rollback()
+        except Exception:  # pylint: disable=broad-except
+            pass
+        return []
+
+
 RECORD_TABLE = re.compile(r"change|release|deploy|alert|incident|maintenance|outage|ticket|patch|event", re.I)
 RECORD_KEYS = 6                  # keyword fields of a record table matched against the names
 RECORD_PART = re.compile(r"target|service|host|instance|node|server|component|application|app\b|asset|ci\b|system|"
@@ -4108,7 +4177,8 @@ def records_about(names: list[str], until: str, days: int = 7) -> dict:
     when the effect began). In an investigation, the change or record behind the cause: give the parts you name as
     the cause (the server, the pool, the feed, the service, the license...), not only the applications of the
     question; a part the system map says is made of others (a pool and its servers) is looked for with them. Each
-    table: how many records, the latest ones and the SQL."""
+    table: how many records, the latest ones and the SQL, and apart (just_after) the ones begun in the few hours after
+    `until`: when the effect began later than the time given, one of them may be behind it."""
     try:
         with _as_user():
             from superset.extensions import db as meta, security_manager
@@ -4128,6 +4198,7 @@ def records_about(names: list[str], until: str, days: int = 7) -> dict:
             made_of = _parts_of_named(parts)      # and the parts the map says they are made of (a pool's servers)
             under += [m for ms in made_of.values() for m in ms if m not in parts and m not in under][:16]
             parts += under
+            parts += [s for s in _servers_of_named(parts) if s not in parts][:8]   # (0.10.7) and what they run on
             t1 = G.clock(until)
             span = max(1, min(int(days or 7), 31))
             listed = ", ".join("'" + p.replace("'", "''") + "'" for p in parts)
@@ -4153,7 +4224,8 @@ def records_about(names: list[str], until: str, days: int = 7) -> dict:
                         rows = cur.fetchall()
                         return (rows, [c[0] for c in (getattr(cur, "description", None) or [])]) if described else rows
 
-                    found = _records(run, table, db_obj, "(" + " OR ".join(conds) + ")", t1, span)
+                    found = _records(run, table, db_obj, "(" + " OR ".join(conds) + ")", t1, span,
+                                     after_hours=RECORDS_AFTER_HOURS)
                 if found is not None:
                     out.append(found)
             if not out:
@@ -4162,7 +4234,9 @@ def records_about(names: list[str], until: str, days: int = 7) -> dict:
             return {"names": parts, "until": until, "days": span, "tables": out,
                     **({"also_what_they_stand_on": under} if under else {}),
                     "note": "records whose target or text names one of the parts, the latest first; none in a table "
-                            "is a finding too (nothing recorded on those parts in those days)"
+                            "is a finding too (nothing recorded on those parts in those days); just_after: the ones "
+                            f"begun in the {RECORDS_AFTER_HOURS} hours after `until`, apart: when the effect began "
+                            "later than that time, one of them may be behind it"
                             + ("; also_what_they_stand_on: the parts an inventory says the names run on, connect to or "
                                "depend on, and the parts the system map says they are made of, looked for too"
                                if under else "")}
@@ -4260,6 +4334,52 @@ def _recorded_alerts() -> list[dict]:
             continue
         out.append({"table": ix.name, "firing": len(rows), "alerts": rows[:20], "sql": sql})
     return out
+
+
+LIVE_METRICS = 3             # the metric pieces of a search whose labels' values are read in their data
+
+
+def _live_label_note(piece: dict, shown: str | None = None) -> str:
+    """(0.10.7, obs7dev-s) A metric piece found by search_knowledge: the values of its small labels in all its data
+    that its text does not say. "How many payment authorizations ended in an error?": the counter's piece said its
+    result label's values were approved and declined (the hour sampled when learning), error being only in an
+    incident's hours; the agent looked for the errors in the logs and the traces, five calls, before the counter."""
+    title = str(piece.get("title") or "")
+    if not title.startswith("metric "):
+        return ""
+    name = title.split(" ", 1)[1].strip()
+    text = str(piece.get("text") if shown is None else shown or "").lower()
+    extra = []
+    for label, values in (_label_values_of(name).get(name) or {}).items():
+        if len(values) > 30:
+            continue
+        missing = [str(v) for v in values
+                   if not re.search(r"(?<![\w-])" + re.escape(str(v).lower()) + r"(?![\w-])", text)]
+        if missing:
+            extra.append(f"{label}: {', '.join(missing[:10])}")
+    return ("\n(also in its data: " + "; ".join(extra) + ")") if extra else ""
+
+
+def _label_values_of(name: str | None) -> dict[str, dict[str, list[str]]]:
+    """(0.10.7) For describe_data of one metric: the values of its small labels in all its data ({name: {label:
+    values}}). The dictionary's come from the series of the hour sampled when learning, which an incident's rare value
+    is not in ("How many requests ended in an error?": its result label = ok, declined in the dictionary, error in
+    the data; the agent looked for the errors in the logs). Not a metric, or not readable: {}."""
+    if not name:
+        return {}
+    try:
+        conn = _promagg_connection(_metrics_database(None))
+        try:
+            meta = conn.table_meta(name)
+            if meta is None:
+                return {}
+            vals = _metric_profile(conn, name, meta.labels)
+        finally:
+            conn.close()
+    except Exception:  # pylint: disable=broad-except
+        log.debug("supagent: the label values of %s not read", name, exc_info=True)
+        return {}
+    return {name: {k: v for k, v in vals.items() if not k.startswith("__")}}
 
 
 def _metric_profile(conn: Any, name: str, labels: list[str]) -> dict[str, list[str]]:

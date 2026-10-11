@@ -70,4 +70,5 @@ def test_searching_notes_finds_the_guides_and_the_users_notes(ctx, monkeypatch):
     tools.search_knowledge("restart", kind="note")
     tools.search_knowledge("restart", kind="guide")
     tools.search_knowledge("restart")
-    assert seen == [("guide", "teamnote"), ("guide",), None]
+    written = ("guide", "doc", "teamnote")          # (0.10.7) a kind that finds nothing: the documentation and the
+    assert seen == [("guide", "teamnote"), written, None, ("guide", "doc"), written, None, None]   # notes, then all

@@ -34,6 +34,17 @@ VALUE_WORDS = {
     "relaunch": {"relaunch", "relaunched", "rerun", "retry", "retried", "restart", "restarted", "relanc", "relance",
                  "relancee", "relancees", "relances", "redemar", "redemarre"},
 }
+# (0.10.7) "which data stores go down with the rack?": the kinds of store a type field writes (database, cache, broker,
+# storage...), said by "data store(s)" ("store" alone may be a shop's channel: not it)
+STORE_KINDS = {"database", "databases", "db", "dbs", "cache", "caches", "broker", "brokers", "storage", "datastore",
+               "datastores", "queue", "queues", "stockage"}
+
+
+def stores_asked(words: set[str]) -> bool:
+    """(0.10.7) The people's words ask for data stores: "data" with "store(s)", or "datastore(s)", "stockage"."""
+    return bool(words & {"datastore", "datastores", "stockage"}) or ("data" in words and bool(words & {"store", "stores"}))
+
+
 # a duration said in words ("more than an hour", "half an hour", "une heure"): its number, for the unit factors
 DURATION_WORDS = re.compile(r"\b(an?|one|une?|two|deux|three|trois|half|demi|une demi)[\s-]+(?:an?\s+)?"
                             r"(hours?|heures?|minutes?|seconds?|secondes?|days?|jours?|weeks?|semaines?)\b", re.I)
@@ -164,14 +175,44 @@ def untriggered(text: str, asked: str) -> str:
     block tells the model so, and an answer still added that application's filter to a question that never named
     it, unseen by this check (the memory's own words said the value)."""
     low = (asked or "").lower()
+    gated: set[str] = set()
 
     def keep(m: re.Match) -> str:
         t = TRIGGER.search(m.group(1))
         if t is None:
             return m.group(0)
         trigger = (t.group(1) or t.group(2) or "").strip().lower()
-        return m.group(0) if trigger and trigger in low else ""
-    return MEMORY_LINE.sub(keep, text or "")
+        if trigger and trigger in low:
+            return m.group(0)
+        if trigger:
+            gated.add(trigger)
+        return ""
+    out = MEMORY_LINE.sub(keep, text or "")
+    if not gated:
+        return out
+    # (0.10.7) the value such a memory filters by, said by another memory line that has nothing to do with the
+    # question ("The critical applications are X and Y" for "how many jobs failed yesterday?"), is not said either:
+    # an answer filtered by X, and that line let it through
+    asked_words = _content_words(low)
+
+    def unrelated(m: re.Match) -> str:
+        if _content_words(m.group(1).lower()) - gated & asked_words:
+            return m.group(0)
+        line = m.group(0)
+        for g in gated:
+            line = re.sub(rf"(?i)(?<![\w-]){re.escape(g)}(?![\w-])", " ", line)
+        return line
+    return MEMORY_LINE.sub(unrelated, out)
+
+
+COMMON_WORDS = frozenset("about after again also before between could does each from have here into many more most "
+                         "much only other over same should some such than that their them then there these they this "
+                         "those through under very were what when where which while will with would your".split())
+
+
+def _content_words(text: str) -> set[str]:
+    """The words of 4 letters or more that say what a text is about (a few common words left out)."""
+    return {w for w in re.findall(r"[a-zà-ÿ][a-zà-ÿ0-9_-]{3,}", text or "") if w not in COMMON_WORDS}
 
 
 def build(messages: list[dict], people: list[str]) -> Support:
@@ -325,6 +366,9 @@ def _value_said(value: Any, column: str, support: Support) -> bool:
     text = str(value)
     if TIME_LIKE.match(text.strip()):
         return True                                     # a date: the period check
+    target = re.fullmatch(r"([\w.\-]+):(\d{2,5})", text.strip())
+    if target and _value_said(target.group(1), column, support):
+        return True                                     # (0.10.7) 'host:9100' (a scrape target): its host said
     core = re.sub(r"[%*^$()|\\.]+", " ", text).strip().lower().strip(" :;,/")   # LIKE marks ('%gpu%', 'h:%')
     if not core:
         return True
@@ -348,6 +392,8 @@ def _value_said(value: Any, column: str, support: Support) -> bool:
         s = stem(token)
         if s in words:
             return True
+        if (token in STORE_KINDS or s in STORE_KINDS) and stores_asked(support.words):
+            return True                                 # (0.10.7) "data stores": a database, a cache, a broker
         family = next((k for k, v in VALUE_WORDS.items() if s == k or s in v or token in v), None)
         if family:                                      # "succeeded" says SUCCESS, "errors" FAILED
             fam = VALUE_WORDS[family] | {family}
@@ -433,3 +479,65 @@ def note(support: Support | None, trace: list[dict]) -> str:
     said = "; ".join(dict.fromkeys(c.said() for c in found))
     return (f"\n\n(Check: this answer counts only {said[:300]}, a condition the question did not ask for: the "
             "numbers are for that part only.)")
+
+
+def _tables(sql: str) -> set[str]:
+    import sqlglot
+    from sqlglot import exp
+
+    try:
+        tree = sqlglot.parse_one(sql, read="duckdb")
+    except Exception:  # pylint: disable=broad-except
+        return set()
+    ctes = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
+    return {t.name.lower() for t in tree.find_all(exp.Table) if t.name and t.name.lower() not in ctes}
+
+
+def _not_rows(sql: str) -> set[str]:
+    """The comparisons that pick no rows of the query: inside an aggregate's FILTER, a CASE or a HAVING (the failures
+    of a failure rate: COUNT(*) FILTER (WHERE "STATUS" IN (...)) / COUNT(*) counts every row)."""
+    import sqlglot
+    from sqlglot import exp
+
+    try:
+        tree = sqlglot.parse_one(sql, read="duckdb")
+    except Exception:  # pylint: disable=broad-except
+        return set()
+    kinds = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.Like, exp.ILike, exp.In, exp.Between)
+    return {c.sql(dialect="duckdb") for node in tree.find_all(exp.Filter, exp.Case, exp.If, exp.Having)
+            for c in node.find_all(*kinds)}
+
+
+def rows_changed(question: str, chat: str, before: list[str], tool: str, args: dict) -> str | None:
+    """(0.10.7) A follow-up about the rows of the answer before ("Which carrier had the most late ones?" after "How
+    many parcels ... were delivered late?") whose query keeps fewer of them by a condition that neither the follow-up
+    nor the chat says: the answer before counted 293 late parcels, the follow-up's query also kept the orders of one
+    channel out (a team rule the first count had not applied) and gave 270 of 290 without a word on it. Sent back
+    once: the same rows; or, when that condition must apply, sent again unchanged and said with its effect."""
+    from supagent.knowledge.excluded import query_texts
+
+    if tool not in CHECK_TOOLS or tool in ("promql_query", "compare_to_usual") or not before:
+        return None
+    texts = [q for q in query_texts(args) if q]
+    tables = set().union(*(_tables(q) for q in texts)) if texts else set()
+    olds = [q for q in before if _tables(q) & tables]          # the answer before, on the same rows
+    if not olds:
+        return None
+    had = {c.column.lower() for q in olds for c in sql_conditions(q)}
+    counted = set().union(*(_not_rows(q) for q in texts))     # (a share's part: every row is still counted)
+    said = Support()
+    said.add(f"{question}\n{chat}", people=True)
+    added = [c for c in call_conditions(tool, args)
+             if c.column.lower() not in had and "(" not in c.column and c.op not in ("IS", "IS NOT")
+             and c.text not in counted
+             and not any(TIME_LIKE.match(str(v).strip()) for v in c.values)
+             and not all(_value_said(v, c.column, said) for v in c.values)]
+    if not added:
+        return None
+    what = "; ".join(dict.fromkeys(c.said() for c in added[:3]))
+    return (f"tool error (not run: other rows than the answer before): this question goes on from the answer before, "
+            f"and this call also keeps only {what}, which that answer's query did not and which neither this "
+            f"question nor the chat asks: its figures would be of other rows than the ones the user saw counted. "
+            f"Count the same rows as that answer (its conditions), with only what this question adds. If {what} "
+            f"must apply (a rule of the team that the answer before did not apply), send this same call again "
+            f"unchanged and say in the answer that it changes that answer's figure, from what to what.")

@@ -54,7 +54,9 @@ def test_or_then_and_without_parentheses_is_sent_back_before_the_query_runs():
     bad = f'SELECT SUM("AMOUNT_EUR") FROM "orders" WHERE {day23} OR {day16} AND {rules}'
     assert "STATUS" in (or_then_and(bad) or "") and "2030-01-16" in or_then_and(bad)
     back = or_and_refusal("execute_sql", {"request": {"database_id": 1, "sql": bad}})
-    assert back.startswith("tool error (not run: AND before OR)") and "WHERE (a OR b) AND c" in back
+    assert back.startswith("tool error (not run: AND before OR") and "WHERE AND binds" not in back
+    assert f"({day23} OR {day16}) AND {rules}".replace("'2030-01-23'", "'2030-01-23'") in back or \
+        "((\"ORDER_TIME\" >= '2030-01-23'" in back                  # (0.10.7) the WHERE meant, written out
     good = f'SELECT SUM("AMOUNT_EUR") FROM "orders" WHERE ({day23} OR {day16}) AND {rules}'
     assert or_then_and(good) is None and or_and_refusal("execute_sql", {"request": {"sql": good}}) is None
     assert or_then_and('SELECT 1 FROM "t" WHERE "A" = 1 OR "B" = 2') is None                          # OR alone

@@ -122,12 +122,49 @@ def new_values(question: str, seen: list[str], queries: list[str],
     if not tables or not words:
         return []
     values = (values_of or field_values)(tables)
-    text = " ".join(list(seen) + list(queries)).lower()
+    # (0.10.7) what the previous queries kept to, and the previous question: an answer that only names the value
+    # ("the flash PnL matched", rows of every status listed) holds no figure of it (M1-0107m: the official PnL given
+    # again as the flash one, the word being in the answer)
+    text = " ".join(list(seen[:1]) + list(queries)).lower()
     out = []
     for low, word in words.items():
-        field = values.get(low)
-        if field and not re.search(rf"(?<![\w-]){re.escape(low)}(?![\w-])", text):
-            out.append(f"{word} ({field})")
+        field, said = values.get(low), low
+        for one in ([low[:-1]] if low.endswith("s") else []) + ([low[:-2]] if low.endswith("es") else []):
+            if not field and len(one) >= 3 and values.get(one):
+                field, said = values.get(one), one      # (0.10.7) "timeouts" names TIMEOUT (M2-0107n: "how many of
+        if not field or re.search(rf"(?<![\w-]){re.escape(low)}(?![\w-])", text) or \
+                re.search(rf"(?<![\w-]){re.escape(said)}(?![\w-])", text):   # its failures were timeouts?": 0
+            continue                                     # with no query, 211 in the data)
+        if any(re.search(rf"\bGROUP\s+BY\b[^;]*?(?<![\w-])\"?{re.escape(field)}\"?(?![\w-])", q or "", re.I)
+               for q in queries):
+            continue                                     # every value of its field computed: the chat holds it
+        out.append(f"{word} ({field})")
+    return out
+
+
+AGGREGATES = (("AVG", re.compile(r"\b(average|mean|avg|moyenne)\b", re.I), r"\bAVG\s*\("),
+              ("SUM", re.compile(r"\b(total|sum|somme)\b", re.I), r"\bSUM\s*\("),
+              ("MAX", re.compile(r"\b(highest|maximum|max|peak|largest|biggest|plus haut|maximal)\b", re.I),
+               r"\bMAX\s*\(|\bORDER\s+BY\b[^;]*\bDESC\b"),
+              ("MIN", re.compile(r"\b(lowest|minimum|min|smallest|plus bas|minimal)\b", re.I),
+               r"\bMIN\s*\(|\bORDER\s+BY\b[^;]*\bASC\b"),
+              ("MEDIAN", re.compile(r"\b(median|m[ée]diane|percentile|p9[059]|p50)\b", re.I),
+               r"PERCENTILE|MEDIAN|QUANTILE"),
+              ("COUNT", re.compile(r"\b(how many|number of|count|combien|nombre de)\b", re.I), r"\bCOUNT\s*\("))
+
+
+def new_aggregates(question: str, queries: list[str]) -> list[str]:
+    """(0.10.7) The aggregates a follow-up asks for that none of the previous answer's queries computed ("And its
+    average over that day?" after the day's MAX: AVG): another figure, which the chat does not hold: its own query
+    (M1-0107m: 1.33 written twice with no query, the average being 2.26)."""
+    text = " ".join(q or "" for q in queries)
+    if not text.strip():
+        return []
+    out = []
+    for fn, asked, computed in AGGREGATES:
+        m = asked.search(question or "")
+        if m and not re.search(computed, text, re.I):
+            out.append(f"{m.group(0)} ({fn})")
     return out
 
 
@@ -154,8 +191,67 @@ def carries_period(previous: list[str], current: list[str]) -> bool:
     return False
 
 
-def dropped(question: str, previous: list[str], current: list[str]) -> list[Any]:
-    """The previous answer's conditions this answer's queries lost (see the module)."""
+POSSESSIVE = re.compile(r"\b(?:its|his|her)\b", re.I)
+# (0.10.7) the subject named as a possessive: "pricer-x's average latency", "srv-01's memory"
+NAMED_POSSESSIVE = re.compile(r"(?<![\w-])([A-Za-z][\w.-]{2,})['\u2019]s\b")
+MEASURE_FILTER = re.compile(r"\bFILTER\s*\(\s*WHERE\b", re.I)
+CASE_END = re.compile(r"\bCASE\b.*?\bEND\b", re.I | re.S)
+
+
+def _without_measures(sql: str) -> str:
+    """A query without its measures' own conditions (COUNT(*) FILTER (WHERE ...), CASE WHEN ... END): the
+    conditions left are the rows it keeps."""
+    out, at = [], 0
+    for m in MEASURE_FILTER.finditer(sql or ""):
+        if m.start() < at:
+            continue
+        depth, i = 1, sql.index("(", m.start()) + 1
+        while i < len(sql) and depth:
+            depth += {"(": 1, ")": -1}.get(sql[i], 0)
+            i += 1
+        out.append(sql[at:m.start()])
+        at = i
+    return CASE_END.sub("0", "".join(out) + (sql or "")[at:])
+
+
+def _introduced(c: Any, earlier_queries: list[str]) -> bool:
+    """No query of the chat before the previous answer kept its rows with a condition on this column: the previous
+    question introduced it (its own narrowing: "the most failures" kept the failed requests)."""
+    from supagent.knowledge.conditions import sql_conditions
+
+    col = c.column.lower()
+    return not any(cc.column.lower() == col for q in earlier_queries for cc in sql_conditions(_without_measures(q)))
+
+
+def _restates(question: str, current: list[str]) -> bool:
+    """The message names its subject as a possessive whose name is a value this answer's queries keep
+    ("pricer-x's average latency" with PRICER = 'pricer-x')."""
+    from supagent.knowledge.conditions import sql_conditions
+
+    names = {m.group(1).lower() for m in NAMED_POSSESSIVE.finditer(question or "")}
+    return bool(names) and bool(names & {str(v).lower() for q in current for c in sql_conditions(q)
+                                         for v in c.values if isinstance(v, str)})
+
+
+def _names(text: str, c: Any) -> bool:
+    """A text names a condition: a word of its column (4 letters or more) or one of its values."""
+    low = (text or "").lower()
+    words = [w for w in re.split(r"[^a-z0-9]+", c.column.lower()) if len(w) >= 4]
+    return any(re.search(rf"\b{re.escape(w)}", low) for w in words) or \
+        any(str(v).lower() in low for v in c.values if len(str(v)) >= 2)
+
+
+def dropped(question: str, previous: list[str], current: list[str], prev_question: str = "",
+            earlier: list[str] | None = None, earlier_queries: list[str] | None = None) -> list[Any]:
+    """The previous answer's conditions this answer's queries lost (see the module). (0.10.7) "And its average
+    latency?" after "Which error code came up most often?": "its" is the chat's subject (the pricer the first question
+    named), not the error requests the previous question kept to by its own words (STATUS IN ('ERROR', 'TIMEOUT'),
+    "error"): a condition the previous question introduced, which no earlier question of the chat names, is not
+    carried to a message that refers back with "its", "his" or "her" (M-0107R1: the average over the errors given as
+    the pricer's). The previous question being the chat's first, its conditions are the subject's: kept. (0.10.7) The
+    same for a message that names the subject as a possessive and asks another measure ("What was pricer-x's average
+    latency that day?" after "Which model had the most failures?"), and for a condition the previous question
+    introduced in its queries (no earlier answer kept its rows with it) whatever words it used ("failures")."""
     from supagent.knowledge.conditions import sql_conditions
     from supagent.knowledge.rulecheck import _tables, grouped_by
 
@@ -187,5 +283,11 @@ def dropped(question: str, previous: list[str], current: list[str]) -> list[Any]
             if col not in subject and (any(re.search(rf"\b{re.escape(w)}", asked) for w in words) or
                                        any(str(v).lower() in asked for v in c.values if len(str(v)) >= 2)):
                 continue                               # the message names it: it changes it ("that desk": the same)
+            own = _names(prev_question, c) or (earlier_queries is not None and _introduced(c, earlier_queries))
+            refers = POSSESSIVE.search(question or "") or (_restates(question, current) and
+                                                           new_aggregates(question, previous))
+            if earlier and refers and not OF_THEM.search(question or "") and own and \
+                    not any(_names(e, c) for e in earlier):
+                continue                               # (0.10.7) the previous question's own narrowing, not "its"
             out[col] = c
     return list(out.values())

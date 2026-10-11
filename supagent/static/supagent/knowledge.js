@@ -1060,7 +1060,7 @@
   function docEditor(x, row) {
     var cell = el("td", { colspan: "8" }), rowEd = el("tr", { class: "editing" }, [cell]);
     var cat = el("input", { type: "text", "aria-label": "Category", placeholder: "category" }); cat.value = x.category || "";
-    var pages = el("input", { type: "number", min: "1", max: "500", "aria-label": "Pages or files at most" }); pages.value = x.max_pages || 1;
+    var pages = el("input", { type: "number", min: "1", max: "5000", "aria-label": "Pages or files at most" }); pages.value = x.max_pages || 1;
     var days = el("input", { type: "number", min: "1", "aria-label": "Read again every (days)" }); days.value = x.refresh_days || 7;
     var reader = el("select", { "aria-label": "Read as" }, [["", "detected (" + (READS[x.reads_as] || x.reads_as) + ")"],
       ["web", READS.web], ["confluence", READS.confluence], ["bitbucket", READS.bitbucket]].map(function (o) {
@@ -1107,6 +1107,52 @@
         onclick: function () { rowEd.replaceWith(row); } }), res])]));
     row.replaceWith(rowEd);
   }
+  /* (0.10.7) the pages of a document, under its row: each page read (its title, address, size, links), the pages
+     not read and why, and the limit reached with pages left unread */
+  function docPages(x, row, btn) {
+    var open = row.nextSibling && row.nextSibling.className === "doc-pages" ? row.nextSibling : null;
+    if (open) { open.remove(); btn.textContent = "Pages"; return; }
+    var cell = el("td", { colspan: "8" }, [el("div", { class: "muted", text: "Reading the list of pages…" })]);
+    var box = el("tr", { class: "doc-pages" }, [cell]);
+    row.after(box); btn.textContent = "Hide pages";
+    S.admin("GET", "docs/" + x.id + "/pages").then(function (d) {
+      cell.innerHTML = "";
+      if (d.error) { cell.appendChild(el("div", { class: "result bad", text: d.error })); return; }
+      var last = d.last_reading || {}, pages = d.pages || [];
+      var said = S.num(pages.length) + " page" + (pages.length === 1 ? "" : "s") + " read";
+      if (last.not_read) said += " · " + S.num(last.not_read) + " not read (listed below)";
+      if (last.at) said += " · last read " + S.when(last.at);
+      cell.appendChild(el("div", { class: "doc-pages-head", text: said }));
+      if (last.limit_reached) {
+        cell.appendChild(el("div", { class: "result warn", text: "The limit of " + S.num(d.max_pages) + " pages was reached" +
+          (last.left ? ": at least " + S.num(last.left) + " more linked page" + (last.left === 1 ? " was" : "s were") + " not read" : "") +
+          ". Raise “Pages” (Edit) to read more of the site." }));
+      }
+      var table = el("table", { class: "grid compact" }, [el("thead", {}, [el("tr", {}, ["Page", "Space", "Size", "Links", "Images"].map(function (h) {
+        return el("th", { text: h }); }))])]);
+      var tb = el("tbody", {});
+      pages.forEach(function (p) {
+        var name = p.url ? el("a", { href: p.url, target: "_blank", rel: "noopener", text: p.title || p.path || p.url }) :
+          el("span", { text: p.title || p.path || "" });
+        tb.appendChild(el("tr", {}, [el("td", {}, [name, p.url ? el("div", { class: "muted nm", text: p.url }) : null]),
+          el("td", { text: p.space || "" }), el("td", { class: "num", text: S.bytes(p.chars || 0) }),
+          el("td", { class: "num", text: p.links ? S.num(p.links) : "" }), el("td", { class: "num", text: p.images ? S.num(p.images) : "" })]));
+      });
+      if (!pages.length) tb.appendChild(D.emptyRow(5, "No page read yet."));
+      table.appendChild(tb);
+      cell.appendChild(el("div", { class: "table-wrap" }, [table]));
+      if ((last.skipped || []).length) {
+        cell.appendChild(el("div", { class: "doc-pages-head", text: "Not read" }));
+        var nt = el("tbody", {});
+        last.skipped.forEach(function (k) {
+          nt.appendChild(el("tr", {}, [el("td", {}, [el("div", { text: k.title || k.url || "" }),
+            k.title && k.url ? el("div", { class: "muted nm", text: k.url }) : null]), el("td", { class: "muted", text: k.why || "" })]));
+        });
+        cell.appendChild(el("div", { class: "table-wrap" }, [el("table", { class: "grid compact" }, [el("thead", {}, [el("tr", {}, [
+          el("th", { text: "Page" }), el("th", { text: "Why" })])]), nt])]));
+      }
+    });
+  }
   function docsLoad() {
     var tb = $("docs").querySelector("tbody");
     if (!admin) {
@@ -1134,6 +1180,9 @@
           this.disabled = true;
           S.admin("POST", "docs/" + x.id + "/refresh", {}).then(function () { setTimeout(docsLoad, 3000); });
         } }));
+        if (x.kind === "url") acts.appendChild(el("button", { type: "button", class: "linkish doc-pages-btn", text: "Pages",
+          title: "Every page read, with its details, and the pages not read and why", "aria-label": "Pages read: details",
+          onclick: function () { docPages(x, row, this); } }));
         acts.appendChild(el("button", { type: "button", class: "linkish", text: "Edit", title: "Category, pages, how it is read, its sign-in",
           onclick: function () { docEditor(x, row); } }));
         if (canDelete) acts.appendChild(sureButton("Delete", function () { S.admin("DELETE", "docs/" + x.id).then(function (r) { if (!r.error) saved(); docsLoad(); }); },
@@ -1149,7 +1198,10 @@
             x.url ? el("div", { class: "muted nm", text: x.url }) : null, el("div", { class: "muted small-note", text: how })]),
           el("td", { text: x.category || "" }), el("td", { class: "num", text: S.num((x.pages || []).length || (x.kind === "upload" ? 1 : 0)) }),
           el("td", { class: "num", text: S.bytes(x.chars) }), el("td", { class: "num", text: inSearch(x) }),
-          el("td", {}, [badge(x.status || "", x.status === "ok" ? "ok" : x.status === "error" ? "bad" : ""), x.error ? el("div", { class: "muted", text: x.error }) : null]),
+          el("td", {}, [badge(x.status || "", x.status === "ok" ? "ok" : x.status === "error" ? "bad" : ""), x.error ? el("div", { class: "muted", text: x.error }) : null,
+            x.read && x.read.limit_reached ? el("div", { class: "muted", text: "limit of " + S.num(x.max_pages) + " pages reached" +
+              (x.read.left ? " (" + S.num(x.read.left) + "+ not read)" : "") }) : null,
+            x.read && x.read.not_read ? el("div", { class: "muted", text: S.num(x.read.not_read) + " page" + (x.read.not_read === 1 ? "" : "s") + " not read: see Pages" }) : null]),
           el("td", { class: "muted", text: x.fetched_at ? S.when(x.fetched_at) : "" }), acts].forEach(function (c) { row.appendChild(c); });
         tb.appendChild(row);
       });

@@ -356,7 +356,7 @@ def _relations(ids: list[int], allowed: set[int],
 
 
 def _metric_lines(m: KObject, labels: list[KObject], tables: dict[str, Any], ds: Any, family: str | None,
-                  related: bool, src: Source) -> list[str]:
+                  related: bool, src: Source, live: dict[str, list[str]] | None = None) -> list[str]:
     st = m.stats or {}
     t = tables.get(m.name) or {}
     head = f"  - {m.name} ({m.metric_type or 'unknown'}{', ' + m.unit if m.unit else ''})"
@@ -403,6 +403,10 @@ def _metric_lines(m: KObject, labels: list[KObject], tables: dict[str, Any], ds:
         vals = ls.get("values") or ls.get("sample") or []
         if vals:
             p += ": " + ", ".join(map(str, vals[:12])) + (" ..." if len(vals) > 12 or ls.get("sample") else "")
+        seen = {str(v) for v in vals}               # (0.10.7) the values of its whole data the hour sampled when
+        more = [str(v) for v in (live or {}).get(lb.name) or [] if str(v) not in seen]   # learning had not (an
+        if more:                                    # incident's result = error)
+            p += (" " if vals else ": ") + f"(also in its data: {', '.join(more[:12])})"
         parts.append(p)
     if parts:
         out.append("      labels: " + "; ".join(parts))
@@ -433,7 +437,7 @@ def _metric_lines(m: KObject, labels: list[KObject], tables: dict[str, Any], ds:
 
 
 def _metrics(src: Source, database: Any, ws: set[str], only: str | None, cat: dict[str, Any],
-             allowed: set[int]) -> tuple[float, list[str]]:
+             allowed: set[int], live: Any = None) -> tuple[float, list[str]]:
     """The section of one metrics database, with its relevance to the topic."""
     spec = cat.get("metrics") or {}
     tables = spec.get("tables") or {}
@@ -511,18 +515,26 @@ def _metrics(src: Source, database: Any, ws: set[str], only: str | None, cat: di
         fam, part = (a, b) if a.kind == "family" else (b, a)
         families[part.id] = f"{fam.metric_type or 'metric'} family {fam.name}: " + ", ".join(
             (fam.stats or {}).get("parts") or [])
-    for m in chosen:
+    for k, m in enumerate(chosen):                  # (0.10.7) a topic's first metrics: their labels' values in all
+        mine = ((live(m.name).get(m.name) if k < LIVE_READ else None) if callable(live)   # their data, read now
+                else (live or {}).get(m.name))
         out += _metric_lines(m, labels.get(m.name, []), tables, _dataset(m.name, database.id), families.get(m.id),
-                             related=bool(only), src=src)
+                             related=bool(only), src=src, live=mine)
     if not only and len(chosen) < len(metrics):
         rest = sorted(n for n in by_name if n not in {m.name for m in chosen})
         out.append(f"  other metrics ({len(rest)}): " + ", ".join(rest)[:1500])
     return best, out
 
 
-def describe(topic: str | None = None, name: str | None = None) -> str | None:
+LIVE_READ = 3        # the metrics of a topic whose labels' values are read in all their data (the first ones)
+
+
+def describe(topic: str | None = None, name: str | None = None,
+             live: Any = None) -> str | None:
     """The dictionary text for the current user; None when nothing was learned for the
-    databases the user may query (the caller then falls back on live reads)."""
+    databases the user may query (the caller then falls back on live reads). `live`: {metric: {label: values}} read
+    in all the metric's data (0.10.7), said where the values learned from one hour's series lack them; or a function
+    of a metric's name giving that, read for a topic's first LIVE_READ metrics."""
     from superset.models.core import Database
 
     from supagent.knowledge.curated import sources_of_user
@@ -553,6 +565,14 @@ def describe(topic: str | None = None, name: str | None = None) -> str | None:
             name = host.name
         elif known is None:
             out.append(f"(there is no index or metric named {name!r}; below: what matches the topic)")
+            head = name.split("_", 1)[0]               # (0.10.7) a family's start ("pg_stat_database"): every metric
+            if len(head) >= 2 and "_" in name:         # of the family by its name, not only the topic's best ones
+                kin = sorted({n for (n,) in db.session.query(KObject.name).filter(
+                    KObject.source_id.in_([s.id for s, _d in sources]), KObject.kind == "metric",
+                    KObject.gone_at.is_(None), KObject.name.like(f"{head}\\_%", escape="\\"))})
+                if len(kin) > 1:
+                    out.append(f"(the metrics whose name begins with {head}_: " + ", ".join(kin[:40])
+                               + (f" and {len(kin) - 40} more" if len(kin) > 40 else "") + ")")
             topic = f"{topic or ''} {name.replace('_', ' ')}"
             name = None
     ws = topic_words(topic)
@@ -566,7 +586,7 @@ def describe(topic: str | None = None, name: str | None = None) -> str | None:
         if src.backend == "osagg":
             sections += _indices(src, database, ws, name, allowed)
         elif src.backend == "promagg":
-            sc, lines = _metrics(src, database, ws, name, cat, allowed)
+            sc, lines = _metrics(src, database, ws, name, cat, allowed, live)
             if lines:
                 sections.append((sc, lines))
     try:

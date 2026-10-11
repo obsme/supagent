@@ -72,7 +72,10 @@ Rules:
    Mimir, promagg): SQL on the metric's own table, or on all_metrics with metric_name = '...'. Jobs, logs
    and other documents (OpenSearch, osagg): SQL on the index. Other databases only when the user names
    them; a chart or a dashboard: the database of its dataset (the same index or metric in another
-   database can hold other data).
+   database can hold other data). Statistics of single runs (the executions of jobs or batches, each a
+   document with its duration or status): the average, the longest or shortest one and how many ran over a
+   limit come from the index of the runs when the data has one, the same through the chat: a metric's sum
+   and count give an average over its samples only, and its buckets no longest run.
 4. A tool error says what to fix: fix it and try once more; never repeat a call that failed; after two
    failures on the same step, answer with what you have and say what did not work.
 5. Say exactly what the tools did, never claim what a tool result does not show. If the data ends before
@@ -142,7 +145,8 @@ Tenants (Mimir): a database over several tenants has a column __tenant_id__, and
 different application or subject: a question about one filters on its tenant (WHERE __tenant_id__ = '...'),
 a comparison groups by it, values of different tenants are never added up unless asked, and the answer
 names the tenants it covers. Two metrics together: aggregate each one in its own query, or promql_query
-(arithmetic between metrics, offsets, label_replace)."""
+(arithmetic between metrics, offsets, label_replace). Sizes in bytes (memory, disks): in GiB = bytes / 1073741824
+(1024^3), MiB = bytes / 1048576, unless the question asks for another unit (a GB is 10^9 bytes, never written GiB)."""
 
 SECTIONS = {
     "charts": """
@@ -219,7 +223,8 @@ Investigations ("why is ... late, slow, failing", "what happened", "find the cau
    alert on a server those rows did not use, a release of an application whose other rows are on time, an input
    they do not read, a level or a breach that is usual, a known effect of another size) is not the cause: say in
    one line that it was ruled out, and why. A day the team documented, with the effect it documented, is the
-   explanation: say it is expected.
+   explanation: say it is expected. A change made hours before the effect explains it only with what set it off
+   then: say what started at that time against its usual (requests by route, code or coupon; a campaign, a task).
 5) Answer: what is wrong with its figures against usual (and against the reference days when they say more),
    where, since when, the cause with the record or the figure that shows it, what it delays, what was ruled out,
    and what you could not check.""",
@@ -326,10 +331,114 @@ def g_user() -> Any:
         return None
 
 
+# (0.10.7) a question of how parts depend on each other, what a failure reaches, where a part runs or goes through:
+# the System map's tool is offered ("which stores go down with the rack, which applications depend on them?" was
+# answered from an inventory index alone, without the map that holds those dependencies)
+SYSTEM_ASKED = re.compile(r"\b(?:depend\w*|go(?:es)?\s+down|went\s+down|(?:is|are)\s+down|los(?:es|t|ing)\s+power|"
+                          r"affected|impact\w*|upstream|downstream|uplink\w*|connected\s+to|runs?\s+on|running\s+on|"
+                          r"hosted\s+on|deployed\s+on|(?:go|goes|pass|passes)\s+through|owned\s+by|who\s+owns|"
+                          r"which\s+team|consum\w*|backed\s+up|replicat\w*|which\s+racks?|top-of-rack|"
+                          r"core\s+switch\w*|d[ée]pend\w*|tomb\w*\s+en\s+panne|h[ée]berg\w*|tourne\s+sur)\b", re.I)
+
+
+# (0.10.7) "Inventory warns about its cache miss ratio every night. Was that related to the problem of that morning?"
+# was answered yes, the nightly warning taken for the morning's cause without a look at when it happens
+RECURRING_ASKED = re.compile(r"\b(?:every|each)\s+(?:night|day|morning|evening|afternoon|hour|week|weekend|month|"
+                             r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\b(?:nightly|daily|hourly|"
+                             r"weekly)\b|\btous\s+les\s+(?:soirs|jours|matins|nuits|lundis)\b|\bchaque\s+(?:nuit|jour|"
+                             r"matin|soir|semaine)\b", re.I)
+CAUSE_ASKED = re.compile(r"\b(?:related|relat\w+\s+to|cause[ds]?|causing|linked|connected|responsible|behind|"
+                         r"explain\w*|li[ée]e?s?|caus[ée]e?s?|responsable|à\s+l'origine)\b", re.I)
+RECURRING_UNIT = {"nightly": "night", "daily": "day", "hourly": "hour", "weekly": "week", "nuits": "nuit",
+                  "soirs": "soir", "jours": "jour", "matins": "matin", "lundis": "lundi"}
+RECURRING_ADJ = {"day": "daily", "jour": "quotidien", "nuit": "nocturne"}
+RECURRING_NUDGE = ("(Check before answering: the question says it happens every {unit}, and your answer never says "
+                   "when it happened on the other {unit}s. Look at its times on the days before (the results above "
+                   "may have them; else one query by hour over those days), then answer: what happens at the same "
+                   "hours every {unit} is usual, not the cause of a problem that happened once, unless its figures "
+                   "that day differ from its usual ones: say which. Write the whole answer for the user as if for "
+                   "the first time: they see neither the one above nor this check.)")
+
+
+def recurrence_unsaid(question: str, answer: str) -> str | None:
+    """(0.10.7, obs7dev-s) "Inventory warns about its cache miss ratio every night. Was that related to the problem
+    of 29 September in the morning?" answered "Yes" from the incident's own spike at 10:00, the nightly bumps the
+    queries returned (02:00, every day) never looked at: a question of whether something that recurs was related to
+    a problem, whose answer never speaks of its recurrence. The recurrence's unit (night, day, ...) or None."""
+    q = question or ""
+    m = RECURRING_ASKED.search(q)
+    if not m or not CAUSE_ASKED.search(q) or len(answer or "") < 120:
+        return None
+    word = m.group(0).split()[-1].lower()
+    unit = RECURRING_UNIT.get(word, word)
+    said = rf"\b(?:{re.escape(unit[:4])}|{RECURRING_ADJ.get(unit, unit)})"
+    return None if re.search(said, answer or "", re.I) else unit
+
+
+RECURRING_NOTE = ("\n(The question says that one happens again and again: before answering, look at when it happened on "
+                  "the days before too. One that happens at the same hours on those days is usual, not what caused a "
+                  "problem that happened once, unless its figures that day differ from its usual: say which, with its "
+                  "usual times.)")
+
+
+# (0.10.7) what a request goes through from one part to another: the map's routes (system_links with `to`)
+# (0.10.7) "Which metrics compare the checkout pods' memory with their limit?": which metrics, not their values (eight
+# calls, three of them failed queries of values nobody asked for, over a simple question's budget)
+WHICH_DATA_ASKED = re.compile(r"^\W*(?:which|what)\s+(?:metrics?|fields?|indices|indexes|series|labels?)\b", re.I)
+FIGURE_WORDS = re.compile(r"\b(?:how\s+(?:many|much|long|often|high|low)|value|values|figures?|peak|average|maximum|"
+                          r"minimum|on\s+\d|since|between|yesterday|today|last\s+\w+|this\s+(?:morning|week)|"
+                          r"\d{1,2}:\d{2}|\d{4}-\d{2}-\d{2}|janvier|f[ée]vrier|mars|avril|mai|juin|juillet|ao[ûu]t|"
+                          r"septembre|octobre|novembre|d[ée]cembre|january|february|march|april|may|june|july|"
+                          r"august|september|october|november|december)\b", re.I)
+WHICH_DATA_NOTE = ("\n(This question asks which metrics or fields: name them, with what each holds and its labels or "
+                   "fields that matter, from the data block and the dictionary (describe_data if one is missing). Query "
+                   "their values only if the question asks for them.)")
+# (0.10.7) "Compare with <another application>.": a comparison that names no measure, after several measures
+COMPARE_BARE = re.compile(r"^\W*(?:and\s+|now\s+|please\s+|et\s+)?(?:compare|compar(?:ez|er))\s+(?:it\s+|them\s+|this\s+|"
+                          r"that\s+|these\s+|le\s+|la\s+|les\s+)?(?:with|to|against|avec|à|a)\s+([^?.!\n]{1,60}?)"
+                          r"\s*[.?!]*\s*$", re.I)
+COMPARE_ALL_NOTE = ("\n(This message compares with {other} without naming a measure: give {other}'s figure for every "
+                    "measure the chat asked so far ({asked}), each next to the earlier figure, not the last measure "
+                    "only.)")
+ROUTE_ASKED = re.compile(r"\b(?:go(?:es)?|pass(?:es)?|travel(?:s)?|flow(?:s)?)\s+through\b|\bbefore\s+it\s+reach(?:es)?\b|"
+                         r"\bhow\s+(?:does|do|can)\b[^?.]{1,60}\breach\b|\b(?:path|route)\s+(?:from|between)\b|"
+                         r"\bpasse\s+par\b|\bavant\s+d'atteindre\b", re.I)
+ROUTE_NOTE = ("\n(How one part reaches another: system_links with `to` = the part reached gives the routes the System "
+              "map has, step by step, several when there are several; say which one the question's start takes when "
+              "the documents say it, else each.)")
+
+
 def intents(question: str) -> set[str]:
     return {k for k, rx in INTENTS.items() if rx.search(question or "")}
 
 
+# what made something happen, said with a verb ("Which deploy broke checkout?", "What triggered the alerts?")
+CAUSAL_VERB = re.compile(r"\b(?:broke|break(?:s|ing)?\b(?![^.?!]{0,40}\bdown\b)|trigger(?:ed|s|ing)?|led\s+to|"
+                         r"leads?\s+to|result(?:ed|s)?\s+in|"
+                         r"brought\s+down|took\s+down|knocked\s+out|made\s+\w+\s+fail)\b", re.I)
+
+
+def lookup_asked(question: str) -> bool:
+    """(0.10.7) The question asks facts by their name (which, who, when, how many) and nothing of a cause."""
+    q = question or ""
+    return bool(LOOKUP_ASKED.search(q)) and not CAUSE_ASKED.search(q) and not CAUSAL_VERB.search(q) and \
+        "investigation" not in intents(q)
+
+
+# (0.10.7) a figure asked in a follow-up ("how many times...?", "when did it end?"): answered as one
+FIGURE_ASKED = re.compile(r"\b(?:how\s+(?:many|much|often|long)|what\s+time|at\s+what\s+time|when\s+did|"
+                          r"combien|[àa]\s+quelle\s+heure|quand)\b", re.I)
+# (0.10.7) facts asked by their name ("Which database user and which application held the long transaction on
+# the 28th?", "When did it recover?", "How many ...?"), not what caused something: a lookup, even when the router
+# reads an incident in it (the investigation's steps, the facts against usual, where, why and the check, took every
+# call of such a question, its answer found at the 24th of 33)
+LOOKUP_ASKED = re.compile(r"^\W*(?:(?:on|in|at|for|from|to|through|by|with|since|until|of)\s+)?(?:which|who|whom|whose|"
+                          r"when|how\s+(?:many|much|long|often)|quel(?:le)?s?|qui|quand|combien)\b", re.I)
+LOOKUP_NOTE = ("(This question asks for facts by their name, not for a cause: find the records or the figures that hold "
+               "them, for the parts and the period it names (their logs, events, changes or metrics), and answer with "
+               "them. Who or what did something on a part (a session's user, an application, a host) is read in that "
+               "part's own log lines of that time (its servers' logs, where the picture above says): a change "
+               "record's author is who asked for the change, not the user that ran it.)")
 # a summary of what the chat found: "a two-line summary for the incident ticket", "recap this for the email"
 SUMMARY_ASKED = re.compile(r"\b(?:summar\w*|recap\w*|sum (?:it |this |that |them )?up|résum\w*|synth[eè]s\w*|"
                            r"in (?:one|two|three|a few|1|2|3) (?:lines?|sentences?|words)|(?:one|two|three)-line|"
@@ -972,13 +1081,15 @@ NOTE_ACTIONS = (               # what an answer says was done, the calls that do
 CARRY_NUDGE = ("(Check before answering: this message goes on from the previous question, whose answer counted "
                "with {conds}; the queries of this answer drop {them}. Keep the previous question's conditions unless "
                "the user removes them: run the queries again with them. If the user asks a new question, answer it "
-               "and say in one line that {them} no longer {apply}. Write the whole answer for the user as if for the "
-               "first time: they see neither the one above nor this check.)")
+               "and say in one line that {them} no longer {apply}. Decide, do not ask the user which one they mean. "
+               "Write the whole answer for the user as if for the first time: they see neither the one above nor "
+               "this check.)")
 CARRY_HALF_NUDGE = ("(Check before answering: the queries of this answer keep the previous question's period, which "
                     "this message does not say, so they take it as going on from the previous question; that answer "
                     "counted with {conds} too, and these queries drop {them}. If the message goes on from it, run the "
                     "queries again with {them}; if it is a question of its own, say in one line which period and "
-                    "scope you used. Write the whole answer for the user as if for the first time: they see neither "
+                    "scope you used. Decide, do not ask the user: a message that names no scope of its own goes on "
+                    "from the chat's. Write the whole answer for the user as if for the first time: they see neither "
                     "the one above nor this check.)")
 CARRY_NOTE = "\n\n(Check: the previous question counted with {conds}; this answer does not.)"
 NAMED_NUDGE = ("(Check before answering: the question names {value} ({field} of {table}), and no query of this "
@@ -1043,6 +1154,17 @@ def _note_done(trace: list[dict], tool: str, key: str) -> bool:
     return False
 
 
+NOTE_TOOLS = ("add_note", "change_note", "delete_note", "search_notes", "read_note")
+
+
+def notes_in_play(texts: list[str], trace: list[dict]) -> bool:
+    """(0.10.7) What an answer says was done to a note is checked when the chat speaks of notes: the question or the
+    user's message before it (the yes to a deletion), or a notes tool ran in this answer. "The repeated notes have
+    been removed" in an answer on metrics is none of the user's notes."""
+    return any(INTENTS["notes"].search(t or "") for t in texts) or \
+        any((t.get("called") or t["tool"]) in NOTE_TOOLS for t in trace)
+
+
 def note_claim(answer: str, trace: list[dict]) -> tuple[str, str] | None:
     """(what the answer says was done to a note, the tool that does it) when no such call succeeded here."""
     for m in NOTE_DONE.finditer(answer or ""):
@@ -1075,9 +1197,9 @@ def action_claim(answer: str, trace: list[dict]) -> tuple[str, str] | None:
     return None
 
 
-def claims_check(answer: str, trace: list[dict]) -> str:
+def claims_check(answer: str, trace: list[dict], about_notes: bool = True) -> str:
     notes = []
-    claimed = note_claim(answer, trace)
+    claimed = note_claim(answer, trace) if about_notes else None
     if claimed:
         notes.append(f"no note was {claimed[0]} in this answer ({claimed[1]} did not run): the notes are as they were")
     sent = []
@@ -1140,6 +1262,7 @@ WRITTEN_SQL_NUDGE = ("(Check before answering: your answer shows a query that wa
                      "write the whole answer for the user as if for the first time: they see neither the one above nor "
                      "this check, so never mention it, apologise or say what changed.)")
 WRITTEN_SQL = re.compile(r"```[a-z]*\s*\n\s*(?:WITH|SELECT)\b", re.I)       # a query written out, not run
+WRITTEN_BLOCK = re.compile(r"```[a-z]*\s*\n\s*((?:WITH|SELECT)\b.*?)```", re.I | re.S)   # (0.10.7) its text
 # the user asks for the query itself ("give me the SQL", "the query to count ..."): writing it is the answer
 WANTS_QUERY = re.compile(r"\b(sql|query|queries|requ[êe]tes?|promql|statement)\b", re.I)
 # ... and what it returned said in words ("The query returned no rows", "this query gives the traders..."): a result
@@ -1164,6 +1287,11 @@ DEFINITION_NUDGE = ("(Check before answering: the team defines {term} as \"{defi
                     "relation between two tables is a JOIN on their key or a condition on the key), then answer from "
                     "that result; if your query does follow the definition, keep it. Write the whole answer for the user "
                     "as if for the first time: they see neither the one above nor this check.)")
+MOMENT_NUDGE = ("(Check before answering: the question asks the value at {time}, and your queries averaged it over "
+                "{grain}s (DATE_TRUNC): the {grain} starting at {time} is not the moment {time} when the value moves "
+                "within it. Read the samples at {time} itself (from {time} to one minute later, or the sample closest "
+                "to it), then answer from them. Write the whole answer for the user as if for the first time: they "
+                "see neither the one above nor this check.)")
 GRAIN_NUDGE = ("(Check before answering: your answer gives {time} as the moment, but the query grouped the times by "
                "{grain}: {time} is the start of that {grain}, not the moment. Read the moment itself (the rows or samples "
                "ordered by the value, without DATE_TRUNC), or give the {grain} as a range (\"between 04:00 and 05:00\"). "
@@ -1224,11 +1352,25 @@ SUSPECT_ASKED = re.compile(r"^\W*(?:and\s+|so\s+|then\s+)?(?:was|is|were|could|c
                            r"related to|linked to|à cause d|dû à|due à|lié(?:e|s|es)? à|la cause|responsable)\b[^?]{0,120}\?|"
                            r"\b(?:was|is|were)\s+(?:it|this|that|they)\s+(?:related|linked|connected|the cause|the reason|"
                            r"responsible|why)\b[^?]{0,80}\?|"
-                           r"^\W*(?:est-ce|c'était|était-ce|c'est)\b[^?]{1,160}\?", re.I)
+                           r"^\W*(?:est-ce|c'était|était-ce|c'est)\b[^?]{1,160}\?|"
+                           # (0.10.7) "Did the frontend deployment of that afternoon play a role?", "Was it involved?"
+                           # (a yes or no; not "Which trader contributed the most?")
+                           r"^\W*(?:and\s+|so\s+|then\s+)?(?:did|was|were|is|are|has|have|had|could|can|might|does|do)\b"
+                           r"[^?]{0,160}\b(?:play(?:ed)?\s+(?:a|any|some)\s+(?:role|part)|contribut\w*|involved|have\s+"
+                           r"(?:anything|something)\s+to\s+do\s+with)\b[^?]{0,120}\?|"
+                           r"^\W*(?:est-ce que|a-t-il|a-t-elle|ont-ils)\b[^?]{0,160}\b(?:joué\s+un\s+rôle|contribué|"
+                           r"impliqu\w*)\b[^?]{0,120}\?", re.I)
 SUSPECT_YES = re.compile(r"^\W*(?:\*\*)?(?:yes|oui|indeed|correct|right|effectivement|en effet)\b|"
                          r"\b(?:it|this|that|the \w+)\s+(?:was|is)\s+(?:indeed\s+|likely\s+|most likely\s+|probably\s+)?"
                          r"(?:caused by|due to|the (?:root )?cause|because of|responsible)", re.I)
+# (0.10.7) a yes said with a hedge, anywhere in the answer ("the frontend deployment likely exacerbated the problem"): a
+# suspect's part asserted with no measure of it; not when denied ("no evidence that it contributed")
+SUSPECT_HEDGED = re.compile(r"\b(?:likely|probably|possibly|may|might|could|also|partly|partially)\s+(?:have\s+)?"
+                            r"(?:exacerbated|contributed|amplified|worsened|aggravated|compounded|added\s+to|"
+                            r"played\s+(?:a|some|an?\s+\w+)\s+(?:role|part))\b", re.I)
+SUSPECT_DENIED = re.compile(r"\b(?:no|not|nothing|never|unlikely|without|aucun\w*|pas)\b[^.]{0,60}$", re.I)
 SUSPECT_TIMING = re.compile(r"\b(?:just|shortly|right|minutes?|seconds?|an hour|immediately)\s+(?:before|after|prior)|"
+                            r"\bin quick succession\b|\bsoon after\b|"
                             r"\bpreced\w*|\bcoincid\w*|\bat the same time\b|\bsame (?:morning|time|window)\b|"
                             r"\btiming\b|\bjuste (?:avant|après)|\bpeu (?:avant|après)|\bau même moment\b|"
                             r"\boccurred (?:just |shortly )?before\b", re.I)
@@ -1287,6 +1429,54 @@ def changes_unsaid(question: str, answer: str, trace: list[dict]) -> str | None:
     return "; ".join(found[:5])
 
 
+# (0.10.7) an investigation that blames a change made hours before the effect began, naming nothing that began then
+CHANGE_LINE = re.compile(r"\b(?:CHG-?\d+|deploy\w*|releas\w*|roll(?:ed)?[ -]?out|upgrad\w*|version\s+\d)", re.I)
+SAID_STAMP = re.compile(r"(\d{4}-\d{2}-\d{2})[ T,]*(\d{1,2}):(\d{2})")
+ONSET_ASKED = re.compile(r"\b(?:on\s+)?(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|"
+                         r"november|december)\b[^?.]{0,40}?\b(?:around|at|from|since|about)?\s*(\d{1,2}):(\d{2})", re.I)
+TRIGGER_SAID = re.compile(r"\b(?:campaign|promotion|coupon|sale\b|discount|surge|spike\s+(?:in|of)\s+(?:requests|traffic|orders|"
+                          r"calls|users|load)|traffic\s+(?:rose|grew|increased|doubled|tripled|jumped|peak)|peak\s+(?:traffic|"
+                          r"load|hour)|load\s+(?:rose|grew|increased|doubled|tripled|jumped)|scheduled\s+(?:job|task)|cron|"
+                          r"nothing\s+(?:else\s+)?(?:began|started|changed)|no\s+other\s+(?:change|event|trigger)|"
+                          r"(?:memory|leak|heap)\s+(?:grew|accumulated|built\s+up|kept\s+growing))", re.I)
+LATENT_HOURS = 3
+TRIGGER_NUDGE = ("(Check before answering: the change you blame was made {change}, {hours} hours before the effect began "
+                 "({onset}): a fault that waits that long is set off by something that began then. Look at what started "
+                 "at {onset} against its usual (the requests by route, code, customer or promotion in the logs or the "
+                 "traffic; a scheduled task) with one query, and say it with the cause, or say that nothing began then. "
+                 "Write the whole answer for the user as if for the first time: they see neither the one above nor "
+                 "this check.)")
+_MONTHS = ("january february march april may june july august september october november december").split()
+
+
+def latent_unexplained(question: str, answer: str, year: int) -> tuple[str, str, int] | None:
+    """(0.10.7, obs7dev W07.1 on two builds) "Checkout returned errors on 2 October around 09:00. Find the root cause."
+    answered with the version deployed the evening before, nothing said of what began at 09:00 (a promotion's orders
+    that set the leak off). (the change's time, the onset, the hours between) when the answer blames a change made at
+    least LATENT_HOURS before the onset the question gives and names nothing that began then; else None."""
+    import datetime as _dt
+
+    m = ONSET_ASKED.search(question or "")
+    if not m or TRIGGER_SAID.search(answer or ""):
+        return None
+    try:
+        onset = _dt.datetime(year, _MONTHS.index(m.group(2).lower()) + 1, int(m.group(1)), int(m.group(3)), int(m.group(4)))
+    except ValueError:
+        return None
+    for line in (answer or "").splitlines():
+        if not CHANGE_LINE.search(line):
+            continue
+        for d, h, mi in SAID_STAMP.findall(line):
+            try:
+                when = _dt.datetime.fromisoformat(f"{d} {int(h):02d}:{mi}")
+            except ValueError:
+                continue
+            hours = int((onset - when).total_seconds() // 3600)
+            if hours >= LATENT_HOURS and when.date() <= onset.date():
+                return f"on {d} at {int(h):02d}:{mi}", f"{onset:%d %B} {onset:%H:%M}", hours
+    return None
+
+
 TIME_LITERAL = re.compile(r"\bTIMESTAMP\s*'|'\d{4}-\d{2}-\d{2}|\b1[5-9]\d{8,14}\b|\bDATE_TRUNC\b|\bNOW\(\)|"
                           r"\bCURRENT_(?:DATE|TIMESTAMP)\b", re.I)
 PERIOD_KEPT_NUDGE = ("(Check before answering: this message goes on from the chat, which asked about a period this "
@@ -1303,6 +1493,10 @@ OWN_RECENCY = re.compile(r"\b(?:recent\w*|lately|latest|so far|ever|history|hist
                          re.I)
 STATE_ASKED = re.compile(r"^\W*(?:is|are|was|were|est-ce|y a-t-il)\s+(?:the|this|that|these|those|it|they|there|our|any|"
                          r"le|la|les|ce|il)\b", re.I)
+PERIOD_CLAIMED_NUDGE = ("(Check before answering: no query has run since the check of the chat's period, and this "
+                        "answer says its figures are for that period: they were counted over every day. Run the query "
+                        "again with the chat's period, then answer from its result. Write the whole answer for the "
+                        "user as if for the first time: they see neither the one above nor this check.)")
 PERIOD_WIDENED_NUDGE = ("(Check before answering: this message goes on from the chat, which asked about a period this "
                         "message does not change (\"{asked}\"); the queries of this answer read from {first}, outside it. "
                         "Keep the chat's period unless the user widens it: run them again with it. If the question is "
@@ -1390,13 +1584,150 @@ def figure_from_buckets(question: str, trace: list[dict]) -> bool:
     return bool(queries) and all(by_buckets(sql, result) for sql, result in queries)
 
 
+UNLOOKED_NUDGE = ("(Check before answering: the cause you name ({names}) had no record looked up: what changed on it, "
+                  "or on what it runs on, before the effect began (records_about with its name and the incident's "
+                  "window: changes, deployments, incidents, alerts). Look them up, then write the whole answer for the "
+                  "user as if for the first time: they see neither the text above nor this check.)")
+# (0.10.7) a task of the model's plan that is the answer itself ("Compile final answer listing ...", "Summarize the
+# findings"): written by answering, never with a tool's result
+ANSWER_TASK = re.compile(r"\b(?:compil\w*|writ\w*|summari[sz]\w*|draft\w*|present\w*|prepar\w*|formulat\w*|compos\w*|"
+                         r"give|provide|deliver)\b[^.]{0,60}\b(?:answer|summary|response|report|conclusions?|findings|results)\b|"
+                         r"\bfinal (?:answer|summary|response|report)\b|\b(?:answer|respond) (?:the|to the) (?:user|question)\b",
+                         re.I)
+# (0.10.7) the fastest way: a question that is no investigation nor a big request, its fifth call made ("On which
+# servers does the database run, and which one is its primary?" answered right in 2 to 4 calls, then in 7: the map's
+# answer checked again in the asset inventory, the logs and the metrics before the documents)
+SIMPLE_CALLS = 5
+NAMES_REFUSALS = 2      # (0.10.7) the value queries of a names-only question sent back at most (each new one)
+SIMPLE_NOTE = ("\n(Five tool calls made for this question: if the results above answer it, answer now; call a tool only "
+               "for what they do not hold yet.)")
+# (0.10.7) who did something on a part: "which database user held the transaction?", "who ran the export?"
+WHO_ASKED = re.compile(r"\b(?:which|what)\s+(?:database\s+|db\s+|system\s+|service\s+|os\s+)?(?:user|account|login|"
+                       r"session)s?\b|\bwho\s+(?:ran|held|executed|started|launched|made|did|changed|deleted|"
+                       r"dropped|locked|connected|logged)\b|\bquel(?:le)?\s+(?:utilisateur|compte|session)\b", re.I)
+OWN_LOGS_HINT = ("\n\nWho did something on a part is written by the part itself: its servers ({hosts}) have their own "
+                 "log lines in {places} (the server's name in that field). Read the lines of that time there first: "
+                 "traces and the other parts' logs do not say who ran it.")
+OWN_LOGS_NUDGE = ("(Check before answering: the question asks who did something on {part}, and its servers' own records "
+                  "are in {places}, which no query read. Read the lines of that time there (the server's name in that "
+                  "field): who ran it is written by the part itself, not in traces or another part's logs. Then write "
+                  "the whole answer for the user as if for the first time: they see neither the text above nor this "
+                  "check.)")
+# (0.10.7) a field saying where each row ran: a server, a host, a node, an instance, a pod, a machine, a worker
+PLACE_FIELD = re.compile(r"(?:^|[_.\s])(?:server|host|hostname|node|instance|machine|pod|worker)(?:$|[_.\s])", re.I)
+WHERE_NUDGE = ("(Check before answering: your investigation read {tables}, whose rows say where each ran ({fields}), and no "
+               "query read it. Where the rows you blame ran (their server, host or node) is part of the cause: read it "
+               "for those rows, then write the whole answer for the user as if for the first time: they see neither the "
+               "text above nor this check.)")
+FIELD_NAMED_NUDGE = ("(Check before answering: the question's words name the field {fields} of the table your queries "
+                     "read, and no query read it. If it holds what the question asks (a flag or a figure of that name), "
+                     "compute the answer with it; if another field is meant, keep your answer and say which field you "
+                     "used and why. Write the whole answer for the user as if for the first time: they see neither the "
+                     "text above nor this check.)")
+REACH_NUDGE = ("(Check before answering: the question asks what a failure reaches, and system_links said it reaches "
+               "parts the answer does not name: {lines}. Name every part it reaches, with how (on it, or through which "
+               "part), or say why one is not affected; then write the whole answer for the user as if for the first "
+               "time: they see neither the text above nor this check.)")
+REACH_SHOWN = 12                  # (0.10.7) parts a failure reaches named in that check, at most
+VERDICT_HEAD = re.compile(r"^\W*(?:\*\*)?(?:no|yes|non|oui|partly|partially|unlikely|probably not|not)\b|"
+                          r"\b(?:did not|didn't|was not|wasn't|were not|weren't|is not|isn't|played no|no role|no part|"
+                          r"not (?:the|a) (?:root )?cause|not related|unrelated|ruled out|no evidence|did play|"
+                          r"was (?:the|a) (?:root )?cause|n'a pas|n'était pas|aucun rôle)\b", re.I)
+VERDICT_NUDGE = ("(Check before answering: the question asks yes or no about one suspect. Start with that answer in the "
+                 "first sentence (\"No: ...\" or \"Yes: ...\" or \"Partly: ...\"), then the evidence that decides it, "
+                 "briefly; the incident's whole investigation is not asked again. The user sees neither the text above "
+                 "nor this check: never mention it.)")
+
+
+NARRATED = re.compile(r"^\W*(?:I\s+(?:looked|searched|checked|queried|went through|reviewed|examined)|Let me|To answer|"
+                      r"First,?\s+I|After (?:looking|searching|checking)|J'ai (?:cherché|regardé|vérifié)|"
+                      r"Based on my (?:investigation|search|searches|queries|analysis|checks?))\b", re.I)
+NOT_THERE = re.compile(r"\b(?:not collected|not indexed|not shipped|not available|no data|no logs?|no metrics?|no records?|"
+                       r"none of (?:the|these|them)\b[^.]{0,80}\b(?:contain|hold|has|have)|does not appear|do not appear|"
+                       r"(?:is|are) not (?:in|among) (?:the|any)|"           # (0.10.7) "the log indices do not contain
+                       r"(?:do|does) not (?:contain|hold|include) (?:any )?(?:\w+ )?(?:logs?|data|records?|metrics?|"
+                       r"lines?)|cannot determine|can't determine)\b", re.I)   # logs for X": the absence too
+NOT_THERE_NUDGE = ("(Check before answering: the answer is that the data does not hold this, but it is said only at the "
+                   "end, after how it was looked for. Start with it (\"No logs of X are collected: ...\"), then where it "
+                   "was looked for, briefly. The user sees neither the text above nor this check: never mention it.)")
+
+
+def no_data_buried(answer: str) -> bool:
+    """(0.10.7) "How many errors did X log on ...?" answered with the search first ("I looked in all the log indices
+    ...") and "its logs are not collected" at the end only (obs7dev-h): the answer is the absence, said last. An
+    answer narrating its search whose conclusion only, in its last third, says the data does not hold it."""
+    a = (answer or "").strip()
+    if len(a) < 400 or not NARRATED.search(a):
+        return False
+    cut = len(a) * 2 // 3
+    return bool(NOT_THERE.search(a[cut:])) and not NOT_THERE.search(a[:300])
+
+
+YES_NO_ASKED = re.compile(r"(?:^|[.!?;:,\u2014-]\s*)(?:and\s+|so\s+|then\s+|but\s+)?(?:did|was|were|is|are|has|have|had|"
+                          r"could|can|might|may|does|do|would|est-ce|c'[ée]tait|[ée]tait-ce|y a-t-il)\b[^.!?]*\?", re.I)
+
+
+def verdict_missing(question: str, answer: str) -> bool:
+    """(0.10.7) "Did the frontend deployment of that afternoon play a role?" answered with the incident's whole
+    investigation again, its "no" under "What was ruled out" at the end (obs7dev): a yes-or-no question about a
+    suspect whose answer says neither in its first sentences. A yes or no is asked by a sentence that begins with
+    its verb ("Did ...?", "Was it ...?"): "What was the cause?" asks for the cause (it was sent back asking a yes or
+    no seven times of eight, and an answer written again so began with "Yes:" and lost what it had found)."""
+    return bool(SUSPECT_ASKED.search(question or "")) and bool(YES_NO_ASKED.search(question or "")) and \
+        len(answer or "") > 300 and not VERDICT_HEAD.search((answer or "")[:300])
+
+
+REPEATED_NUDGE = ("(Check before answering: this answer is your previous answer written again, but the question now is "
+                  "another one: \"{question}\". Answer that question, in the first sentence (the count, the name, the "
+                  "time it asks), from the results of this answer's queries; give of the previous answer only what this "
+                  "question needs. The user sees neither the text above nor this check: never mention it.)")
+
+
+def found_nothing(step: dict) -> bool:
+    """(0.10.7) A search_knowledge step whose result holds no piece."""
+    return bool(re.search(r'"results":\s*\[\s*\]', str(step.get("result") or "")[:600]))
+
+
+NO_DATA_STEPS = ("work_plan",)
+
+
+def gave_results(trace: list[dict]) -> bool:
+    """(0.10.7) A tool of this answer returned something: its words are the tool's to check, not the model's own
+    (a planning step, or a search that found nothing, returned nothing)."""
+    return any(t.get("status") == "done" and (t.get("called") or t["tool"]) not in NO_DATA_STEPS and
+               not found_nothing(t) for t in trace)
+
+
+REPEATED_BACK = 200        # (0.10.7) a question back asked again, word for word, for a new question
+REPEATED_CHARS = 1000      # a report: a short answer keeping the previous one's frame or table for its new fact is not
+
+
+def repeats_previous(answer: str, previous: str, shortest: int = 0) -> bool:
+    """(0.10.7) "How many times were the pods killed for memory that morning?" after a root cause was found was
+    answered with that root cause's whole report again, word for word, its count never said (obs7dev): a report
+    (REPEATED_CHARS or more) whose first line and four lines in five (of some length) are lines of the previous
+    answer. (On 597 follow-ups of the open sets: that answer twice, nothing else.) `shortest`: another length (a
+    question back asked again is shorter than a report)."""
+    def lines(text: str) -> list[str]:
+        return [" ".join(x.split()).strip("#*-> ").lower() for x in (text or "").splitlines() if len(x.strip()) >= 25]
+
+    mine, before = lines(answer), set(lines(previous))
+    return len(answer or "") >= (shortest or REPEATED_CHARS) and len(mine) >= 3 and mine[0] in before and \
+        sum(x in before for x in mine) >= 0.8 * len(mine)
+
+
 def suspect_confirmed(question: str, answer: str) -> bool:
     """The question proposes a cause and the answer says yes on the strength of the timing alone ("the deployment
     occurred just before the failures"): a coincidence taken for a cause (0.9.5)."""
     if not SUSPECT_ASKED.search(question or ""):
         return False
     head = (answer or "")[:400]
-    return bool(SUSPECT_YES.search(head)) and bool(SUSPECT_TIMING.search(answer or ""))
+    if SUSPECT_YES.search(head) and SUSPECT_TIMING.search(answer or ""):
+        return True
+    for m in SUSPECT_HEDGED.finditer(answer or ""):    # (0.10.7) "likely exacerbated": a yes with a hedge
+        if not SUSPECT_DENIED.search((answer or "")[max(0, m.start() - 60):m.start()]):
+            return True
+    return False
 
 
 def capacity_blamed(answer: str) -> bool:
@@ -1424,7 +1755,8 @@ INVENTED_NUDGE = ("(Check before answering: your answer gives {names}, which no 
                   "whole answer for the user as if for the first time: they see neither the one above nor this check.)")
 NUMBERS_NOTE = ("\n\n(Check: these numbers or names do not come from the results of this answer's queries: "
                 "{numbers}.)")
-BAD_TOOL_CALL = re.compile(r"parse tool call|tool call arguments|invalid tool call|failed to parse", re.I)
+BAD_TOOL_CALL = re.compile(r"parse tool call|tool call arguments|invalid tool call|failed to parse|"
+                           r"does not match the expected|peg-native|could not parse", re.I)   # (0.10.7) gpt-oss
 # the conversation is longer than the model's context (llama.cpp, vLLM, OpenAI say it their way)
 CONTEXT_FULL = re.compile(r"exceeds? the available context|exceed_context_size|context (?:size|length|window) "
                           r"(?:exceeded|is exceeded)|maximum context length|too many tokens|prompt is too long", re.I)
@@ -1437,12 +1769,34 @@ CONTEXT_FULL_NUDGE = ("(The conversation became longer than the model can read: 
 UNREADABLE_CALL = ("(Your last reply could not be read: the arguments of its tool call were not valid JSON (too long, "
                    "or cut). Call the tool again with short arguments: a chart config names columns and aggregates, "
                    "never the data rows. Or write the answer with what you have.)")
+# (0.10.7) the same, before any query of the answer: "write the answer with what you have" there gave answers with
+# figures no query gave (a follow-up's table of hours written from the chat's earlier answers)
+UNREADABLE_NO_DATA = ("(Your last reply could not be read: the arguments of its tool call were not valid JSON (too "
+                      "long, or cut). Call the tool again with short arguments: one query. No figure of this question "
+                      "has been read yet: never write one before a query gives it.)")
+TOOL_MARKUP = ("<tool_call>", "<function=")     # (0.10.7) where a step without tools stops
+SEARCH_ONCE = ("tool error (not run: the knowledge was searched once already for this answer): use what it gave and "
+               "the data block above (it names the metrics and indices that match, with a SQL to adapt); describe_data "
+               "for a table's fields, then run the query.")
+DESCRIBED_ENOUGH = ("tool error (not run: the dictionary was read twice already, no query yet): run the query now on "
+                    "the table the data block or those reads named; describe another table only if that query shows "
+                    "it is not the one.")
+LISTED_ENOUGH = ("tool error (not run: the dictionary was read already, no query yet): it gives each table's database "
+                 "(its id): run the query now on the table the data block or that read named; list the databases only "
+                 "if that query fails.")
+UNREADABLE_STOP = ("(Stopped: the model's last steps could not be read (a tool call cut or malformed); ask again, or "
+                   "ask a narrower question.)")
 TIME_UP = "(The time for this answer is up.) "
 LAST_CALLS = ("({n} left for this answer: write the answer for the user now from the results above (what they "
               "show, what is known and what is not); call a tool only if the answer cannot be written without it.)")
+DEEPER_LAST = (" First, one call: records_about with the names of the parts you blame and the time the effect "
+               "began (what changed behind the cause: a deployment, a change, a restart, maintenance): the answer "
+               "says what it found, nothing found included.")
 OUT_OF_STEPS = ("(No tool call is left for this answer. Write the answer for the user now, from the results "
                 "above: what was done (the charts, datasets and dashboards saved, with their links), what the "
                 "results show, and what remains to do. Do not claim anything the tools did not do.)")
+VERDICT_FIRST = (" The question asks yes or no: say it in the first sentence (\"No: ...\", \"Yes: ...\" or \"Partly: "
+                 "...\"), then the evidence that decides it.")
 RULES_NUDGE = ("(Check before answering: the team's rule \"{rule}\" applies to the data you queried, and your query "
                "does not apply it. Run the query again applying it, or, if the question asks otherwise, say so in "
                "one line. Then "
@@ -1450,10 +1804,22 @@ RULES_NUDGE = ("(Check before answering: the team's rule \"{rule}\" applies to t
 RULES_NOTE = "\n\n(Check: the team's rule \"{rule}\" was not applied in this answer's queries.)"
 LOOP_NUDGE = ("(Your answer repeated the same lines again and again: it is cut above. Write the final answer for the "
               "user now, once: what the results above give, without working notes.)")
+LOOP_CALL_NUDGE = ("(Your answer repeated the same lines again and again: it is cut above. No tool has read the data "
+                   "of this question yet: call the tool that reads it now, then answer from its result only, once.)")
 LOOP_NOTE = "\n\n(Cut: the model's text went round in circles from here.)"
+WRITE_NOW = ("(Your last message only said that the answer comes next. Write the answer itself now, from the results "
+             "above: start with what they show, then what is left to check. No announcement, no tool.)")
+WRITE_FOUND = ("(Your last message announced another step instead of answering. Write the final answer now, from the "
+               "results above: what they found (every name and figure they give), then what was not found. No "
+               "announcement, no tool. The user sees neither the text above nor this check: never mention it.)")
+# (0.10.7) a text that only promises the answer ("Let me mark the remaining tasks as done and write the final answer.")
+WRAP_ANNOUNCED = re.compile(r"\b(?:let me|let's|I(?:'ll| will| am going to|'m going to)|now,? I(?:'ll| will))\b[^.!?\n]{0,120}"
+                            r"\b(?:answer|summar\w*|conclu\w*|final\w*|write|wrap|report|compile|put together|present)\b",
+                            re.I)
 COUNT_NUDGE = ("(Check before answering: the question asks how many or how much, and your answer gives no number "
                "for it (only shares or rates). Give that number from a query (COUNT, SUM, SUM(increase) of a counter), "
-               "or say why it cannot be counted.)")
+               "or say why it cannot be counted. Then write the whole answer again for the user, as if for the first "
+               "time, with all it had found: they see neither the text above nor this check.)")
 LIMIT_NUDGE = ("(Check before answering: {n} is the number of rows the LIMIT {n} of your query let through, not a "
                "count of what the question asks: more rows match. For a total, run a query without that LIMIT "
                "(COUNT(*), or the sum of the counts). Then write the whole answer for the user as if for the first "
@@ -1564,6 +1930,157 @@ def asks_back(answer: str) -> bool:
         not TABLE_WITH_NUMBERS.search(text) and "```" not in text
 
 
+OPTION_LINE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+\S")
+
+
+def question_last(answer: str) -> str:
+    """(0.10.7) A question back written first with its readings listed under it ("Which of these do you mean?", then
+    1. ... 2. ...): the question goes after the list, where the user reads it last, and the answer is then a question
+    back for the checks too (it was taken for an answer, and a check of a question back failed on it). Anything else
+    stays: results, a code block, lines that are not the list's."""
+    text = (answer or "").strip()
+    if not text or asks_back(text) or len(text) > 1200 or TABLE_WITH_NUMBERS.search(text) or "```" in text:
+        return answer
+    lines = text.splitlines()
+    q = next((i for i, ln in enumerate(lines) if ln.strip().rstrip("*_ )").endswith("?")), None)
+    rest = [ln for ln in lines[q + 1:] if ln.strip()] if q is not None else []
+    if not rest or not all(OPTION_LINE.match(ln) or ln[:1] in (" ", "\t") for ln in rest):
+        return answer
+    return ("\n".join(lines[:q] + lines[q + 1:]).strip() + "\n\n" + lines[q].strip()).strip()
+
+
+CUT_NUDGE = ("(Your answer stopped in the middle of a sentence: the user saw only its start. Write the whole answer "
+             "again, from the results above.)")
+CUT_NO_DATA = ("(Your answer stopped in the middle of a sentence, and no query ran for it: its figures come from no "
+               "result. Run the query this question needs, then write the whole answer from its rows.)")
+
+
+# (0.10.7) "There are **0 errors** logged by X ... no application logs for X exist in any of the log indices": a zero
+# given for what the data holds nothing of (a count of data that is not collected)
+ZERO_SAID = re.compile(r"(?<![\d.,])\b(?:0|zero|no)\b(?:\*\*)?\s+(?:\w+\s+){0,2}?(?:errors?|failures?|failed\s+\w+|"
+                       r"warnings?|exceptions?|alerts?|restarts?|kills?|crash(?:es)?|events?|requests?|orders?|"
+                       r"transactions?|timeouts?|incidents?)\b", re.I)
+ABSENT_SAID = re.compile(r"\bno\s+(?:\w+\s+){0,2}(?:logs?|data|metrics?|documents?|series)\s+(?:\w+\s+){0,3}?(?:for|of|"
+                         r"from|about)\b|\b(?:not|never|isn't|aren't|wasn't|weren't)\s+(?:being\s+)?(?:collected|"
+                         r"shipped|indexed|monitored|scraped)\b|\bnot\s+in\s+any\s+of\b|\bin\s+none\s+of\b|"
+                         r"\bnone\s+of\s+the\s+(?:\w+\s+){0,2}(?:indices|indexes|sources|tables|metrics)\b|"
+                         r"\bno\s+(?:index|source|table|metric)\s+(?:holds|has|contains|covers)\b", re.I)
+ABSENT_ZERO_NUDGE = ("(Your answer gives a zero for something it also says the data holds nothing of. A zero is a count "
+                     "of data that exists: what is not collected cannot be counted. If no source holds it, say that "
+                     "first, with where you looked, and give no 0 and no \"no errors\" for it; if a source does hold "
+                     "it, give that source's count and name the source. Then write the whole answer again for the "
+                     "user, as if for the first time: they see neither the text above nor this check.)")
+
+
+# (0.10.7) "53.69 GiB (53,687,091,200 bytes)": a size written in binary units, computed with decimal factors (the
+# bytes / 10^9 written GiB; a GiB is 1024^3 bytes: 50.00 GiB)
+BINARY_SAID = re.compile(r"(?<![\d.,])(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*(KiB|MiB|GiB|TiB)\b")
+BINARY_POWER = {"KiB": 1, "MiB": 2, "GiB": 3, "TiB": 4}
+NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?")
+BINARY_NUDGE = ("(Check before answering: {said} is {raw:,.0f} bytes divided by 1000^{k}, a decimal unit ({dec}). One "
+                "{unit} is 1024^{k} bytes: {raw:,.0f} bytes are {right:.2f} {unit}. Give each size in {unit} divided by "
+                "1024^{k} (or say {dec} if you keep 1000^{k}). Then write the whole answer again for the user, as if "
+                "for the first time, with all it had found (not only the sizes): they see neither the text above nor "
+                "this check.)")
+
+
+def binary_misread(answer: str, trace: list[dict]) -> str | None:
+    """(0.10.7) A size written in binary units (GiB) that is a result's bytes divided by decimal factors (10^9): the
+    nudge with the right value, else None."""
+    said = [(m.group(0), float(m.group(1).replace(",", "")), m.group(2)) for m in BINARY_SAID.finditer(answer or "")]
+    if not said:
+        return None
+    found: set[float] = set()
+    for t in trace or []:
+        if (t.get("called") or t.get("tool")) in QUERY_TOOLS and t.get("status") == "done":
+            for x in NUMBER.findall(str(t.get("result") or "")):
+                try:
+                    v = float(x)
+                except ValueError:
+                    continue
+                if v >= 1000:
+                    found.add(v)
+    for text, x, unit in said:
+        if x <= 0:
+            continue
+        k = BINARY_POWER[unit]
+        near = lambda b, f: abs(b / f - x) <= max(0.006 * x, 0.006)   # noqa: E731
+        decimal = [b for b in found if near(b, 1000 ** k)]
+        if decimal and not any(near(b, 1024 ** k) for b in found):
+            raw = decimal[0]
+            return BINARY_NUDGE.format(said=text, raw=raw, k=k, dec=unit.replace("i", ""), unit=unit,
+                                       right=raw / 1024 ** k)
+    return None
+
+
+# (0.10.7) "Which metrics show it on the database side?": evidence asked; a metric shows it only if its values moved then
+SHOW_ASKED = re.compile(r"\b(?:which|what)\s+(?:metrics?|fields?|logs?|indices|indexes|series|signals?)\b[^?]{0,60}?"
+                        r"\b(?:show|shows|showed|reveal\w*|indicate\w*|prove\w*|see|saw|reflect\w*)\b|"
+                        r"\b(?:quelles?|quels?)\s+(?:métriques?|champs?|logs?)\b[^?]{0,60}?\b(?:montr\w*|indiqu\w*)\b", re.I)
+SHOW_NUDGE = ("(Check before answering: the question asks which of them show it. A metric (or a field) shows it only if "
+              "its values moved in that window: query the candidates the problem points at over the window and the same "
+              "hours of the days before (compare_to_usual, or one query each), then name those whose values changed, each "
+              "with its figures then and as usual, and say which ones did not move. Then write the whole answer for the "
+              "user as if for the first time: they see neither the one above nor this check.)")
+
+
+VALUE_REFUSED = re.compile(r"not run: value\): \"([^\"]+)\" of (\S+) has no value '([^']+)'")
+EQUALS = re.compile(r"\"([^\"]+)\"\s*(?:=|IN\s*\([^)]*?)\s*'([^']*)'", re.I)
+UNFOUND_ZERO_NUDGE = ("(Your answer gives a zero, but '{value}' is no value of \"{field}\" in {table}, and no query found "
+                      "it as a value anywhere else: a search of its name in a text that finds nothing does not count its "
+                      "records, it may only show that this source holds none of them. Find where its records are (its "
+                      "name with describe_data or search_knowledge, the other tables of its kind); if no source holds "
+                      "them, say that first, with where you looked, and give no 0 and no \"no errors\" for it.)")
+
+
+def unfound_zero(answer: str, trace: list[dict], question: str = "") -> tuple[str, str, str] | None:
+    """(0.10.7) "How many errors did X log on ...?" answered "**0** errors": X was refused before running as no value
+    of the service field of the one log index that has one, then searched in the log lines' text, which found nothing
+    (obs7dev-j). A zero said when a value the question names was refused so and no query found it as a value of another
+    field (or written another way): (value, field, table); else None."""
+    if not ZERO_SAID.search(answer or ""):
+        return None
+    refused: list[tuple[str, str, str]] = []
+    sqls: list[str] = []
+    for t in trace:
+        if t.get("status") == "done":
+            req = (t.get("args") or {}).get("request") if isinstance(t.get("args"), dict) else None
+            sqls.append(str(req.get("sql") or "") if isinstance(req, dict) else json.dumps(t.get("args") or {}, default=str))
+            continue
+        m = VALUE_REFUSED.search(str(t.get("result") or ""))
+        if m and re.search(r"(?<![\w-])" + re.escape(m.group(3).lower()) + r"(?![\w-])", (question or "").lower()):
+            refused.append((m.group(3), m.group(1), m.group(2)))
+    for value, field, table in refused:
+        found = any(w.lower() == value.lower() and (f != field or w != value)
+                    for sql in sqls for f, w in EQUALS.findall(sql))
+        if not found:
+            return value, field, table
+    return None
+
+
+def absent_zero(answer: str) -> bool:
+    """(0.10.7) The answer gives a zero ("0 errors", "no failures") and says the data holds nothing of its subject
+    ("no application logs for X exist in any of the log indices"): which one is it."""
+    text = answer or ""
+    return bool(ZERO_SAID.search(text)) and bool(ABSENT_SAID.search(text))
+
+
+def cut_short(answer: str, finish: str | None = None) -> bool:
+    """(0.10.7) An answer that stopped in the middle: cut by the token limit, or short and ending inside bold, code or
+    brackets ("The metrics that show it are in **Observ": an answer of 13 tokens, taken as the whole one)."""
+    text = (answer or "").strip()
+    if not text:
+        return False
+    if finish == "length":
+        return True
+    last = text.splitlines()[-1].strip()
+    if (last.startswith("|") and not last.endswith("|")) or text.count("```") % 2 == 1:
+        return True                                    # (0.10.7) any length: a table row or a code block left open
+    if len(text) > 300 or "```" in text:               # ("| 14:50 | 3,000 |\n| 15" ended an answer of 555
+        return False                                   # characters, its other metrics never said)
+    return text.count("**") % 2 == 1 or text.count("`") % 2 == 1 or text.count("(") > text.count(")")
+
+
 def repeating(text: str) -> int | None:
     """Where a text starts going round in circles: the same block of three lines (120 characters or more)
     a third time, as a model writes until its token limit ("I will now write the response. One final
@@ -1668,6 +2185,9 @@ def unsupported_answer(answer: str, trace: list[dict], question: str = "") -> st
     return None
 
 
+WRITTEN_KEPT = 300         # (0.10.7) an answer of that length or more, with figures or names, is kept for the end
+STEP_ONLY = re.compile(r"^\W*(?:let me|let's|i'll|i will|i am going to|now,? i(?:'ll| will)|next,? i(?:'ll| will))\b"
+                       r"[^\n]{0,200}?[:.\u2026]?\s*$", re.I)   # (0.10.7) a text that only announces a step
 EMPTY_RICH = "(The model wrote no text for this answer, even when asked again: the result of its last query is below.)"
 EMPTY_PLAIN = "(The model wrote no text for this answer, even when asked again: here is the result of its last query.)"
 ECHO_NUDGE = ("(Check before answering: your answer gives the previous answer again, word for word, but the "
@@ -1891,6 +2411,26 @@ SAME_ERROR_STOP_AT = 3        # exactly the same error this many times from one 
 #                               call's details (the source fails, not the query): that tool is not run there again
 
 
+# (0.10.7) an error that names the expression the source cannot run ("PushdownError: SUM(CAST(x AS BIGINT)): cannot be
+# computed ...")
+NAMED_EXPRESSION = re.compile(r"(?:Pushdown\w*Error|not supported|cannot be (?:computed|pushed down))\W{0,3}(.{3,200}?):\s*"
+                              r"(?:cannot be computed|is not supported|not supported)", re.I)
+
+
+def fixes_named(error: str, args: dict) -> bool:
+    """(0.10.7) The source failed the same way three times, on an expression the error names; this call no longer
+    has that expression (SUM(CAST(x AS BIGINT)) written SUM(x)): it runs. The repeats of the very same call that
+    failed were counted as failures of the source, and the query that fixed it was refused."""
+    m = NAMED_EXPRESSION.search(error or "")
+    if not m:
+        return False
+    from supagent.knowledge.excluded import query_texts
+
+    named = " ".join(m.group(1).split()).lower()
+    sql = " ".join(" ".join(query_texts(args)).split()).lower()
+    return bool(sql) and named not in sql
+
+
 def error_signature(tool: str, args: dict, content: str) -> tuple[str, str, str]:
     """(tool, table, error) of a failed call, the error without its names, quotes and numbers: two calls that
     differ only in their details (another field misnamed, another date) give the same signature."""
@@ -1918,11 +2458,17 @@ def call_table(args: dict) -> str:
 
 REPEAT_NOTE = ("You already made exactly this call in this answer and its result is above: the same call gives the "
                "same result. Use it: answer the user, or make a different call.")
+# (0.10.7) the very same call sent again twice ("net revenue": one query sent six times after a check): one more turn,
+# then the answer from the results
+REPEATS_STOP = 2
+REPEAT_STOP_NOTE = (REPEAT_NOTE + " It was sent again twice already: write the answer now from the results above, "
+                    "with what they show and what they do not.")
 # an answer that ends by announcing a step instead of taking it ("Let me run the query.")
 ANNOUNCE = re.compile(
     r"(?:\b(?:I(?:'ll| will| am going to| shall)|let me|let's|now,? I(?:'ll| will)|next,? I(?:'ll| will))\b"
     r"[^.!?\n]{0,60}\b(?:run|query|check|call|create|fetch|look up|search|execute|generate|export|send|build|"
-    r"compute|calculate|retrieve|pull|save|draw|plot)\b"
+    r"compute|calculate|retrieve|pull|save|draw|plot|verify|confirm|double-check|re-?check|validate|compare|"
+    r"examine|review|analy[sz]e|investigate|look (?:at|into|for))\b"   # (0.10.7) "Let me verify the counts...":
     r"|\b(?:je vais|laissez-moi|je lance|lan[çc]ons)\b[^.!?\n]{0,60}\b(?:lancer|ex[ée]cuter|v[ée]rifier|chercher|"
     r"cr[ée]er|interroger|calculer|r[ée]cup[ée]rer|envoyer|exporter|enregistrer|tracer)\b)[^.!?\n]*[.:!…]?\s*$", re.I)
 # (0.10.4, agent.announce_ing, off until measured) the same steps written in -ing after "try" or "start" ("Let me also
@@ -1954,7 +2500,12 @@ def without_apology(answer: str) -> str:
 
 
 PREAMBLE = re.compile(r"\b(let me|i will|i'll|now i will|now i'll)\s+(now\s+)?(write|present|put together|compose|draft|"
-                      r"format|give|provide|summari[sz]e)\b", re.I)
+                      r"format|give|provide|summari[sz]e)\b"
+                      # (0.10.7) "I have all the information needed to write the complete answer. ... No additional
+                      # tool calls are needed." before the answer: the model about its work, not for the user
+                      r"|\bi (?:now )?have (?:all|enough|everything)\b[^.\n]{0,60}\b(?:information|data|results?|"
+                      r"evidence|i need)\b|\bno (?:additional|further|more) tool calls? (?:are|is) (?:needed|required)\b",
+                      re.I)
 
 
 ANNOUNCED = re.compile(
@@ -2052,6 +2603,15 @@ def limit_as_count(answer: str, trace: list[dict], question: str = "") -> int | 
     return None
 
 
+def announces_answer(text: str) -> bool:
+    """(0.10.7) A short text whose last sentence only promises the answer (out of calls, an investigation's whole
+    answer was "Let me mark the remaining tasks as done and write the final answer.")."""
+    t = (text or "").strip()
+    if not t or len(t) > 400:
+        return False
+    return bool(WRAP_ANNOUNCED.search(re.split(r"(?<=[.!?])\s+|\n+", t)[-1]))
+
+
 def announces_action(answer: str) -> str | None:
     """The announced step at the end of an answer that called no tool for it, or None. Offers
     ("if you want, I can...", "let me know...") and questions are not announcements."""
@@ -2108,6 +2668,8 @@ def _unchecked(trace: list[dict]) -> list[str]:
         tool = t.get("called") or t["tool"]
         if tool not in CHECK_TOOLS:
             continue
+        if tool == "check_health" and "no checks in catalog" in str(t.get("result") or ""):
+            continue                                   # (0.10.7) nothing to check: no check that failed to run
         last[tool] = t.get("status") or ""
         if tool == "check_health" and t.get("status") == "done":
             try:
@@ -2210,7 +2772,9 @@ class Agent:
             return self.specs
         question = getattr(self, "intent_text", None) or question
         asked = intents(question) | self._route_intents()
-        wanted = set().union(*(TOOLS_OF.get(k, set()) for k in asked)) if asked else set()
+        if SYSTEM_ASKED.search(question or ""):        # (0.10.7) what depends on a part, what its failure reaches,
+            asked.add("system")                        # where it runs: the map's tool (a rack's question went to
+        wanted = set().union(*(TOOLS_OF.get(k, set()) for k in asked)) if asked else set()   # the inventory only)
         if self.wants_saved_chart:
             wanted |= TOOLS_OF["charts"]
         if notes_request(question):                     # "add to my note ...": the notes tools only
@@ -2237,7 +2801,25 @@ class Agent:
         from supagent.router import ROUTE_INTENTS
 
         moa = getattr(self, "moa", None)
-        return set(ROUTE_INTENTS.get(moa.route, set())) if moa is not None and moa.active else set()
+        found = set(ROUTE_INTENTS.get(moa.route, set())) if moa is not None and moa.active else set()
+        if "investigation" in found and self._looks_up():
+            found.discard("investigation")             # (0.10.7) facts asked by their name: a lookup, with the
+            found.add("system")                        # parts' records and links still offered (records_about)
+        return found
+
+    def _incident_lookup(self) -> bool:
+        """(0.10.7) The router read a problem, the question asks its facts by their name: the picture of the parts it
+        names (where their servers' logs and records are) without the investigation's steps."""
+        moa = getattr(self, "moa", None)
+        return moa is not None and moa.active and moa.route == "incident" and self._looks_up()
+
+    def _looks_up(self) -> bool:
+        """(0.10.7) The question asks facts by their name, not a cause (its own words; a follow-up of a chat whose
+        words ask a cause stays an investigation): the router's incident is then answered as a lookup."""
+        raw = getattr(self, "raw_question", None)
+        if not raw:
+            return False
+        return lookup_asked(raw) and "investigation" not in intents(getattr(self, "intent_text", None) or raw)
 
     def _investigating(self, question: str) -> bool:
         """The question asks what is wrong and why (its words, or the router's route): the investigation's
@@ -2247,6 +2829,9 @@ class Agent:
         intent_text = getattr(self, "intent_text", None) or question
         if intent_text != question and SUMMARY_ASKED.search(question or ""):
             return False
+        if intent_text != question and FIGURE_ASKED.search(question or "") and "investigation" not in intents(question):
+            return False                               # (0.10.7) "How many times were the pods killed?" after the
+        #                                                investigation: a figure, not the investigation again
         return "investigation" in (intents(intent_text) | self._route_intents())
 
     def after_saved(self, message_id: int) -> None:
@@ -2331,7 +2916,8 @@ class Agent:
 
             from supagent.knowledge.memory import prompt_block
 
-            text += prompt_block(getattr(getattr(g, "user", None), "id", None), shown)
+            text += prompt_block(getattr(getattr(g, "user", None), "id", None), shown,
+                                 getattr(self, "said_in_chat", None))
         except Exception:  # pylint: disable=broad-except
             pass
         text += self._rules_reminder()
@@ -2348,7 +2934,8 @@ class Agent:
             # (the whole picture for an investigation, a question of how the system works or of how parts are
             # connected; for any other question only what it names: a follow-up on a server's load needs no map)
             text += brief_block(question, full=self._investigating(question) or bool(self._route_intents() & {"system"})
-                                or connection_question(question))   # (and a question of how parts are connected)
+                                or connection_question(question)    # (and a question of how parts are connected)
+                                or self._incident_lookup())         # (and facts of a problem: where its parts' data is)
         except Exception:  # pylint: disable=broad-except
             log.warning("supagent: the system around the question: not given", exc_info=True)
         try:
@@ -2380,11 +2967,25 @@ class Agent:
                 from supagent.router import ROUTE_KINDS
 
                 moa = getattr(self, "moa", None)
-                text += knowledge_block(f"{question}\n{reading}" if reading else question, shown,
+                ask = f"{question}\n{reading}" if reading else question
+                if getattr(self, "chat_values", None):   # (0.10.7) the values the follow-up's category stands for
+                    ask += "\n" + " ".join(self.chat_values)
+                text += knowledge_block(ask, shown,
                                         with_charts=bool(about & {"status", "read_charts", "charts"}),
                                         prefer=ROUTE_KINDS.get(moa.route) if moa is not None and moa.active else None)
             except Exception:  # pylint: disable=broad-except
                 log.warning("supagent: knowledge found: not given", exc_info=True)
+        if WHO_ASKED.search(question or ""):             # (0.10.7) who did it: where the part writes it, said first
+            try:
+                from supagent.knowledge.brief import server_places
+
+                places = server_places(question, logs_only=True)
+                if places:
+                    text += OWN_LOGS_HINT.format(
+                        hosts=", ".join(sorted({h for h, _f, _ts in places})),
+                        places="; ".join(f'field "{f}" of {", ".join(ts[:2])}' for _h, f, ts in places[:3]))
+            except Exception:  # pylint: disable=broad-except
+                log.debug("supagent: the servers' own records: not said", exc_info=True)
         if self._investigating(question):                # the paths the team validated for such problems
             try:
                 from supagent.knowledge.paths import paths_block
@@ -2468,10 +3069,14 @@ class Agent:
         answered = bool(before) and bool(said) and asks_back(said) and not question.strip().endswith("?") and \
             len(question.split()) <= REPLY_WORDS
         earlier = [str(h["content"]) for h in history or [] if h.get("role") == "user" and h.get("content")]
+        self.prev_question, self.earlier_questions = before, earlier[:-1]   # (0.10.7) what each one introduced
+        self.prev_answer = said                         # (0.10.7) not written again for another question
         self.chat_period = chat_period(question, earlier)   # the chat's period, when this message names none
         adds = adds_to(question, before, earlier)      # "And on 22 September?": another day, value or period
         last = next((h for h in reversed(history or []) if h.get("role") == "assistant"), None)
         self.prev_queries = [str(q.get("query") or "") for q in (last or {}).get("queries") or [] if q.get("query")]
+        self.earlier_queries = [str(q.get("query") or "") for h in history or [] if h.get("role") == "assistant"
+                                and h is not last for q in h.get("queries") or [] if q.get("query")]
         self.new_values: list[str] = []
         if before and not adds and self.prev_queries:   # "And the flash PnL?": a value of the data the previous
             try:                                        # answer's queries never used
@@ -2480,6 +3085,11 @@ class Agent:
                 self.new_values = new_values(question, [before, said], self.prev_queries)
             except Exception:  # pylint: disable=broad-except   (no dictionary: as before)
                 log.debug("supagent: new values of a follow-up not read", exc_info=True)
+            adds = bool(self.new_values)
+        if before and not adds and self.prev_queries:   # (0.10.7) "And its average over that day?" after the
+            from supagent.knowledge.carry import new_aggregates   # day's MAX: a figure no query computed
+
+            self.new_values = new_aggregates(question, self.prev_queries)
             adds = bool(self.new_values)
         self.new_fields: list[str] = []
         if before and self.prev_queries:                # "Which error code came up most often?": a field the
@@ -2512,6 +3122,14 @@ class Agent:
         # "what charts are in it?": the tools, instructions and checks of the question it refers to, too
         self.intent_text = f"{before}\n{question}" if follow else question
         self.question = self.intent_text                  # the checks of periods and rules read it
+        self.chat_values: list[str] = []                 # (0.10.7) "which metrics show it on the database side?":
+        if follow and refers_back(question):             # the database the answers named, searched with it
+            try:
+                from supagent.knowledge.brief import chat_values
+
+                self.chat_values = chat_values(question, history)
+            except Exception:  # pylint: disable=broad-except   (no map: as before)
+                log.debug("supagent: the chat's values of a follow-up not read", exc_info=True)
         # the period checks: a follow-up's own day in place of the earlier question's ("shipped on ... at night")
         from supagent.knowledge.period import follow_up_text
 
@@ -2552,6 +3170,10 @@ class Agent:
                 messages.append({"role": h["role"], "content": str(h["content"])[:HISTORY_CHARS]})
         lang = question_language(question)
         hint = f" {ANSWER_IN[lang]}" if lang else ""
+        # (0.10.7) what the user said: the question, as understood, and the chat's messages (a memory that applies
+        # "when the user says X" is given when they did)
+        self.said_in_chat = " ".join([question, self.intent_text or ""] + [
+            str(h.get("content") or "") for h in recent if h.get("role") == "user"])
         # "create a chart of that finding": where the data is, from the question it refers to
         blocks = self._question_blocks(self.intent_text, shown)
         self.given_refs = set(shown)                    # what the prompt was given (the learned items' ranking)
@@ -2564,7 +3186,7 @@ class Agent:
         if self.moa.active:                             # the router's instruction for this kind of question
             from supagent.router import ROUTE_NOTES
 
-            note = ROUTE_NOTES.get(self.moa.route, "")
+            note = LOOKUP_NOTE if self._incident_lookup() else ROUTE_NOTES.get(self.moa.route, "")
             blocks = f"{blocks}\n\n{note}" if blocks and note else (note or blocks)
         if settings.get("agent.calendar_facts") and self._investigating(question):
             try:                                        # the third Friday, the month end: what the team wrote of it
@@ -2585,7 +3207,35 @@ class Agent:
                 len((question or "").split()) <= 10:      # "And its average latency?" after the top error code
             asked += ("\n(\"its\"/\"their\" here may stand for the subject of this conversation or for what the "
                       "answer before named last: when both readings are possible, give the figure for both, each "
-                      "said as such.)")
+                      "said as such. A condition the question before added to the subject (a status, an error, a "
+                      "code it ranked) belongs to that question: the subject's figure is without it.)")
+        if not answered:                                 # (0.10.7) "the same weekday one week earlier": the day
+            try:                                        # in full, not counted by the model
+                from supagent.knowledge.period import days_note
+
+                when = days_note(question, [str(h["content"]) for h in history or [] if h.get("role") == "user"
+                                            and h.get("content")], now().date())
+                if when:
+                    asked += f"\n({when})"
+            except Exception:  # pylint: disable=broad-except   (a note, never a lost question)
+                log.debug("supagent: the days of the question not written", exc_info=True)
+        if RECURRING_ASKED.search(question or "") and CAUSE_ASKED.search(question or "") and not answered:
+            asked += RECURRING_NOTE                     # (0.10.7) "it warns every night: was it related?"
+        if ROUTE_ASKED.search(question or "") and not answered:
+            asked += ROUTE_NOTE                         # (0.10.7) "what does a request go through before ...?"
+        bare = COMPARE_BARE.match(question or "") if before and not answered else None
+        if bare and len(earlier) >= 2:                  # (0.10.7) "Compare with <the other one>." after the average, the
+            asked += COMPARE_ALL_NOTE.format(          # longest and the count over one hour: all three, not the count
+                other=bare.group(1).strip(), asked="; ".join(f'"{q.strip()[:120]}"' for q in earlier[-3:]))
+        self.names_only = bool(WHICH_DATA_ASKED.search(question or "") and not FIGURE_WORDS.search(question or "")
+                               and not SHOW_ASKED.search(question or "") and not answered
+                               and not (before and refers_back(question)))   # "which metrics show it?": the data
+        #                                       tells which ones moved (obs7dev-h: names from memory when sent back)
+        self._names_refused: list[str] = []             # (0.10.7) the value queries refused for names asked
+        self._listed_refused = False                   # (0.10.7) list_databases refused once
+        self._active_told = False                      # (0.10.7) the overlap with the window said once
+        if self.names_only:
+            asked += WHICH_DATA_NOTE                    # (0.10.7) which metrics, not their values
         unit = unit_carried(question, history)
         if unit and not (answered or completes):        # "in minutes?" then "And the longest one?": in minutes
             asked += (f"\n(The question before asked for its figure in {unit}: give this one in {unit} too, if it is "
@@ -2617,6 +3267,15 @@ class Agent:
             self.support = None
         self.open_question = bool(intents(self.intent_text) & {"status", "investigation", "usual"})
         return messages
+
+    def _asks_open(self, question: str) -> bool:
+        """(0.10.7) An open question for the checks that send an answer back for more investigation: the chat's
+        reading (open_question), except for a follow-up that asks a figure or a summary, read by its own words ("How
+        many times were the pods killed?" after the root cause: a count, not the investigation again)."""
+        if (getattr(self, "intent_text", None) or question) != question and \
+                (FIGURE_ASKED.search(question or "") or SUMMARY_ASKED.search(question or "")):
+            return bool(intents(question) & {"status", "investigation", "usual"})
+        return bool(getattr(self, "open_question", False))
 
     def _general(self, question: str, previous: str) -> bool:
         """A general question (writing or fixing a script, what a technology means in general): the router said so,
@@ -2699,13 +3358,17 @@ class Agent:
         asked_at = self._asked_at = len(messages)      # what the LLM was given, before its own words
         trace: list[dict] = []
         nudged = announced = numbers_asked = rules_asked = count_asked = looped = limit_asked = notes_asked = False
+        wrote_now = False                               # (0.10.7) an announcement again: the answer asked, no tools
         named_asked = carry_asked = tie_asked = echoed = action_asked = future_asked = source_asked = False
         keep_asked = repeat_asked = False
         before_check: tuple[str, int] | None = None    # (0.10.6) the answer the no-tool check was sent on, the trace then
         about_notes = notes_request(getattr(self, "intent_text", None) or question)
+        self._note_texts = [getattr(self, "intent_text", None) or question, question, next(
+            (str(m.get("content") or "") for m in reversed(history or []) if m.get("role") == "user"), "")]
         done: set[str] = set()                         # identical successful calls: not run twice
         saved_calls: set[str] = set()                   # identical saving calls: not run again either
         self.usage = {}
+        self._last_written = ""
         add_usage(self.usage, getattr(self, "_router_usage", None) or {})     # the router's call, if any
         self._router_usage = {}
         if getattr(self, "general_question", False):     # a general question: answered without the platform
@@ -2716,7 +3379,7 @@ class Agent:
             self.general_question = self.understood["general"] = False
             messages = self.prompt(question, history)
             asked_at = self._asked_at = len(messages)
-        specs = self._specs_for(question)
+        specs = self._specs = self._specs_for(question)
         building = "charts" in intents(question) or self.wants_saved_chart
         big = max(self.max_steps, getattr(self, "max_steps_big", 0) or 2 * self.max_steps)
         steps = big if building else self.max_steps    # several charts and a dashboard: more calls
@@ -2727,7 +3390,14 @@ class Agent:
         cap, used = steps, 0                           # the tool calls run (a hard limit: the settings' promise)
         unreadable = full = 0
         forced = force_tool = ledger_asked = unclear_asked = grain_asked = definition_asked = stage_asked = False
+        cut_asked = zero_asked = units_asked = written_run = shows_asked = False
         suspect_asked = records_asked = period_kept = map_asked = which_asked = buckets_asked = False
+        verdict_asked = cause_records_asked = reach_asked = fields_asked = where_asked = own_asked = False
+        repeated_asked = recurring_asked = trigger_asked = False
+        claimed_asked = False                          # (0.10.7) the chat's period said with no query run with it
+        self._period_sent_at = None
+        self.reach: dict[str, Any] = {}
+        self.simple_hinted = False                     # (0.10.7) the fastest way said once                # (0.10.7) what a failure reaches, said by system_links
         self.waiting_stage = None                      # the first stage off before the rows run (compare_groups)
         self.concentrated, self.scope_hinted = [], False   # where its change is; the logs scope said once
         self.ledger = self._new_ledger(question, history, building)
@@ -2741,6 +3411,8 @@ class Agent:
             at = text.rfind("(Now: ")
             messages[-1]["content"] = (text[:at] + plan + "\n\n" + text[at:]) if at >= 0 else f"{plan}\n\n{text}"
         i, plan_turns, compacted, last_said, timed_out = -1, 0, 0, False, False
+        repeats = 0                                    # (0.10.7) calls sent again unchanged in this answer
+        self._repeat_stopped = False
         budget, began = int(settings.get("agent.answer_seconds") or 0), time.time()
         while i + 1 < steps:                           # (a while: a turn that only kept the plan adds one)
             i += 1
@@ -2752,16 +3424,21 @@ class Agent:
                 # and no check sends it back any more (each would cost a turn): what one would send back is marked
                 # on the answer instead (the checks' second pass), and no tool call is made compulsory
                 looped = notes_asked = unclear_asked = nudged = announced = rules_asked = carry_asked = echoed = True
+                wrote_now = True
                 named_asked = tie_asked = numbers_asked = limit_asked = ledger_asked = stage_asked = future_asked = True
                 suspect_asked = records_asked = period_kept = map_asked = which_asked = buckets_asked = True
-                source_asked = keep_asked = repeat_asked = True
+                verdict_asked = cause_records_asked = reach_asked = fields_asked = where_asked = own_asked = True
+                repeated_asked = recurring_asked = trigger_asked = True
+                source_asked = keep_asked = repeat_asked = claimed_asked = True
                 grain_asked = definition_asked = count_asked = forced = action_asked = True
-            if (i >= steps - 2 or cap - used <= 2) and steps >= 4 and trace and not last_said:
+            deeper = self._deeper_open(trace)        # (0.10.7) the change behind the cause never looked up
+            if (i >= steps - (3 if deeper else 2) or cap - used <= (3 if deeper else 2)) and steps >= 4 and trace \
+                    and not last_said:
                 last_said = True                       # the answer before the calls run out (once: a plan-only turn
                 left = max(0, min(cap - used, steps - i))   # there moves the end by one)
                 messages.append({"role": "user", "content": (TIME_UP if timed_out else "") + LAST_CALLS.format(
                     n="One tool call is" if left == 1 else f"{left} tool calls are" if left else "No tool call is")
-                                 + self._plan_note()})
+                                 + (DEEPER_LAST if deeper and left >= 2 else "") + self._plan_note()})
             choice, force_tool = ("required" if force_tool else None), False
             try:
                 msg = self.llm.chat(messages, tools=specs, max_tokens=self._answer_tokens(short=bool(unreadable)),
@@ -2783,17 +3460,31 @@ class Agent:
                         messages.append({"role": "user", "content": "(The conversation was shortened: older results "
                                          "were cut." + self._plan_note() + ")"})
                     continue
-                if not BAD_TOOL_CALL.search(str(ex)) or unreadable >= 2:
-                    if unreadable and trace:           # it did things before: say what, not an error
+                if not BAD_TOOL_CALL.search(str(ex)) or unreadable >= 1:   # (0.10.7) once: the same context
+                    self.unreadable_calls = unreadable + 1 if BAD_TOOL_CALL.search(str(ex)) else 0   # gave four
+                    if unreadable and trace:           # unreadable calls of three minutes each, then nothing
                         return self._out_of_steps(messages, trace), trace
                     raise
                 unreadable += 1                        # the server could not read the model's tool call
                 log.info("supagent: unreadable tool call sent back (%s)", str(ex)[:200])
-                messages.append({"role": "user", "content": UNREADABLE_CALL})
+                messages.append({"role": "user", "content": UNREADABLE_CALL if self._queried(trace) else
+                                 UNREADABLE_NO_DATA})
                 continue
             add_usage(self.usage, self.llm.last_usage)
-            messages.append({k: v for k, v in msg.items() if k in ("role", "content", "tool_calls")})
+            kept = ("role", "content", "tool_calls")
+            if msg.get("tool_calls") and settings.get("llm.keep_reasoning"):   # (0.10.8) a reasoning model's plan
+                kept += ("reasoning_content", "reasoning")                      # kept from one call to the next
+            messages.append({k: v for k, v in msg.items() if k in kept})
             calls = msg.get("tool_calls") or []
+            if not calls and nudged and not written_run and not trace:
+                written = self._written_call(msg.get("content") or "")
+                if written is not None:                # (0.10.7) once: the query written in the answer, with a result
+                    written_run = True                 # no query gave, even after the check: it is run, and the
+                    calls = [written]                  # answer is written from its rows
+                    messages[-1] = {"role": "assistant", "content": "", "tool_calls": calls}
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: the query written in the answer is run: %s",
+                             written["function"]["arguments"][:200])
             if not calls:
                 answer = re.sub(r"<think>.*?</think>", "", msg.get("content") or "", flags=re.S).strip()
                 cut = repeating(answer)
@@ -2802,16 +3493,62 @@ class Agent:
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
                     log.info("supagent: answer sent back (repeats itself, %d characters)", len(answer))
                     messages[-1]["content"] = answer[:cut]
+                    if choice == "required" and not gave_results(trace):   # (0.10.7) a tool was compulsory and the
+                        force_tool = True              # model wrote in circles instead: the call, not "the results
+                        messages.append({"role": "user", "content": LOOP_CALL_NUDGE})   # above", which are none
+                        continue
                     messages.append({"role": "user", "content": LOOP_NUDGE})
                     continue
                 if cut is not None:                    # again: cut there, and said
                     answer = answer[:cut].rstrip()
+                if len(answer) >= WRITTEN_KEPT and _has_data(answer) and not asks_back(answer) and \
+                        not announces_answer(answer):  # (0.10.7) the latest answer written: given, if the calls run
+                    self._last_written = answer         # out before the one a check asked for is written
+                if not cut_asked and cut_short(answer, getattr(self.llm, "last_finish", None)):
+                    cut_asked = True                   # (0.10.7) once: "... are in **Observ" (13 tokens) was the
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1   # whole answer
+                    log.info("supagent: answer sent back (stopped in the middle: %r)", answer[-60:])
+                    messages.append({"role": "user", "content": CUT_NUDGE if self._queried(trace) or
+                                     not _has_data(answer) else CUT_NO_DATA})
+                    continue
+                unfound = None if zero_asked or asks_back(answer) else \
+                    unfound_zero(answer, trace, getattr(self, "raw_question", None) or question)
+                if unfound:                            # (0.10.7) once: "0 errors" for a name no field holds
+                    zero_asked = True
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (a zero for a name no field holds: %s)", unfound[0])
+                    messages.append({"role": "user", "content": UNFOUND_ZERO_NUDGE.format(
+                        value=unfound[0], field=unfound[1], table=unfound[2])})
+                    continue
+                if not zero_asked and absent_zero(answer):
+                    zero_asked = True                  # (0.10.7) once: "0 errors" for a service whose logs no index
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1   # holds, said in the same answer
+                    log.info("supagent: answer sent back (a zero for what the data holds nothing of)")
+                    messages.append({"role": "user", "content": ABSENT_ZERO_NUDGE})
+                    continue
+                if not shows_asked and not self._queried(trace) and not asks_back(answer) and \
+                        SHOW_ASKED.search(getattr(self, "raw_question", None) or question or ""):
+                    shows_asked = True                 # (0.10.7) once: "which metrics show it" answered from names
+                    if not forced and settings.get("agent.force_tool"):
+                        forced = force_tool = True     # the next step reads them
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (which metrics show it: none was read)")
+                    messages.append({"role": "user", "content": SHOW_NUDGE})
+                    continue
+                units = None if units_asked else binary_misread(answer, trace)
+                if units:                              # (0.10.7) once: "53.69 GiB" for bytes / 10^9
+                    units_asked = True
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (a binary unit with decimal factors)")
+                    messages.append({"role": "user", "content": units})
+                    continue
                 if before_check and len(trace) == before_check[1] and CHECK_TALK.search(answer or ""):
                     log.info("supagent: the reply to the no-tool check speaks of the check: the answer before it kept")
                     answer = before_check[0]           # (0.10.6) "No data query was needed: the definition was given":
                     #                                    the answer the user never saw, kept as it was
                 before_check = None
-                claimed = None if notes_asked else note_claim(answer, trace)
+                notes_on = notes_in_play(self._note_texts, trace)   # (0.10.7) not on a chat about metrics
+                claimed = None if notes_asked or not notes_on else note_claim(answer, trace)
                 if claimed:                            # once: "the note has been deleted" with no such call
                     notes_asked = True
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
@@ -2819,7 +3556,7 @@ class Agent:
                     messages.append({"role": "user", "content": NOTE_CLAIM_NUDGE.format(
                         what=claimed[0], tool=claimed[1], how=NOTE_HOW[claimed[1]])})
                     continue
-                if notes_asked and claimed is None and (again := note_claim(answer, trace)):
+                if notes_asked and notes_on and claimed is None and (again := note_claim(answer, trace)):
                     log.info("supagent: a note %s without %s again: the answer says it was not done", *again)
                     return NOTE_NOT_DONE[again[1]], trace     # said twice, not done: not shown as done
                 if getattr(self, "unclear", None) and not unclear_asked and not asks_back(answer):
@@ -2875,19 +3612,28 @@ class Agent:
                     messages.append({"role": "user", "content": ECHO_NUDGE.format(question=(question or "")[:300])})
                     continue
                 claims_run = bool(RESULT_CLAIM.search(answer or "")) and _setting_on("agent.claimed_query_check")
+                made_up: list[str] = []                # (0.10.7) names, times or figures the chat's results do not
+                if nudge in (NO_TOOL_NUDGE, NO_QUERY_NUDGE) and self.follow_up and previous and \
+                        settings.get("agent.check_numbers"):   # hold: "At what time was it?" after a MAX, answered
+                    made_up = self._ungrounded(answer, previous) or \
+                        self._invented(answer, previous + [{"role": "user", "content": question}])   # "14:00"
                 if nudge in (NO_TOOL_NUDGE, NO_QUERY_NUDGE) and self.follow_up and \
                         not getattr(self, "new_fields", None) and not getattr(self, "disputed", False) and \
                         not claims_run and \
-                        settings.get("agent.check_numbers") and previous and not self._ungrounded(answer, previous) \
-                        and not self._invented(answer, previous + [{"role": "user", "content": question}]):
+                        settings.get("agent.check_numbers") and previous and not made_up:
                     nudge = None                       # (never a "no such field" or a query written, not run, nor
                     #                                    names or times the previous answer does not hold)
                 if nudge:                              # once: an answer from the tools, not from the summary
                     nudged = True
                     if (nudge in (WRITTEN_SQL_NUDGE, SHOWN_SQL_NUDGE) or (nudge in (NO_TOOL_NUDGE, NO_QUERY_NUDGE) and
                                                          (self.asks_new or getattr(self, "new_fields", None) or
-                                                          getattr(self, "disputed", False) or claims_run))) \
-                            and not forced and settings.get("agent.force_tool"):
+                                                          getattr(self, "disputed", False) or claims_run or
+                                                          made_up)) or
+                        (nudge == NO_TOOL_NUDGE and (SYSTEM_ASKED.search(question or "") or   # (0.10.7) a question of
+                                                     ROUTE_ASKED.search(question or "")))) \
+                            and not forced and settings.get("agent.force_tool"):   # the map answered with no tool:
+                        #                                the map is its data ("which applications consume ...,
+                        #                                directly or through the mirror?" answered twice from the prompt)
                         forced = force_tool = True     # a query written, not run, or a follow-up that asks for
                         #                                another day, value or period: the next step runs one
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
@@ -2915,6 +3661,12 @@ class Agent:
                     log.info("supagent: answer sent back (announced step): %r", step)
                     messages.append({"role": "user", "content": ANNOUNCE_NUDGE.format(step=step)})
                     continue
+                if announced and not wrote_now and trace and len(answer) < 600 and announces_action(answer):
+                    wrote_now = True                   # (0.10.7) after the reminder, a step announced again was the
+                    again = self._found_now(messages)  # whole answer (M-0107R1: a dashboard found, then "Let
+                    if again:                          # me also check for any dashboards that might be related to
+                        log.info("supagent: a step announced again: the answer written from the results")
+                        answer = again                 # logistics or returns."): the answer, from the results
                 missed = self._unapplied(question, trace)      # every answer (a question back has no query)
                 if missed and not rules_asked:         # once: a rule of the team not applied
                     rules_asked = True
@@ -2970,10 +3722,13 @@ class Agent:
                     if not forced and not self._queried(trace) and settings.get("agent.force_tool"):
                         forced = force_tool = True     # no query ran: they can only come from one
                     continue
-                invented = None if forced or self._queried(trace) or asks_back(answer) else \
+                invented = None if forced or self._queried(trace) or gave_results(trace) or asks_back(answer) else \
                     self._invented(answer, messages[:asked_at] + [
                     m if m["role"] == "tool" else {"role": "assistant", "tool_calls": m["tool_calls"]}
                     for m in messages[asked_at:-1] if m["role"] == "tool" or m.get("tool_calls")])   # not its own words
+                # (0.10.7) an answer no tool result stands behind: on an answer built from the map or the dictionary,
+                # its headings ("**Routing layer**", "**Alerts**") were taken for names and the tool made compulsory
+                # sent the model writing in circles (seven times in the open runs, none an invented name)
                 if invented and settings.get("agent.force_tool"):    # once: names or times no tool gave
                     forced = force_tool = True
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
@@ -2997,7 +3752,8 @@ class Agent:
                     log.info("supagent: answer sent back (LIMIT %s read as a count)", read_as_count)
                     messages.append({"role": "user", "content": LIMIT_NUDGE.format(n=read_as_count)})
                     continue
-                gaps = None if ledger_asked or self.ledger is None or asks_back(answer) else self._ledger_gaps(answer)
+                gaps = None if ledger_asked or self.ledger is None or asks_back(answer) else \
+                    self._ledger_gaps(answer, trace)
                 if gaps:                               # once: tasks of the plan not done, findings not explained
                     ledger_asked = True
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
@@ -3011,9 +3767,17 @@ class Agent:
                     log.info("supagent: answer sent back (capacity blamed, the first stage off is %s)", stage)
                     messages.append({"role": "user", "content": STAGE_NUDGE.format(stage=stage)})
                     continue
+                if period_kept and not claimed_asked and self._claims_period(answer, trace):
+                    claimed_asked = True               # (0.10.7) once: sent back for the chat's period, no query run
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1   # since, and the answer says it counted
+                    log.info("supagent: answer sent back (the chat's period said, no query run with it)")   # within it
+                    messages.append({"role": "user", "content": PERIOD_CLAIMED_NUDGE})
+                    forced = force_tool = True         # the next step runs the query
+                    continue
                 lost = None if period_kept or asks_back(answer) else self._period_lost(trace)
                 if lost:                               # once: a follow-up reading every day of a time table
                     period_kept = True
+                    self._period_sent_at = len(trace)
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
                     log.info("supagent: answer sent back (the chat's period lost on %s)", lost[0])
                     messages.append({"role": "user", "content": PERIOD_KEPT_NUDGE.format(
@@ -3022,6 +3786,7 @@ class Agent:
                 widened = None if period_kept or asks_back(answer) else self._period_widened(question, trace)
                 if widened:                            # once: a follow-up reading days outside the chat's period
                     period_kept = True
+                    self._period_sent_at = len(trace)
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
                     log.info("supagent: answer sent back (the chat's period widened: from %s)", widened)
                     messages.append({"role": "user", "content": PERIOD_WIDENED_NUDGE.format(
@@ -3041,6 +3806,54 @@ class Agent:
                     messages.append({"role": "user", "content": WHICH_NUDGE.format(
                         noun=which[0], field=which[1], n=len(which[2]), values=", ".join(which[2][:6]))})
                     continue
+                named_fields = [] if fields_asked or asks_back(answer) else \
+                    self._fields_named(getattr(self, "raw_question", None) or question, trace)
+                if named_fields:                       # (0.10.7) once: "were relaunched" counted with another
+                    fields_asked = True                # field's value, a field RELAUNCHED never read
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (a field the question names, never read: %s)", named_fields)
+                    messages.append({"role": "user", "content": FIELD_NAMED_NUDGE.format(
+                        fields=", ".join(named_fields[:3]))})
+                    continue
+                own = None if own_asked or asks_back(answer) else \
+                    self._own_logs_unread(getattr(self, "raw_question", None) or question, trace)
+                if own:                                # (0.10.7) once: who did it, its servers' own logs never read
+                    own_asked = True
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (who did it: its servers' own records not read: %s)", own[1])
+                    messages.append({"role": "user", "content": OWN_LOGS_NUDGE.format(part=own[0], places=own[1])})
+                    if not forced and settings.get("agent.force_tool"):
+                        forced = force_tool = True     # the next step reads them
+                    continue
+                where = None if where_asked or asks_back(answer) else self._where_unread(question, answer, trace)
+                if where:                              # (0.10.7) once: the failures blamed, where they ran never read
+                    where_asked = True
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (where the rows ran, never read: %s)", where)
+                    messages.append({"role": "user", "content": WHERE_NUDGE.format(tables=where[0], fields=where[1])})
+                    if not forced and settings.get("agent.force_tool"):
+                        forced = force_tool = True     # the next step reads it
+                    continue
+                unread = None if cause_records_asked or asks_back(answer) or not (
+                    self._asks_open(question) or CAUSE_ASKED.search(question or "")) else \
+                    self._unlooked(answer, trace)
+                if unread:                             # (0.10.7) once: a cause blamed, its records never looked up
+                    cause_records_asked = True
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (a cause whose records were not looked up: %s)", unread)
+                    messages.append({"role": "user", "content": UNLOOKED_NUDGE.format(names=", ".join(unread))})
+                    if not forced and settings.get("agent.force_tool"):
+                        forced = force_tool = True     # the next step looks them up
+                    continue
+                unreached = [] if reach_asked or asks_back(answer) else self._unreached(question, answer)
+                if unreached:                          # (0.10.7) once: "what is affected?" answered short of what
+                    reach_asked = True                 # system_links said the failure reaches
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (parts a failure reaches not said: %s)", unreached[:6])
+                    more = f"; and {len(unreached) - REACH_SHOWN} more" if len(unreached) > REACH_SHOWN else ""
+                    messages.append({"role": "user", "content": REACH_NUDGE.format(
+                        lines="; ".join(unreached[:REACH_SHOWN]) + more)})
+                    continue
                 unsaid = None if records_asked or asks_back(answer) else changes_unsaid(question, answer, trace)
                 if unsaid:                             # once: "what changed?" answered without the changes found
                     records_asked = True
@@ -3054,12 +3867,61 @@ class Agent:
                     log.info("supagent: answer sent back (a suspect confirmed by its timing)")
                     messages.append({"role": "user", "content": SUSPECT_NUDGE})
                     continue
+                if not verdict_asked and not asks_back(answer) and no_data_buried(answer):
+                    verdict_asked = True               # (0.10.7) once: "not collected" said last, after the search
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (the absence of data said last)")
+                    messages.append({"role": "user", "content": NOT_THERE_NUDGE})
+                    continue
+                unit = None if recurring_asked or asks_back(answer) else \
+                    recurrence_unsaid(getattr(self, "raw_question", None) or question, answer)
+                if unit:                               # (0.10.7) once: "it warns every night: related?" answered
+                    recurring_asked = True             # from the incident's own figures, the nights never compared
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (a recurrence asked about, its other %ss never said)", unit)
+                    messages.append({"role": "user", "content": RECURRING_NUDGE.format(unit=unit)})
+                    continue
+                latent = None if trigger_asked or asks_back(answer) or not self._investigating(question) else \
+                    latent_unexplained(getattr(self, "raw_question", None) or question, answer, now().year)
+                if latent:                             # (0.10.7) once: a change of the evening before blamed for
+                    trigger_asked = True               # errors of the morning, nothing said of what began then
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (a change made %d hours before the effect, its trigger not "
+                             "said)", latent[2])
+                    messages.append({"role": "user", "content": TRIGGER_NUDGE.format(
+                        change=latent[0], onset=latent[1], hours=latent[2])})
+                    if not forced and settings.get("agent.force_tool"):
+                        forced = force_tool = True     # the next step looks
+                    continue
+                if not verdict_asked and not asks_back(answer) and verdict_missing(question, answer):
+                    verdict_asked = True               # (0.10.7) once: "did X play a role?" answered with the whole
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1   # investigation again, its no at the end
+                    log.info("supagent: answer sent back (a yes or no asked, not said first)")
+                    messages.append({"role": "user", "content": VERDICT_NUDGE})
+                    continue
+                prev_said = getattr(self, "prev_answer", "")
+                again = asks_back(answer) and asks_back(prev_said) and question.strip().endswith("?")
+                if not repeated_asked and (not asks_back(answer) or again) and \
+                        repeats_previous(answer, prev_said, REPEATED_BACK if again else 0):   # (0.10.7) a question
+                    #                                          back asked again when the user asked a new question
+                    repeated_asked = True              # (0.10.7) once: the previous answer written again for a
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1   # question that asks something else
+                    log.info("supagent: answer sent back (the previous answer written again)")
+                    messages.append({"role": "user", "content": REPEATED_NUDGE.format(question=question[:300])})
+                    continue
                 bucket = None if grain_asked else self._time_from_bucket(question, answer, trace)
                 if bucket:                             # once: "at 04:00" read from hourly buckets
                     grain_asked = True
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
                     log.info("supagent: answer sent back (a time read from %s buckets: %s)", bucket[1], bucket[0])
                     messages.append({"role": "user", "content": GRAIN_NUDGE.format(time=bucket[0], grain=bucket[1])})
+                    continue
+                moment = None if grain_asked else self._value_at_moment(question, trace)
+                if moment:                             # (0.10.7) once: a value at a moment read as its hour's mean
+                    grain_asked = True
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (a value at %s read from %s buckets)", moment[0], moment[1])
+                    messages.append({"role": "user", "content": MOMENT_NUDGE.format(time=moment[0], grain=moment[1])})
                     continue
                 differs = None if definition_asked else (self._definition_unlinked(question, trace) or
                                                          self._definition_differs(question, trace))
@@ -3077,10 +3939,11 @@ class Agent:
                     messages.append({"role": "user", "content": COUNT_NUDGE})
                     continue
                 if nudged or announced or numbers_asked or rules_asked or count_asked or looped or limit_asked or \
-                        notes_asked or named_asked or carry_asked or tie_asked:
+                        notes_asked or named_asked or carry_asked or tie_asked or repeated_asked or \
+                        self.usage.get("nudges"):     # (0.10.7) after any check of this answer (the units' too)
                     answer = without_correction_lead(without_apology(answer))   # written again after a check the
                     #                                                                user never saw
-                answer = without_preamble(answer)
+                answer = question_last(without_preamble(answer))
                 missing = [c for c in charts if c.splitlines()[-1].strip() not in answer]
                 if missing:
                     answer += "".join(f"\n\n```\n{c}\n```" for c in missing)
@@ -3122,7 +3985,8 @@ class Agent:
                     note += LOOP_NOTE
                 answer = restore_earlier(answer, messages, asked_at)   # "the answer above": the answer above, kept
                 self._keep_ledger(trace)
-                return (answer + claims_check(answer, trace) + honesty_note(answer, trace) + note +
+                return (answer + claims_check(answer, trace, notes_in_play(self._note_texts, trace)) +
+                        honesty_note(answer, trace) + note +
                         self._other_reading(answer, trace)), trace
             for at, tc in enumerate(calls):
                 self._check_stop()
@@ -3168,18 +4032,25 @@ class Agent:
                 elif call_key in failed:
                     content = (f"You already made exactly this call and it failed: {failed[call_key][:600]}. "
                                "Change the arguments as the error says, or answer the user.")
-                elif (name, call_table(args)) in stopped and call_table(args):
+                elif (name, call_table(args)) in stopped and call_table(args) and \
+                        not fixes_named(stopped[(name, call_table(args))], args):
                     err = stopped[(name, call_table(args))]
                     content = SAME_ERROR_BLOCK.format(n=SAME_ERROR_STOP_AT, tool=name, table=call_table(args),
                                                       error=err[:200])
                     refused = content
                 elif call_key in done or call_key in saved_calls:
                     content = REPEAT_NOTE
+                    repeats += 1
+                    if repeats >= REPEATS_STOP:        # (0.10.7) the same call a third time: one more turn, then
+                        content = REPEAT_STOP_NOTE     # the answer (no "calls used up" said: they were not)
+                        steps = min(steps, i + 2)
+                        self._repeat_stopped = True
                 else:
-                    refused = self._refusal(name, args)
+                    refused = self._refusal(name, args) or self._lookup_cap(name, trace)
                     again = call_key in self.refused
                     if refused and again and "(not run: another database)" not in refused \
-                            and "(not run: confirmation)" not in refused and "(not run: one query per day)" not in refused:
+                            and "(not run: confirmation)" not in refused and "(not run: one query per day)" not in refused \
+                            and "(not run: AND before OR, the alternatives" not in refused:   # (0.10.7) its meaning plain
                         refused = None                 # sent again unchanged: the period, a rule, a count may be meant
                     if refused:                        # another database: never (the question did not name it)
                         if again:                      # a third time: "you already made this call and it failed"
@@ -3197,7 +4068,8 @@ class Agent:
                         failed[call_key] = content
                     step["status"] = "error"
                     # the same error again (data tools: a chart's config refused lists other points each time)
-                    if called in QUERY_TOOLS and not content.startswith("tool error (not run: the same error"):
+                    if called in QUERY_TOOLS and not content.startswith("tool error (not run: the same error") \
+                            and not content.startswith("You already made exactly this call"):   # (0.10.7) not run
                         sig = error_signature(called, args, content)
                         same_errors[sig] = same_errors.get(sig, 0) + 1
                         m_err = re.search(r'"error":\s*"((?:[^"\\]|\\.)*)"', content)
@@ -3219,17 +4091,17 @@ class Agent:
                         learn_from_call(self.scope, called, args)
                     if called == "send_email" and '"sent_to"' in content:
                         emailed.append(content[:300])
-                    if content is not REPEAT_NOTE:
+                    if content is not REPEAT_NOTE and content is not REPEAT_STOP_NOTE:
                         if called in SAVING_TOOLS:     # something changed: reading it again is not a repeat,
                             done.clear()               # saving the very same thing again is
                             saved_calls.add(call_key)
                         else:
                             done.add(call_key)
-                if called in FINDING_TOOLS and step["status"] == "done" and content is not REPEAT_NOTE and \
+                if called in FINDING_TOOLS and step["status"] == "done" and content not in (REPEAT_NOTE, REPEAT_STOP_NOTE) and \
                         getattr(self, "support", None) is not None:
                     self.support.add_finding(str(content)[:20000])   # what they found (a switch, an alert's port):
                     #                                           the next queries may filter on it (0.9.5: refused as unasked)
-                if called in RESULT_TOOLS and step["status"] == "done" and content is not REPEAT_NOTE:
+                if called in RESULT_TOOLS and step["status"] == "done" and content not in (REPEAT_NOTE, REPEAT_STOP_NOTE):
                     step["full"] = content               # for the page, never sent to the model whole
                     if getattr(self, "support", None) is not None:   # the 3 servers found: the next queries
                         req = args.get("request") if isinstance(args.get("request"), dict) else args
@@ -3244,6 +4116,10 @@ class Agent:
                 notes: list[str] = []                  # the system's own notes: after the result, never cut with it
                 if same_note:
                     notes.append(same_note)
+                if used == SIMPLE_CALLS and not getattr(self, "simple_hinted", False) and \
+                        getattr(self, "ledger", None) is None and not self._investigating(question):
+                    self.simple_hinted = True          # (0.10.7) once: a simple question's fifth call
+                    notes.append(SIMPLE_NOTE)
                 inputs_logs = None
                 if called == "compare_groups" and step["status"] == "done" and getattr(self, "waiting_stage", None) \
                         is None and self._investigating(question):   # (the question's own comparison: the first)
@@ -3278,6 +4154,14 @@ class Agent:
                     if self.ledger.tasks and self.ledger.calls_since_update >= REMIND_EVERY:
                         self.ledger.calls_since_update = 0
                         notes.append("\n" + self.ledger.reminder())
+                if called == "system_links" and step.get("status") == "done":
+                    self._keep_reach(content)          # (0.10.7) what a failure reaches: the answer is checked on it
+                if called == "execute_sql" and step.get("status") == "done":
+                    from supagent.knowledge.sqllint import per_part_note
+
+                    part_note = per_part_note(question, args, content)   # (0.10.8) which part most: rows per part
+                    if part_note:
+                        notes.append(part_note)
                 limit = TOOL_CHARS.get(name, MAX_TOOL_CHARS)
                 room = max(limit // 2, limit - sum(len(n) for n in notes))
                 if len(content) > room:
@@ -3306,9 +4190,11 @@ class Agent:
         """No calls left: the LLM says, without tools, what was done (what is saved, with its links) and
         what remains, instead of an answer that only says it stopped."""
         given = self._given(messages)
-        messages.append({"role": "user", "content": OUT_OF_STEPS + self._plan_note()})
+        asked = str(getattr(self, "question", "") or "")      # (0.10.7) a yes or no asked: said first there too
+        first = VERDICT_FIRST if SUSPECT_ASKED.search(asked) and YES_NO_ASKED.search(asked) else ""
+        messages.append({"role": "user", "content": OUT_OF_STEPS + first + self._plan_note()})
         try:
-            msg = self.llm.chat(messages, tools=None, max_tokens=self._answer_tokens())
+            msg = self._plain(messages, self._answer_tokens(short=bool(getattr(self, "unreadable_calls", 0))))
             add_usage(self.usage, self.llm.last_usage)
             text = re.sub(r"<think>.*?</think>", "", msg.get("content") or "", flags=re.S).strip()
             # a call written as text instead of a summary ("<tool_call><function=execute_sql>..."): not shown
@@ -3320,19 +4206,144 @@ class Agent:
         if cut is not None:
             text = text[:cut].rstrip()
         text = without_preamble(text)
+        if announces_answer(text) or (len(text) < 800 and announces_action(text)):
+            again = self._write_now(messages, text)    # (0.10.7) only "let me write the final answer" or "let me
+                                                       # verify ...": asked once more, else what the plan found
+            text, cut = (again, None) if again and not announces_answer(again) else ("", None)
+        if getattr(self, "_last_written", "") and (not text or (len(text) < 800 and (
+                announces_action(text) or STEP_ONLY.match(text)))):
+            text = self._last_written                  # (0.10.7) nothing written at the end, or a step announced only
+            #                                            ("Let me also get the max memory in GiB:"): the answer written
+            #                                            before a check sent it back, rather than a raw result
         found = self._ledger_findings() if not text or (announces_action(text) and len(text) < 800) else ""
         if found:                                      # nothing written, or only "let me check ...": what the
             text = found                               # work found, from its plan's notes, rather than nothing
         if not text:
             got = self._empty_fallback(trace)          # what the queries gave, rather than nothing
+            why = (UNREADABLE_STOP if getattr(self, "unreadable_calls", 0) else
+                   "(Stopped: the tool calls of one answer were used up; ask a narrower question.)")
             if got:
-                return got + self._marks(got, trace) + ("\n\n(Stopped: the tool calls of one answer were used up; "
-                                                         "ask a narrower question.)")
-            return "(stopped after too many tool calls: ask a narrower question)"
+                return got + self._marks(got, trace) + "\n\n" + why
+            return why
         if self.rich:
             text = local_links(text)
-        return (text + claims_check(text, trace) + self._marks(text, trace, given=given) +
-                (LOOP_NOTE if cut is not None else "") + "\n\n(Stopped: the tool calls of one answer were used up.)")
+        stopped = "" if getattr(self, "_repeat_stopped", False) else \
+            "\n\n(Stopped: the tool calls of one answer were used up.)"   # (0.10.7) a repeat stop: not said
+        texts = getattr(self, "_note_texts", None) or [str(getattr(self, "question", "") or "")]
+        return (text + claims_check(text, trace, notes_in_play(texts, trace)) + self._marks(text, trace, given=given) +
+                (LOOP_NOTE if cut is not None else "") + stopped)
+
+    def _lookup_cap(self, name: str, trace: list[dict]) -> str | None:
+        """(0.10.7) The fastest way for a question that is no investigation: the knowledge searched once, the
+        dictionary read twice before a query ("How many payment authorizations ended in an error?": three
+        describe_data and two search_knowledge before the query the data block had named, over the question's
+        budget)."""
+        if name not in ("search_knowledge", "describe_data", "list_databases") or \
+                self._investigating(getattr(self, "raw_question", None) or getattr(self, "question", "") or ""):
+            return None
+        done = [t.get("called") or t["tool"] for t in trace if t.get("status") == "done"]
+        if name == "list_databases" and "describe_data" in done and not set(done) & set(QUERY_TOOLS) and \
+                not getattr(self, "_listed_refused", False):   # (0.10.7) once: the databases are in the reads
+            self._listed_refused = True                # (a count's answer listed them, then queried the logs)
+            return LISTED_ENOUGH
+        if name == "search_knowledge" and any((t.get("called") or t["tool"]) == "search_knowledge" and
+                                              t.get("status") == "done" and not found_nothing(t) for t in trace):
+            return SEARCH_ONCE                          # (0.10.7) a search that found nothing used nothing up
+        if name == "describe_data" and done.count("describe_data") >= 2 and not set(done) & set(QUERY_TOOLS):
+            return DESCRIBED_ENOUGH
+        return None
+
+    def _written_call(self, content: str) -> dict | None:
+        """(0.10.7) The query an answer wrote out with a result no query gave ("```sql SELECT COUNT(*) ...``` | 12 |"),
+        as a call of execute_sql on the database of its table: the one of an earlier query of the chat on that table,
+        else the only one the data dictionary knows it in. None when it shows no result or its database is unknown."""
+        text = re.sub(r"<think>.*?</think>", "", content or "", flags=re.S)
+        if "execute_sql" not in (getattr(self, "names", None) or ()) or \
+                not (_has_data(text) or CLAIMED_RESULT.search(text)):
+            return None
+        m = WRITTEN_BLOCK.search(text)
+        if not m:
+            return None
+        sql = m.group(1).strip().rstrip(";").strip()
+        table = re.search(r'\bfrom\s+"?([\w.@*\-]+)"?', sql, re.I)
+        db_id = self._database_of(table.group(1)) if table else None
+        if db_id is None:
+            return None
+        return {"id": "written-1", "type": "function", "function": {
+            "name": "execute_sql", "arguments": json.dumps({"request": {"database_id": db_id, "sql": sql}})}}
+
+    def _database_of(self, table: str) -> int | None:
+        """The database of a table: an earlier query of the chat on it, else the data dictionary (one database)."""
+        named = re.compile(rf"(?<![\w.@*\-]){re.escape(table)}(?![\w.@*\-])")
+        for h in reversed(getattr(self, "chat_history", None) or []):
+            for q in h.get("queries") or []:
+                if q.get("database_id") and named.search(str(q.get("query") or "")):
+                    return int(q["database_id"])
+        try:
+            from superset import db
+
+            from supagent.models import KObject, Source
+
+            rows = (db.session.query(Source.database_id).join(KObject, KObject.source_id == Source.id)
+                    .filter(KObject.kind.in_(("index", "metric")), KObject.name == table, KObject.gone_at.is_(None))
+                    .distinct().all())
+        except Exception:  # pylint: disable=broad-except
+            log.debug("supagent: the database of a written query not found", exc_info=True)
+            return None
+        return int(rows[0][0]) if len(rows) == 1 else None
+
+    def _plain(self, messages: list[dict], max_tokens: int | None) -> dict:
+        """(0.10.7) A step without tools that ends where the model would begin a tool call (its markup, which the
+        server could not read: the closing summary of an investigation failed so after its unreadable calls). A
+        model that reasons first (gpt-oss) keeps its tools declared with tool_choice "none": with its calls in the
+        conversation and no tool declared, it began one more call, the server dropped it, and the answer was empty
+        three times (the user got "the model wrote no text" and a raw result)."""
+        reasons = getattr(self.llm, "reasons", None)
+        specs = getattr(self, "_specs", None)
+        if specs and callable(reasons) and reasons():
+            try:
+                return self.llm.chat(messages, tools=specs, max_tokens=max_tokens, tool_choice="none")
+            except EmptyAnswer:
+                log.info("supagent: no text with the tools declared and none to call: asked again without them")
+        try:
+            return self.llm.chat(messages, tools=None, max_tokens=max_tokens, stop=list(TOOL_MARKUP))
+        except TypeError:                              # a client without stop
+            return self.llm.chat(messages, tools=None, max_tokens=max_tokens)
+
+    def _found_now(self, messages: list[dict]) -> str:
+        """(0.10.7) The answer asked once, without tools, from the results above, after a step was announced again:
+        the text, or "" (another announcement, nothing written, a failure: the announcement stays, marked)."""
+        self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+        messages.append({"role": "user", "content": WRITE_FOUND})
+        try:
+            msg = self._plain(messages, self._answer_tokens())
+            add_usage(self.usage, self.llm.last_usage)
+        except Exception:  # pylint: disable=broad-except
+            log.warning("supagent: the answer asked from the results failed", exc_info=True)
+            return ""
+        text = re.sub(r"<think>.*?</think>", "", msg.get("content") or "", flags=re.S).strip()
+        text = re.sub(r"<tool_call>.*?(</tool_call>|$)|<function=.*?(</function>|$)", "", text, flags=re.S).strip()
+        cut = repeating(text)
+        text = without_preamble(text[:cut].rstrip() if cut is not None else text)
+        if not text or announces_action(text) or announces_answer(text):
+            return ""
+        messages.append({"role": "assistant", "content": text})
+        return text
+
+    def _write_now(self, messages: list[dict], said: str) -> str:
+        """(0.10.7) The answer asked once more, without tools, when the last text only announced it."""
+        messages.append({"role": "assistant", "content": said})
+        messages.append({"role": "user", "content": WRITE_NOW})
+        try:
+            msg = self._plain(messages, self._answer_tokens())
+            add_usage(self.usage, self.llm.last_usage)
+        except Exception:  # pylint: disable=broad-except
+            log.warning("supagent: the answer asked once more failed", exc_info=True)
+            return ""
+        text = re.sub(r"<think>.*?</think>", "", msg.get("content") or "", flags=re.S).strip()
+        text = re.sub(r"<tool_call>.*?(</tool_call>|$)|<function=.*?(</function>|$)", "", text, flags=re.S).strip()
+        cut = repeating(text)
+        return without_preamble(text[:cut].rstrip() if cut is not None else text)
 
     def _answer_tokens(self, short: bool = False) -> int | None:
         """The most tokens one LLM answer may have (llm.max_answer_tokens; with thinking, four times as
@@ -3410,7 +4421,8 @@ class Agent:
                 if has_period(question, now().date()) or not carries_period(self.prev_queries, current):
                     return []
                 self.half_carried = True
-            return dropped(question, self.prev_queries, current)
+            return dropped(question, self.prev_queries, current, getattr(self, "prev_question", ""),
+                           getattr(self, "earlier_questions", None), getattr(self, "earlier_queries", None))
         except Exception:  # pylint: disable=broad-except   (never an answer lost for a check)
             from superset.extensions import db
 
@@ -3517,6 +4529,35 @@ class Agent:
             log.warning("supagent: the check of the chat's period failed", exc_info=True)
             return None
 
+    def _claims_period(self, answer: str, trace: list[dict]) -> bool:
+        """(0.10.7) Sent back for the chat's period, the model ran no query since and wrote that its figures are for
+        that period: a day of it (14 September, September 14, 2026-09-14) said in the answer (a follow-up counted
+        every day, then said "for the orders placed between 14 and 20 September")."""
+        at = getattr(self, "_period_sent_at", None)
+        if at is None or len(trace) > at or not getattr(self, "chat_period", None):
+            return False
+        try:
+            from supagent.knowledge.period import period_window
+
+            window = period_window(self.chat_period, now().date())
+            if window is None:
+                return False
+            start, end = window
+            days, d = [], start
+            while d < end and len(days) < 40:
+                days.append(d)
+                d += dt.timedelta(days=1)
+            text = answer or ""
+            for day in days:
+                month = day.strftime("%B")
+                if re.search(rf"\b{day.day}(?:st|nd|rd|th)?\s+(?:of\s+)?{month[:3]}\w*\b|\b{month[:3]}\w*\s+{day.day}\b|"
+                             rf"\b{day:%Y-%m-%d}\b", text, re.I):
+                    return True
+            return False
+        except Exception:  # pylint: disable=broad-except   (never an answer lost for a check)
+            log.warning("supagent: the period said by the answer not checked", exc_info=True)
+            return False
+
     def _period_widened(self, question: str, trace: list[dict]) -> str | None:
         """The first day this follow-up's queries read, when the chat asked about a period of days this message does
         not change and its queries read from days before it, none starting inside it (agent.period_window_check;
@@ -3616,6 +4657,18 @@ class Agent:
             return None
         return (", ".join(names[:6]), scope) if names else None
 
+    def _rows_changed(self, name: str, args: dict) -> str | None:
+        """(0.10.7) A follow-up's query keeps fewer rows than the answer it goes on from, by a condition nobody
+        asked (conditions.rows_changed). Not in an investigation (it looks wherever its findings lead)."""
+        raw = getattr(self, "raw_question", None)
+        if not raw or getattr(self, "open_question", False) or (getattr(self, "intent_text", None) or raw) == raw \
+                or self._investigating(raw):
+            return None
+        from supagent.knowledge.conditions import rows_changed
+
+        chat = "\n".join(str(h.get("content") or "") for h in getattr(self, "chat_history", None) or [])
+        return rows_changed(raw, chat, getattr(self, "prev_queries", None) or [], name, args)
+
     def _refusal(self, name: str, args: dict) -> str | None:
         """Why this call is sent back before it runs (once), every reason at once: it reads a table in
         another database than the one the question or its charts name, it misses the question's period,
@@ -3637,11 +4690,12 @@ class Agent:
                                       prior=getattr(self, "prev_queries", None),
                                       comparing=getattr(self, "open_question", False)),
                        self._day_by_day(name, args),
+                       self._active_in_window(name, args),
                        self._counted_samples(name, args, question),
                        None if getattr(self, "open_question", False) else
                        condition_refusal(getattr(self, "support", None), name, args)]
-            from supagent.knowledge.sqllint import (duplicate_refusal, extreme_refusal, or_and_refusal,
-                                                    outer_join_refusal, per_day_refusal)
+            from supagent.knowledge.sqllint import (duplicate_refusal, extreme_refusal, grouped_fixed_refusal,
+                                                    or_and_refusal, outer_join_refusal, per_day_refusal)
             from supagent.knowledge.values import refusal as value_refusal
 
             reasons.append(duplicate_refusal(name, args))      # two columns, one aggregate: a condition lost
@@ -3649,9 +4703,12 @@ class Agent:
             reasons.append(outer_join_refusal(name, args))     # a LEFT JOIN undone by a WHERE on its optional side
             reasons.append(per_day_refusal(question, name, args))   # an average per day as AVG over the records
             reasons.append(extreme_refusal(name, args))        # MAX(...) AS min_...: the other extreme
+            reasons.append(grouped_fixed_refusal(question, name, args))   # GROUP BY x WHERE x = one value
             if not getattr(self, "open_question", False):    # an investigation looks values up: none is news
                 reasons.append(value_refusal(name, args))      # a field compared with a value it does not have
+            reasons.append(self._names_only(name, args))       # (0.10.7) which metrics: their names
             reasons.append(self._fanout(name, args))           # a join that repeats the rows it sums
+            reasons.append(self._rows_changed(name, args))     # a follow-up on other rows than the answer before
             if name in ("generate_chart", "update_chart"):
                 req = args.get("request", args)
                 config = req.get("config") if isinstance(req, dict) else None
@@ -3675,6 +4732,145 @@ class Agent:
             except Exception:  # pylint: disable=broad-except
                 pass
             return None
+
+    def _own_logs_unread(self, question: str, trace: list[dict]) -> tuple[str, str] | None:
+        """(0.10.7) (the servers, where their records are) when the question asks who did something on a part of the
+        map ("which database user held the long transaction on the database?") and no query of the answer read the
+        tables that hold its servers' own records: the database's own log lines on its server name the user (traces
+        and the applications' logs do not)."""
+        if not WHO_ASKED.search(question or ""):
+            return None
+        try:
+            from supagent.knowledge.brief import server_places
+            from supagent.knowledge.rulecheck import _queries, _tables
+
+            places = server_places(question, logs_only=True)
+            if not places:
+                return None
+            read = {t.lower() for q in _queries(trace) for t in _tables(q or "")}
+            if any(t.lower() in read for _h, _f, ts in places for t in ts):
+                return None                            # one of them was read
+            hosts = sorted({h for h, _f, _ts in places})
+            said = "; ".join(f'field "{f}" of {", ".join(ts[:2])}' for _h, f, ts in places[:3])
+            return ", ".join(hosts), said
+        except Exception:  # pylint: disable=broad-except   (never an answer lost for a check)
+            from superset.extensions import db
+
+            db.session.rollback()
+            log.debug("supagent: the servers' own records: not checked", exc_info=True)
+            return None
+
+    def _where_unread(self, question: str, answer: str, trace: list[dict]) -> tuple[str, str] | None:
+        """(0.10.7) (the tables, their place fields) when an investigation read tables whose rows say where each ran (a
+        server, a host, a node, a pod) and no query read any of those fields, nor does the answer name one of their
+        values: "Why was the official report late?" blamed three out-of-memory kills of its batch, never saying the
+        server they ran on (the batch table's SERVER, never read)."""
+        if not self._investigating(question):          # (0.10.7) the question itself: "How many times were the pods
+            return None                                # killed?" after the investigation is a count, not where they ran
+        try:
+            from superset.extensions import db
+
+            from supagent.knowledge.rulecheck import _queries, _tables
+            from supagent.models import KObject
+
+            qs = [q for q in _queries(trace) if q and re.search(r"\bSELECT\b", q, re.I)]
+            if not qs:
+                return None
+            tables = set().union(*[_tables(q) for q in qs])
+            said, low = " ".join(qs).lower(), (answer or "").lower()
+            places: dict[str, list[str]] = {}
+            for name, parent, stats in (db.session.query(KObject.name, KObject.parent, KObject.stats).filter(
+                    KObject.kind == "field", KObject.parent.in_(sorted(tables)), KObject.gone_at.is_(None)).limit(2000)):
+                if not PLACE_FIELD.search(name):
+                    continue
+                if name.lower() in said:
+                    return None                        # where they ran was read
+                values = [str(v) for v in ((stats or {}).get("values") or []) if v not in (None, "")]
+                if any(len(v) >= 3 and re.search(r"(?<![\w-])" + re.escape(v.lower()) + r"(?![\w-])", low)
+                       for v in values):
+                    return None                        # the answer names one of them (read by another tool)
+                places.setdefault(parent, []).append(name)
+            if not places:
+                return None
+            return ", ".join(sorted(places)), ", ".join(sorted({f for fs in places.values() for f in fs})[:4])
+        except Exception:  # pylint: disable=broad-except   (never an answer lost for a check)
+            from superset.extensions import db
+
+            db.session.rollback()
+            log.debug("supagent: where the rows ran: not checked", exc_info=True)
+            return None
+
+    def _fields_named(self, question: str, trace: list[dict]) -> list[str]:
+        """(0.10.7) The fields of the tables this answer's queries read that its question names (every word of the
+        field's name, or a one-word name of six letters or more) and no query read: "What share of the jobs were
+        relaunched?" counted with JOB_EXEC_TYPE = 'RERUN', the flag RELAUNCHED never read (carry.new_fields)."""
+        sqls = [q for q in (_call_query(t.get("args") or {}) for t in trace
+                            if t.get("status") == "done" and (t.get("called") or t.get("tool")) in QUERY_TOOLS)
+                if q and re.search(r"\bSELECT\b", q, re.I)]
+        if not sqls:
+            return []
+        try:
+            from supagent.knowledge.carry import new_fields
+
+            return new_fields(question, sqls)
+        except Exception:  # pylint: disable=broad-except   (never an answer lost for a check)
+            from superset.extensions import db
+
+            db.session.rollback()
+            log.debug("supagent: the fields a question names: not read", exc_info=True)
+            return []
+
+    def _keep_reach(self, content: str) -> None:
+        """(0.10.7) system_links' if_it_fails (what the failure of a server or a place reaches), by place."""
+        try:
+            res = json.loads(content)
+        except (TypeError, ValueError):
+            return
+        fails = res.get("if_it_fails") if isinstance(res, dict) else None
+        if isinstance(fails, dict):
+            self.reach = dict(getattr(self, "reach", None) or {})
+            self.reach.update({str(k): v for k, v in fails.items() if isinstance(v, dict)})
+
+    def _unreached(self, question: str, answer: str) -> list[str]:
+        """(0.10.7) The parts a failure reaches (system_links) that an answer on what it affects does not name."""
+        try:
+            from supagent.knowledge.leads import reach_unsaid
+
+            return reach_unsaid(question, answer, getattr(self, "reach", None))
+        except Exception:  # pylint: disable=broad-except   (never an answer lost for a check)
+            log.warning("supagent: the check of what a failure reaches failed", exc_info=True)
+            return []
+
+    def _unlooked(self, answer: str, trace: list[dict]) -> list[str]:
+        """(0.10.7) The parts the answer blames whose records it never looked up (knowledge.leads.unlooked)."""
+        try:
+            from supagent.knowledge.leads import unlooked
+
+            return unlooked(answer, trace, getattr(self, "intent_text", None) or getattr(self, "question", ""))
+        except Exception:  # pylint: disable=broad-except   (never an answer lost for a check)
+            from superset.extensions import db
+
+            db.session.rollback()
+            log.warning("supagent: the check of a cause's records failed", exc_info=True)
+            return []
+
+    def _names_only(self, name: str, args: dict | None = None) -> str | None:
+        """(0.10.7) "Which metrics compare the pods' memory with their limit?": names asked (WHICH_DATA_NOTE), and the
+        answer queried their values all the same (ten calls for a question of three: obs7dev). A query of values is
+        sent back; sent again unchanged, it runs. (A query written anew after the first refusal ran in the past: four
+        more queries, the answer over its budget; each new one is sent back now, NAMES_REFUSALS at most.)"""
+        if name not in ("execute_sql", "promql_query") or not getattr(self, "names_only", False):
+            return None
+        refused = getattr(self, "_names_refused", None)
+        if not isinstance(refused, list):
+            refused = self._names_refused = []
+        key = json.dumps(args or {}, sort_keys=True, default=str)
+        if key in refused or len(refused) >= NAMES_REFUSALS:
+            return None
+        refused.append(key)
+        return ("tool error (not run: names asked): the question asks which metrics or fields, not their values: "
+                "name them, with what each holds and the labels or fields that matter (the data block, "
+                "describe_data). If their values are needed to tell which ones, send this same call again unchanged.")
 
     def _day_by_day(self, name: str, args: dict) -> str | None:
         """The same query once per day: it differs from two earlier ones of this answer only by its dates (a
@@ -3942,6 +5138,11 @@ class Agent:
             found = unlinked(asked, _queries(trace))
             if found:
                 return found[0]["term"], found[0]["definition"], found[1]
+            from supagent.knowledge.definitions import widened
+
+            wider = widened(asked, _queries(trace), getattr(self, "intent_text", None))
+            if wider:                                  # (0.10.7) "the shipments dispatched" counted with the packed
+                return wider[0]["term"], wider[0]["definition"], wider[1]
             from supagent.knowledge.definitions import unlinked_share
 
             share = unlinked_share(asked, _queries(trace))     # "what share of those sales was refunded?"
@@ -3972,14 +5173,32 @@ class Agent:
         return None
 
     def _time_from_bucket(self, question: str, answer: str, trace: list[dict]) -> tuple[str, str] | None:
-        """A time of day asked and given from time buckets (knowledge.sqllint)."""
+        """A time of day asked and given from time buckets (knowledge.sqllint). (0.10.7) A follow-up answered with no
+        query of its own reads the queries of the answer before: "At what time was it?" after the day's highest
+        load by hour was answered "04:00", the hour's start (the peak: 04:26)."""
         try:
             from supagent.knowledge.rulecheck import _queries
             from supagent.knowledge.sqllint import time_from_bucket
 
-            return time_from_bucket(question, answer, _queries(trace))
+            queries = _queries(trace)
+            raw = getattr(self, "raw_question", None)
+            if not queries and raw and (getattr(self, "intent_text", None) or raw) != raw:
+                queries = list(getattr(self, "prev_queries", None) or [])
+            return time_from_bucket(question, answer, queries)
         except Exception:  # pylint: disable=broad-except   (never an answer lost for a check)
             log.warning("supagent: the time of the answer not checked", exc_info=True)
+            return None
+
+    def _value_at_moment(self, question: str, trace: list[dict]) -> tuple[str, str] | None:
+        """(0.10.7) A value asked at a time of day read from averages over hourly (or longer) buckets
+        (knowledge.sqllint.value_at_moment)."""
+        try:
+            from supagent.knowledge.rulecheck import _queries
+            from supagent.knowledge.sqllint import value_at_moment
+
+            return value_at_moment(question, _queries(trace))
+        except Exception:  # pylint: disable=broad-except   (never an answer lost for a check)
+            log.warning("supagent: the moment of the answer not checked", exc_info=True)
             return None
 
     def _ask_first(self, question: str, history: list[dict] | None) -> dict | None:
@@ -4041,18 +5260,51 @@ class Agent:
             lines.append("Not checked: " + "; ".join(name(t) for t in left[:6]) + ".")
         return "\n".join(lines)
 
+    def _deeper_open(self, trace: list[dict]) -> bool:
+        """(0.10.7) An investigation whose plan step on what changed behind the cause is open and whose records were
+        never looked up (records_about): the last calls go there first (an answer named the failing part and its
+        error, its calls spent on queries that failed, never what changed on that part: a deployment)."""
+        led = getattr(self, "ledger", None)
+        if led is None or not led.tasks:
+            return False
+        if not any(t.by == "system" and t.title.startswith("Deeper") for t in led.open()):
+            return False
+        return not any((t.get("called") or t.get("tool")) == "records_about" and t.get("status") == "done"
+                       for t in trace or [])
+
+    def _active_in_window(self, name: str, args: dict) -> str | None:
+        """(0.10.7) In an investigation, records with a start and an end are read by their overlap with the window
+        (knowledge.period.active_refusal)."""
+        if not getattr(self, "open_question", False) or getattr(self, "_active_told", False):
+            return None                                # once per answer: a call each time would eat its budget
+        try:
+            from supagent.knowledge.period import active_refusal
+
+            said = active_refusal(name, args)
+            self._active_told = bool(said)
+            return said
+        except Exception:  # pylint: disable=broad-except   (never a call lost for a check)
+            log.warning("supagent: the window of the records not checked", exc_info=True)
+            return None
+
     def _plan_note(self) -> str:
         if getattr(self, "ledger", None) is None or not self.ledger.tasks:
             return ""
         return "\nYour work plan (kept by the system):\n" + self.ledger.render(results=True, max_chars=2000)
 
-    def _ledger_gaps(self, answer: str) -> str:
+    def _ledger_gaps(self, answer: str, trace: list[dict] | None = None) -> str:
         """What the plan still lacks: the model's own tasks open with no result, the findings the answer does not
-        name (by the values they are concentrated on) and has not ruled out."""
+        name (by the values they are concentrated on) and has not ruled out. (0.10.7) The step "Deeper" is not asked
+        for once records_about ran: what it found, nothing included, is its result (an investigation sent back for it
+        after three lookups spent its calls looking for a table of changes the data has none of: main suite); a cause
+        blamed whose records were never looked up is the check of leads.unlooked."""
         led = self.ledger
-        gaps = [f"task {t.id} ({t.title[:100]}) has no result" for t in led.unworked() if t.by == "model"]
+        gaps = [f"task {t.id} ({t.title[:100]}) has no result" for t in led.unworked() if t.by == "model"
+                and not ANSWER_TASK.search(t.title or "")]    # (0.10.7) "Compile the final answer": the answer
         deeper = next((t for t in led.open() if t.by == "system" and t.title.startswith("Deeper")), None)
-        if deeper is not None and not NOTHING_WRONG.search((answer or "")[:800]):
+        looked = any((t.get("called") or t.get("tool")) == "records_about" and t.get("status") == "done"
+                     for t in trace or [])
+        if deeper is not None and not looked and not NOTHING_WRONG.search((answer or "")[:800]):
             gaps.append(f"task {deeper.id} (what changed behind the cause: a change, release, restart or maintenance "
                         "recorded before the effect began on the part you blame, or what it waits for upstream: "
                         "records_about with the names of the parts you blame and when it began) is open")

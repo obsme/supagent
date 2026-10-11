@@ -150,6 +150,23 @@ then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with t
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
 
+## Upgrade from 0.10.6.2 to 0.10.7
+
+The wheel on every host, then restart; nothing to run (tables v18; two new settings, `llm.reasoning_effort`, empty by
+default, and `llm.keep_reasoning`, off). The agent's answers made steady: questions on the System map's paths (the
+servers a part runs on, what a failure reaches, the routes from a part to another) go to the map first and name every
+part it gives; investigations read the records of the cause they blame, its servers' alerts included, and where its rows
+ran; a field the question names is read; a follow-up's new value or aggregate gets its own query; no zero is said for
+data that is not collected; a simple question is answered in a few calls; the System map's explanations that the AI
+wrote are said so. supagent adapts itself to the LLM it is given (press Test the LLM once: it says what it adapts),
+gpt-oss included. A wiki's pages are read through every way a page links to another, and "Pages" on each document lists
+what was read and what was not. Measured: held-out sets 185/200 right with 11 wrong unmarked (the rule's 190 and 4: not
+met), open sets 355/362 with 7 unmarked, with Qwen3.6-35B-A3B (llama.cpp); the held-out sets were used in the final fix
+loop at the owner's request (their failures fixed as classes, no question's text or value in the code), so their figures
+measure questions the last fixes were made against, not unseen ones; gpt-oss-120b not measured (a gpt-oss-20b probe:
+14/25 twice on an open investigation set where Qwen3.6 scores 22-24; the client issues it showed (the room to reason,
+typography, an empty final answer, an unreadable output) are fixed). INSTALL.txt, *From 0.10.6.2 to 0.10.7*.
+
 ## Upgrade from 0.10.6.1 to 0.10.6.2
 
 The wheel on every host, then restart; nothing to run (tables v18). A rejected value takes its proposed links and items
@@ -605,6 +622,23 @@ config wins over the environment.
 
 Reasoning models: `llm.thinking` (default off) sends `chat_template_kwargs.enable_thinking=false`
 (Qwen 3 and similar). If a gateway refuses that field, supagent stops sending it.
+
+**supagent adapts itself to the LLM** (0.10.7). *Test the LLM* (or `superset supagent test-llm`) profiles the
+server and the model with a few calls of made-up text, never your data: does the model reason before it answers
+(its reasoning counted in `max_tokens`), does a short answer come back empty, does the server take
+`reasoning_effort`, `chat_template_kwargs`, tool calls with `tool_choice` auto, required and none, how the model
+writes a name, its context. The profile is kept for every process (the web server's workers, the Celery workers),
+which use it from their first call: room to reason, `tool_choice` "auto" where "required" or "none" is refused, the
+fields the server takes. What the answers teach (a field refused, a reasoning seen) is kept too, and the nightly
+learning profiles the LLM again when it is a week old or the address or the model changed. The button says what
+supagent adapts ("nothing to adapt" for Qwen on llama.cpp).
+
+**gpt-oss** (gpt-oss-20b, gpt-oss-120b; vLLM, llama.cpp, a gateway): it always reasons (the harmony format's
+analysis channel), so each call gets room to reason, a short answer cut empty is asked again with more room, the
+harmony format is read when a server leaves it in the text, and names written with non-breaking hyphens or narrow
+spaces are made plain. Settings: `llm.model` as the endpoint lists it; `llm.reasoning_effort` `medium` (`high` for
+deeper investigations, slower; empty: the server's default); `llm.thinking` off; `llm.max_answer_tokens` 8192
+(16384 with `high`); `llm.temperature` as it is (0.2, what the agent was measured with).
 
 ## The daily learning
 
@@ -1922,7 +1956,12 @@ searchable by everyone who can open the Data dictionary: use a token that only r
 
 * **Confluence** (Data Center / Server: `/display/SPACE/...`, `/pages/viewpage.action?pageId=`, `/spaces/SPACE/...`;
   Cloud: `/wiki/spaces/...`): the page and the pages under it, breadth first, or a whole space, through the REST
-  API (the page's storage format, code macros and tables kept), up to the number of pages asked.
+  API (the page's storage format, code macros and tables kept), up to the number of pages asked. The pages its
+  links name are read too (0.10, 0.10.7), whichever way a link names them: by title in the storage format, by its
+  address on the same wiki (`/display/SPACE/Title`, `/spaces/SPACE/pages/ID`, `viewpage.action?pageId=` or
+  `?spaceKey=&title=`, a short link `/x/AbCd`), through the wiki's own URL as its API gives it (a wiki read through
+  another name or address), over http or https, with or without the port, by address or by the page's id in the
+  storage format. A link's full address is kept after its words when they do not say it.
 * **Bitbucket** (Data Center: `/projects/P/repos/R/browse/...`, or its clone address `/scm/P/R.git` (0.9.6.2); Cloud:
   `bitbucket.org/ws/repo/src/...` or `bitbucket.org/ws/repo.git`): the text
   files of a folder (Markdown, txt, rst, adoc, HTML, YAML, JSON, CSV, config, XML, SQL), README and docs first, each
@@ -1942,6 +1981,12 @@ searchable by everyone who can open the Data dictionary: use a token that only r
 page since 0.9.6.1, so that a changed page makes again its pieces only), each with the page's address, so the agent finds the passage a question needs and names its page; they go in the knowledge store when
 Superset's PostgreSQL has pgvector, pg_textsearch or pg_trgm (words, near spellings, meaning), else in the search of
 0.5. The table says how many pieces each document has in the search.
+
+**Pages** (0.10.7, on each document): every page read (its title and address, its space, its size, how many links
+and images it has), the pages not read and why (not readable: 404, 403, a sign-in page; no text; larger than
+`docs.max_kb`; a title matching `docs.skip_titles`; read by another document of the same site), and when the
+number of pages asked was reached, how many linked pages were left: raise it in *Edit* to read more of the site. A
+new address reads 200 pages at most by default (up to 5,000).
 
 ## The documents and the code, read (0.10)
 

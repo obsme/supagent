@@ -75,3 +75,16 @@ def test_a_left_join_condition_that_keeps_empty_rows_gets_the_inner_join_hint():
             "IS NULL on the right index of a LEFT JOIN. osagg joins indices on equal fields in aggregating queries")
     assert LEFT_WHERE.search(said) and "inner JOIN" in LEFT_WHERE_HINT and "IS NULL" in LEFT_WHERE_HINT
     assert "a list that misses keys gives a wrong total" in STEPS_HINT
+
+
+def test_a_refused_join_of_a_raw_index_gets_the_join_that_runs():
+    """(0.10.7, main suite M2-0107n) "the sales minus the refunds of those orders" written WITH a CTE joined to the
+    returns was refused ("JOIN on an OpenSearch table is not supported"), and with the rules' "one index per query"
+    the answer never tried the join that runs. That refusal now says the join that does run, and the rules too."""
+    from supagent.tools_superset import JOIN_HINT, JOIN_REFUSED, SQL_RULES
+
+    said = ("PushdownError: JOIN on an OpenSearch table is not supported: aggregate or filter each side in a subquery "
+            "first, e.g. SELECT ... FROM (SELECT k, COUNT(*) c FROM idx GROUP BY k) a JOIN (...) b ON ...")
+    assert JOIN_REFUSED.search(said) and JOIN_REFUSED.search("JOIN with a raw OpenSearch table is not supported")
+    assert "JOIN \"idx_b\" b ON a.\"KEY\" = b.\"KEY\"" in JOIN_HINT and "not WITH" in JOIN_HINT
+    assert "two joined on equal fields in an aggregating query" in SQL_RULES["osagg"]

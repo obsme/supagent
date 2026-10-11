@@ -134,7 +134,8 @@ def glossary_block(question: str, shown: set[str] | None = None) -> str:
     if not hits:
         return ""
     lines = ["\n\nThe team's words in this question (the catalog's glossary: use these meanings, the fields and "
-             "values they name):"]
+             "values they name; a term computed with the values its definition names, even where a wider rule of "
+             "the team names more):"]
     used = 0
     for t in hits:
         definition = t["definition"][:DEFINITION_CHARS] + ("..." if len(t["definition"]) > DEFINITION_CHARS else "")

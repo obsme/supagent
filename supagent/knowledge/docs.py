@@ -49,7 +49,7 @@ from collections import deque
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any, Callable
-from urllib.parse import parse_qs, quote, unquote, unquote_plus, urljoin, urlparse
+from urllib.parse import parse_qs, quote, unquote, unquote_plus, urljoin, urlparse, urlunparse
 
 import requests
 from superset import db
@@ -217,6 +217,38 @@ def _secret_maps(text: str) -> tuple[str, int]:
     return "\n".join(out), n
 MAX_CHANGES = 3000              # files changed between two reads of a repository at most (more: read in full)
 _VERIFY: contextvars.ContextVar[Any] = contextvars.ContextVar("supagent_doc_verify", default=True)
+# (0.10.7) what a reading left out, for the list of a document's pages: each page not read and why, and how many
+# pages its links led to that the document's limit (max_pages) left unread
+_READ_LOG: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("supagent_doc_read", default=None)
+NOT_READ_KEPT = 1000            # pages not read, said one by one at most
+READ_LOG_KEY = "docread:{}"     # supagent_meta: the last reading of a document (pages not read, limit reached)
+
+
+def _not_read(where: str, title: str, why: str) -> None:
+    got = _READ_LOG.get()
+    if got is not None:
+        got["not_read"] += 1
+        if len(got["skipped"]) < NOT_READ_KEPT:
+            got["skipped"].append({"url": str(where or "")[:500], "title": str(title or "")[:200], "why": why[:200]})
+
+
+def _left_unread(n: int) -> None:
+    got = _READ_LOG.get()
+    if got is not None:
+        got["left"] = max(0, int(n))
+
+
+def read_log(doc_id: int) -> dict[str, Any]:
+    """(0.10.7) The last reading of a document: {"at", "reader", "read", "max_pages", "limit_reached", "left",
+    "not_read", "skipped": [{"url", "title", "why"}]}; {} before its first reading with 0.10.7."""
+    from supagent.models import Meta
+
+    try:
+        row = db.session.get(Meta, READ_LOG_KEY.format(doc_id))
+        return json.loads(row.value) if row is not None and row.value else {}
+    except Exception:  # pylint: disable=broad-except   (an older or broken row: none)
+        db.session.rollback()
+        return {}
 HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")
 # where a site sends a reader that is not signed in (a redirect there: "the site asked to sign in")
 LOGIN = re.compile(r"(^|/)(login|log-in|logon|signin|sign-in|sso|saml2?|oauth2?|openid-connect|cas|adfs|idp)"
@@ -234,6 +266,9 @@ class _OutOfCalls(Exception):
 # --------------------------------------------------------------------------------------------- #
 # text of a page
 # --------------------------------------------------------------------------------------------- #
+LINK_SAID_CHARS = 300   # (0.10.7) the address of a link kept in the text when it is this long at most
+
+
 class _Text(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -242,6 +277,7 @@ class _Text(HTMLParser):
         self.title = ""
         self._skip = 0
         self._in_title = False
+        self._anchor: tuple[str, int] | None = None      # (0.10.7) the full address of the link being read
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in ("script", "style", "noscript", "svg", "nav", "footer"):
@@ -252,6 +288,8 @@ class _Text(HTMLParser):
             href = dict(attrs).get("href")
             if href:
                 self.links.append(href)
+                if href.startswith(("http://", "https://")) and len(href) <= LINK_SAID_CHARS and not self._skip:
+                    self._anchor = (href, len(self.parts))
         if tag in BLOCK_TAGS:
             self.parts.append("\n")
             if tag in HEADINGS and not self._skip:    # a heading stays one (0.9.6): the pieces are cut at sections
@@ -266,6 +304,11 @@ class _Text(HTMLParser):
             self._skip -= 1
         elif tag == "title":
             self._in_title = False
+        elif tag == "a" and self._anchor is not None:  # (0.10.7) a link's full address said after its text ("the
+            href, at = self._anchor                    # dashboard (https://...)"): what the page points to stays
+            self._anchor = None                        # in what is searched and read
+            if href not in "".join(self.parts[at:]):
+                self.parts.append(f" ({href})")
         if tag in BLOCK_TAGS:
             self.parts.append("\n")
 
@@ -292,6 +335,7 @@ class _Storage(_Text):
     def __init__(self) -> None:
         super().__init__()
         self.pages: list[tuple[str, str | None]] = []
+        self.ids: list[str] = []                         # (0.10.7) pages linked by their id (ri:content-entity)
         self.images: list[dict[str, str]] = []
         self.diagrams: list[dict[str, str]] = []
         self._link: dict[str, Any] | None = None
@@ -313,6 +357,11 @@ class _Storage(_Text):
             self._link["page"] = (a["ri:content-title"], a.get("ri:space-key") or None)
         elif tag in ("ac:plain-text-link-body", "ac:link-body") and self._link is not None:
             self._link["text"] = True
+        elif tag == "ri:url" and self._link is not None and self._image is None and a.get("ri:value"):
+            self._link["url"] = a["ri:value"]            # (0.10.7) a link by its full address
+            self.links.append(a["ri:value"])
+        elif tag == "ri:content-entity" and self._link is not None and str(a.get("ri:content-id") or "").isdigit():
+            self._link["id"] = a["ri:content-id"]        # (0.10.7) a link by the page's id
         elif tag == "ac:image":
             self._image = {"alt": a.get("ac:alt", ""), "title": a.get("ac:title", ""), "file": ""}
         elif tag in ("ri:attachment", "ri:url") and self._image is not None:
@@ -331,6 +380,10 @@ class _Storage(_Text):
                 self.pages.append(self._link["page"])
                 if not self._link["text"]:
                     self.parts.append(self._link["page"][0])     # the page's title is the link's text
+            if self._link.get("id"):
+                self.ids.append(self._link["id"])
+            if self._link.get("url") and not self._skip:
+                self.parts.append(f" ({self._link['url']})" if self._link["text"] else self._link["url"])
             self._link = None
         elif tag == "ac:image" and self._image is not None:
             img, self._image = self._image, None
@@ -395,7 +448,7 @@ def read_storage(xhtml: str) -> dict[str, Any]:
     p.feed(xhtml or "")
     p.close()
     return {"text": _lines(p.parts), "pages": list(dict.fromkeys(p.pages)), "links": list(dict.fromkeys(p.links)),
-            "images": p.images, "diagrams": p.diagrams}
+            "ids": list(dict.fromkeys(p.ids)), "images": p.images, "diagrams": p.diagrams}
 
 
 def _decode(body: bytes, ctype: str) -> str:
@@ -446,6 +499,15 @@ def origin(url: str) -> tuple[str, str, int] | None:
         return u.scheme, u.hostname.lower(), u.port or (443 if u.scheme == "https" else 80)
     except ValueError:                                # a port that is not a number
         return None
+
+
+def _same_site(a: str, b: str) -> bool:
+    """(0.10.7) Two addresses of one site: the same host and port, the default ports of http and https taken as one (a
+    link "http://wiki.example.com/..." written before the site moved to https, "https://wiki.example.com:443/...")."""
+    oa, ob = origin(a), origin(b)
+    if oa is None or ob is None or oa[1] != ob[1]:
+        return False
+    return oa[2] == ob[2] or (oa[2] in (80, 443) and ob[2] in (80, 443))
 
 
 def _where(url: str) -> str:
@@ -809,10 +871,18 @@ def fetch(url: str, sign: SignIn | None = None) -> tuple[str, str, list[str]]:
 Pages = list[tuple[str, str, str]]
 
 
+def _on_site(link: str, start: str) -> str:
+    """(0.10.7) A link of the site written with the start's scheme and host (an "http://" link of an https site, its
+    host in capitals, its default port): the sign-in goes with it, and one page is read once."""
+    s, u = urlparse(start), urlparse(link)
+    return urlunparse((s.scheme, s.netloc, u.path or "/", u.params, u.query, ""))
+
+
 def _read_web(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
-    """A page, then the pages under the same address it links to, up to max_pages."""
+    """A page, then the pages under the same address it links to, up to max_pages. (0.10.7) "Under the same address":
+    the same site (http or https, its default port or none) and a path under the start's folder."""
     start = doc.url or ""
-    base = start.rsplit("/", 1)[0] + "/"
+    folder = urlparse(start).path.rsplit("/", 1)[0] + "/"
     todo, seen, pages = [start], set(), []
     skipped, skip = 0, _skip_title()
     while todo and len(pages) < _max_pages(doc):
@@ -827,15 +897,21 @@ def _read_web(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
                 raise
             skipped += 1                               # (0.10.6.1) a page it links to that cannot be read (404,
             log.info("supagent: document %s: a page not read (%s): %s", doc.id, _where(url), str(ex)[:200])
+            _not_read(_where(url), "", f"not read: {str(ex)[:150]}")
             continue                                   # 403, not text, too large): skipped, the others read
         if len(seen) > 1 and skip is not None and skip.search(title or ""):
             skipped += 1                               # (0.10.6.1) "deprecated" in its title: not read, nor what it
+            _not_read(_where(url), title, "its title matches the setting docs.skip_titles")
             continue                                   # leads to (the first page always is)
         if (text or "").strip():
             pages.append((url, title, text))
         else:
             skipped += 1                               # (0.10.6.1) no text: not kept, its links followed
-        todo += [link for link in links if link.startswith(base) and link.split("#")[0] not in seen]
+            _not_read(_where(url), title, "no text (its links followed)")
+        todo += [_on_site(link, start) for link in links
+                 if _same_site(link, start) and urlparse(link).path.startswith(folder)
+                 and _on_site(link, start) not in seen]
+    _left_unread(len({u.split("#")[0] for u in todo} - seen))
     return pages, (pages[0][1] if pages else "") or start, skipped
 
 
@@ -889,22 +965,47 @@ CONFLUENCE_HREF = [   # a link to a page of the same Confluence: (kind, pattern 
     ("id", re.compile(r"/spaces/[^/]+/pages/(?P<id>\d+)(?:/|$)")),
     ("title", re.compile(r"/display/(?P<space>[^/]+)/(?P<title>[^/?#]+)/?$")),
 ]
+TINY_LINK = re.compile(r"^/x/(?P<code>[A-Za-z0-9_-]{1,11})/?$")    # (0.10.7) a short link, under the context path
 DIAGRAM_ATTACHMENT = {"draw.io": (".drawio", ".xml", ""), "Gliffy": (".gliffy", ".json", "")}
 
 
-def _href_target(href: str, page_url: str, web: str) -> tuple[str, ...] | None:
-    """A plain link of a page that names another page of the same Confluence: ("id", id) or ("title", title, space)."""
-    url = urljoin(page_url, href or "")
-    if origin(url) != origin(web) or not urlparse(url).path.startswith(urlparse(web).path.rstrip("/")):
+def tiny_page_id(code: str) -> str | None:
+    """(0.10.7) The page id a Confluence short link (…/x/AbCd) names: the id's 8 bytes, little-endian, in base64 with
+    '/' and '+' written '-' and '_', its trailing zeros ("A") and padding left out. None: not such a code."""
+    try:
+        raw = code.replace("-", "/").replace("_", "+")
+        n = int.from_bytes(base64.b64decode(raw + "A" * (11 - len(raw)) + "="), "little")
+    except ValueError:                                # binascii.Error is a ValueError
         return None
+    return str(n) if 0 < n < 2 ** 63 else None
+
+
+def _href_target(href: str, page_url: str, web: str, bases: tuple[str, ...] = ()) -> tuple[str, ...] | None:
+    """A plain link of a page that names another page of the same Confluence: ("id", id) or ("title", title, space).
+    (0.10.7) The same Confluence also at the addresses its API gives as its base (`bases`: the site's own URL, when
+    it is read through another name or address), over http or https, by a short link (…/x/AbCd) or by its title in
+    viewpage.action?spaceKey=…&title=…"""
+    url = urljoin(page_url, href or "")
     u = urlparse(url)
+    ctx = next((urlparse(site).path.rstrip("/") for site in (web, *bases)
+                if site and _same_site(url, site) and u.path.startswith(urlparse(site).path.rstrip("/"))), None)
+    if ctx is None:
+        return None
+    m = TINY_LINK.match(u.path[len(ctx):])
+    if m:
+        pid = tiny_page_id(m.group("code"))
+        return ("id", pid) if pid else None
     for kind, rx in CONFLUENCE_HREF:
         m = rx.search(u.path)
         if not m:
             continue
         if kind == "id":
-            pid = m.groupdict().get("id") or (parse_qs(u.query).get("pageId") or [""])[0]
-            return ("id", pid) if pid.isdigit() else None
+            query = parse_qs(u.query)
+            pid = m.groupdict().get("id") or (query.get("pageId") or [""])[0]
+            if pid.isdigit():
+                return ("id", pid)
+            title, space = (query.get("title") or [""])[0], (query.get("spaceKey") or [""])[0]
+            return ("title", title, space) if title and space else None
         return ("title", unquote_plus(m.group("title")), unquote(m.group("space")))
     return None
 
@@ -984,6 +1085,7 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
 
     queue: deque[tuple[str, ...]] = deque()
     seen: set[str] = set()
+    bases: set[str] = set()                          # (0.10.7) the site's own URL as its API says it (_links.base)
     title = ""
     skip = _skip_title()
     try:
@@ -1014,17 +1116,23 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
                     raise                            # skipped, the others read; the first page itself: the error
                 skipped += 1
                 log.info("supagent: document %s: a Confluence page not read (%s): %s", doc.id, key[1], str(ex)[:200])
+                _not_read(f"page {key[1]}" if key[0] == "id" else f"{key[2]}: {key[1]}", "",
+                          f"not read: {str(ex)[:150]}")
                 continue
             if pid is None or pid in seen:
                 continue
             seen.add(pid)
             item, base = items[pid]
+            if base:
+                bases.add(str(base))
             first = (t["kind"] == "page" and pid == str(t.get("id"))) or \
                 (t["kind"] == "title" and pid == by_title.get((t["space"], t["title"])))
             if not first and skip is not None and skip.search(str(item.get("title") or "")):
                 skipped += 1                           # (0.10.6.1) "deprecated" in its title: not read, nor the
                 log.info("supagent: document %s: Confluence page %s not read (its title: %s)", doc.id, pid,
                          str(item.get("title") or "")[:120])
+                _not_read(_confluence_url(item, base, t), str(item.get("title") or ""),
+                          "its title matches the setting docs.skip_titles (nor the pages under it read)")
                 continue                               # pages under it and its links
             space = str((item.get("space") or {}).get("key") or (key[2] if key[0] == "title" else t.get("space") or ""))
             url = _confluence_url(item, base, t)
@@ -1032,7 +1140,8 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
             dtext, dedges = diagram_text(pid, read["diagrams"]) if read["diagrams"] else ("", [])
             text = read["text"] + (f"\n\n{dtext}" if dtext else "")
             linked: list[tuple[str, ...]] = [("title", ti, sp or space) for ti, sp in read["pages"]]
-            linked += [x for x in (_href_target(h, url, t["web"]) for h in read["links"]) if x]
+            linked += [("id", i) for i in read.get("ids") or []]
+            linked += [x for x in (_href_target(h, url, t["web"], tuple(bases)) for h in read["links"]) if x]
             meta = {"id": pid, "space": space, "version": (item.get("version") or {}).get("number"),
                     "links": [x[1] if x[0] == "id" else f"{x[2]}:{x[1]}" for x in linked][:200],
                     **({"diagram_edges": dedges[:200]} if dedges else {}),
@@ -1040,6 +1149,8 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
                        else {})}
             if len(text.encode()) > limit or not text.strip():
                 skipped += 1                           # too large, or no text (0.10.6.1: its pages and links followed)
+                _not_read(url, str(item.get("title") or ""), "no text (the pages under it and its links followed)"
+                          if not text.strip() else f"larger than docs.max_kb ({limit // 1024} KB)")
             else:
                 pages.append((url, str(item.get("title") or f"page {pid}"), text, meta))
             title = title or str(item.get("title") or "")
@@ -1059,6 +1170,8 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
             queue.extend(x for x in linked if not (x[0] == "id" and x[1] in seen))
     except _OutOfCalls:
         log.info("supagent: document %s: Confluence requests used up, %d page(s) read", doc.id, len(pages))
+        _not_read("", "", "the reading's requests were used up: the pages left in its queue were not read")
+    _left_unread(len({k for k in queue if not (k[0] == "id" and k[1] in seen)}))
     for i, (url, ti, text, meta) in enumerate(pages):      # the links by title as the ids they turned out to be
         meta["links"] = list(dict.fromkeys(by_title.get(tuple(x.split(":", 1)), x) if ":" in x and not x.isdigit()
                                            else x for x in meta["links"]))
@@ -1499,6 +1612,9 @@ def _read_by_another(doc: Doc, reader: str, found: list) -> tuple[list, int]:
     kept = [f for f in found if not (f[0] and f[0] in held)]
     if found and not kept:
         kept = found[:1]
+    for f in found:
+        if f not in kept:
+            _not_read(f[0], f[1], "read by another document of the same site (the first one added)")
     return kept, len(found) - len(kept)
 
 
@@ -1507,11 +1623,15 @@ def refresh(doc: Doc) -> dict[str, Any]:
     reader = reader_of(doc)
     skipped, changed, shared = 0, False, 0
     token = None
+    got: dict[str, Any] = {"skipped": [], "not_read": 0, "left": 0}
+    log_token = _READ_LOG.set(got)                   # (0.10.7) what the reading leaves out, said on the page
+    found: list = []
     try:
         sign = sign_in(doc)
         token = _VERIFY.set(tls_of(doc))            # the site's certificate: checked, with a CA file, or not
         read = {"web": _read_web, "confluence": _read_confluence, "bitbucket": _read_bitbucket}[reader]
         found, title, skipped = read(doc, sign)
+        got["read"] = len(found)
         found = [(u, ti, mask_secrets(tx)[0], *more) for u, ti, tx, *more in found]   # every page's secrets (0.10)
         found, shared = _read_by_another(doc, reader, found)
         content, pages = _join(found)
@@ -1527,10 +1647,32 @@ def refresh(doc: Doc) -> dict[str, Any]:
     finally:
         if token is not None:
             _VERIFY.reset(token)
+        _READ_LOG.reset(log_token)
     doc.fetched_at = dt.datetime.utcnow()
+    _keep_read_log(doc, reader, got)
     db.session.commit()
     return {"id": doc.id, "status": doc.status, "reader": reader, "pages": len(doc.pages or []), "skipped": skipped,
             "changed": changed, "error": doc.error, **({"read_by_another": shared} if shared else {})}
+
+
+def _keep_read_log(doc: Doc, reader: str, got: dict[str, Any]) -> None:
+    """(0.10.7) The reading's log kept for the list of the document's pages (supagent_meta, one row per document)."""
+    from supagent.models import Meta
+
+    if doc.id is None:
+        return
+    want = _max_pages(doc)
+    value = json.dumps({"at": doc.fetched_at.isoformat() if doc.fetched_at else None, "reader": reader,
+                        "status": doc.status, "read": int(got.get("read") or 0), "max_pages": want,
+                        "limit_reached": int(got.get("read") or 0) >= want and reader != "bitbucket",
+                        "left": int(got.get("left") or 0), "not_read": int(got.get("not_read") or 0),
+                        "skipped": got.get("skipped") or []})
+    key = READ_LOG_KEY.format(doc.id)
+    row = db.session.get(Meta, key)
+    if row is None:
+        db.session.add(Meta(key=key, value=value))
+    else:
+        row.value = value
 
 
 def due_docs() -> list[Doc]:

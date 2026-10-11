@@ -62,6 +62,30 @@ def left_out(question: str, value: str) -> bool:
     return False
 
 
+def in_data_name(question: str, m: re.Match, tables: set[str]) -> bool:
+    """(0.10.7) The value's word is written in the question as part of the name of a table the queries read, with the
+    word that comes after it or before it in that name: "network receive errors" names the metric
+    node_network_receive_errs_total, not the team network of the inventory (the check sent a right answer back
+    asking for team = 'network', and the answer went to the network team's switches)."""
+    words = [(w.lower(), w_m.start()) for w_m in re.finditer(r"[A-Za-z0-9]+", question) for w in [w_m.group(0)]]
+    at = next((i for i, (_w, start) in enumerate(words) if start == m.start()), None)
+    if at is None:
+        return False
+
+    def same(a: str, b: str) -> bool:
+        return a == b or (min(len(a), len(b)) >= 4 and (a.startswith(b) or b.startswith(a)))
+
+    for t in tables:
+        parts = [w for w in re.split(r"[^a-z0-9]+", t.lower()) if w]
+        for j, part in enumerate(parts):
+            if part != words[at][0]:
+                continue
+            if (j + 1 < len(parts) and at + 1 < len(words) and same(words[at + 1][0], parts[j + 1])) or \
+                    (j > 0 and at > 0 and same(words[at - 1][0], parts[j - 1])):
+                return True
+    return False
+
+
 def conditioned(field: str, sqls: list[str]) -> bool:
     """A query of the answer has a condition on this field (=, <>, IN, NOT IN, LIKE, IS)."""
     pat = re.compile(r"(?<![\w@])\"?" + re.escape(field) + r"\"?\s*(?:=|<>|!=|\bNOT\s+IN\b|\bIN\b|\bNOT\s+LIKE\b|"
@@ -100,7 +124,8 @@ def unused(question: str, sqls: list[str]) -> list[tuple[str, str, str]]:
             m = re.search(r"(?<![\w-])" + re.escape(v) + r"(?![\w-])", question, re.I if code_like else 0)
             if m is None and not code_like:              # "web orders", "web channel": before the subject or field
                 m = before_noun(question, v, nouns_of(o.parent, o.name))
-            if m is None or any(a <= m.start() < b for a, b in per) or included(question, m):
+            if m is None or any(a <= m.start() < b for a, b in per) or included(question, m) or \
+                    in_data_name(question, m, tables):
                 continue
             low = v.lower()
             if f"'{low}'" in said or f'"{low}"' in said:

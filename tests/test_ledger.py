@@ -260,7 +260,8 @@ def test_out_of_calls_the_answer_keeps_what_the_plan_found(ctx, monkeypatch):
         a.max_steps = 2                                   # 3 turns, then out of calls
         answer, _trace = a.ask(q)
         assert "Revenue of the week: 3 EUR, all from shop A" in answer and "Not checked: Refunds of the week" in answer
-        assert "Your work plan (kept by the system)" in a.llm.seen[-1][-1]["content"]   # given its plan first
+        assert any("Your work plan (kept by the system)" in str(sent[-1]["content"]) for sent in a.llm.seen)   # given
+        # its plan first (0.10.7: "Let me check ..." is then asked once more, the plan's notes when nothing comes)
     b, _ran = agent_with(monkeypatch, [call("work_plan", wp), call("execute_sql", sql), call("execute_sql", sql),
                                        say("The revenue was 3 EUR; the refunds were not reached.")])
     b.max_steps = 2
@@ -362,3 +363,85 @@ def test_past_its_time_an_answer_is_marked_not_sent_back(ctx, monkeypatch):
     sent_back = [m for m in after if m["role"] == "user" and str(m["content"]).startswith("(Check before")]
     assert answer.startswith("Found 4,567 failed jobs") and "(Check:" in answer and not sent_back
     assert len(a.llm.seen) == 4                          # 3 calls, then the answer: no turn more
+
+
+def test_out_of_calls_an_answer_that_only_promises_the_answer_is_asked_once_more(ctx, monkeypatch):
+    """(0.10.7) An investigation ran out of calls and its whole answer was "Let me mark the remaining tasks as done
+    and write the final answer." (main suite C24): such a text is asked once more without tools; when it still only
+    promises the answer, the answer is what the plan's done tasks noted."""
+    from supagent import agent as agent_mod
+
+    monkeypatch.setattr(agent_mod, "FREE_PLAN_TURNS", 0)
+    wp = {"tasks": [{"title": "Failed payments by provider", "status": "done", "note": "provider B down 10:00-12:30"},
+                    {"title": "Changes before", "status": "in_progress"}]}
+    sql = {"request": {"database_id": 1, "sql": "SELECT COUNT(*) FROM payments"}}
+    sql2 = {"request": {"database_id": 1, "sql": "SELECT provider, COUNT(*) FROM payments GROUP BY 1"}}
+    sql3 = {"request": {"database_id": 1, "sql": "SELECT day, COUNT(*) FROM payments GROUP BY 1"}}
+    q = "Why did so many payments fail on Tuesday, which providers, and was anything changed before?"
+    promise = "Let me mark the remaining tasks as done and write the final answer."
+    a, _ran = agent_with(monkeypatch, [call("work_plan", wp), call("execute_sql", sql), call("execute_sql", sql2), call("execute_sql", sql3),
+                                       say(promise), say("Provider B was down from 10:00 to 12:30: the failures.")])
+    a.max_steps = 2
+    answer, _trace = a.ask(q)
+    assert answer.startswith("Provider B was down from 10:00 to 12:30") and promise not in answer
+    assert any(m.get("content") == agent_mod.WRITE_NOW for sent in a.llm.seen for m in sent)
+    b, _ran = agent_with(monkeypatch, [call("work_plan", wp), call("execute_sql", sql), call("execute_sql", sql2), call("execute_sql", sql3),
+                                       say(promise), say("Now I will write the final answer.")])
+    b.max_steps = 2
+    answer, _trace = b.ask(q)
+    assert "Failed payments by provider: provider B down 10:00-12:30" in answer and promise not in answer
+    assert agent_mod.announces_answer(promise) and not agent_mod.announces_answer("Provider B was down: 3 failures.")
+
+
+def test_out_of_calls_an_answer_that_only_announces_a_check_is_asked_once_more(ctx, monkeypatch):
+    """(0.10.7, main suite M1-0107n) An investigation sent back for a number not in its results ran out of calls and
+    its whole answer was "Let me verify the PAID counts by provider that I mentioned:" ("verify" was no step word):
+    a short text that only announces a step is asked once more without tools, like one that promises the answer."""
+    from supagent import agent as agent_mod
+
+    monkeypatch.setattr(agent_mod, "FREE_PLAN_TURNS", 0)
+    sql = {"request": {"database_id": 1, "sql": "SELECT COUNT(*) FROM payments"}}
+    sql2 = {"request": {"database_id": 1, "sql": "SELECT provider, COUNT(*) FROM payments GROUP BY 1"}}
+    sql3 = {"request": {"database_id": 1, "sql": "SELECT day, COUNT(*) FROM payments GROUP BY 1"}}
+    stub = "Let me verify the PAID counts by provider that I mentioned:"
+    a, _ran = agent_with(monkeypatch, [call("execute_sql", sql), call("execute_sql", sql2), call("execute_sql", sql3),
+                                       say(stub), say("Provider B failed 36 payments between 10:00 and 12:30.")])
+    a.max_steps = 2
+    answer, _trace = a.ask("Why did so many payments fail on Tuesday?")
+    assert answer.startswith("Provider B failed 36 payments") and stub not in answer
+    assert agent_mod.announces_action(stub) and agent_mod.announces_action("I will now compare it with Monday.")
+    assert not agent_mod.announces_action("Provider B failed 36 payments; let me know if you want the hours.")
+
+
+def test_the_deeper_step_is_not_asked_for_once_records_were_looked_up(ctx, monkeypatch):
+    """(0.10.7, main suite) An investigation looked up the records of the part it blamed three times (none found: the
+    data has no table of changes), was sent back for the step "Deeper" all the same, spent its calls looking for a
+    table of changes and ran out. Once records_about ran, its result, nothing included, answers that step."""
+    from supagent.agent import LEDGER_NUDGE
+    from test_agent_loop import agent_with, call, say
+
+    cg = {"request": {"table": "jobs"}}
+    plan = {"tasks": [{"id": 1, "title": "The facts", "status": "done", "note": "late"}]}
+    ra = {"names": ["licence-server"], "until": "2026-09-23 08:00", "days": 7}
+    replies = [call("work_plan", plan), call("compare_groups", cg), call("records_about", ra)] + \
+        [say("The jobs wait: the licence server ran out of tokens; no change was recorded on it.")] * 4
+    a, _ran = agent_with(monkeypatch, replies, results=lambda n, args: '{"conclusion": "nothing numbered"}')
+    a.names = a.names | {"compare_groups", "records_about"}
+    a.ask("Why are the jobs late this morning?")
+    sent = [m["content"] for m in a.llm.seen[-1] if m["role"] == "user" and m["content"].startswith(LEDGER_NUDGE[:40])]
+    assert not any("what changed behind the cause" in c for c in sent)
+
+
+def test_a_plan_task_that_is_the_answer_itself_is_not_asked_for_a_result(ctx, monkeypatch):
+    """(0.10.7, obs7dev-k) "If the rack loses power, which data stores go down and which applications depend on them?":
+    the model's own last task, "Compile final answer listing data stores and dependent applications", had no tool
+    result, so the answer was sent back for it, went on querying and ran out of calls (its plan's notes, short of an
+    application, were the answer). A task that is the answer itself is written by answering."""
+    from supagent.agent import ANSWER_TASK
+
+    for title in ("Compile final answer listing data stores and dependent applications", "Summarize the findings",
+                  "Write the answer for the user", "Provide a summary of the impact", "Final answer"):
+        assert ANSWER_TASK.search(title), title
+    for title in ("Identify data stores running on those servers", "Check the changes before the start",
+                  "Count the failed payments per provider", "Find the applications that depend on them"):
+        assert not ANSWER_TASK.search(title), title

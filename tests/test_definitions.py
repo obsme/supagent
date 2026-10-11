@@ -147,3 +147,31 @@ def test_the_share_join_check_has_its_setting(app, monkeypatch):
     monkeypatch.setattr(settings, "get", lambda k: False if k == "agent.share_join_check" else real(k))
     with app.app_context():
         assert unlinked_share("What share of last month's subscriptions were cancelled?", [inner]) is None
+
+
+def test_a_total_minus_its_part_over_an_inner_join_is_not_linked(monkeypatch):
+    """(0.10.7, main suite M1-0107n) "Then what was the net revenue of the week?": sent back for its refunds read apart,
+    the answer joined the two tables but computed SUM(o.amount) - COALESCE(SUM(r.refund), 0) over one INNER JOIN: the
+    sales kept only the refunded orders, 0 (each refund was its order's whole amount), and the answer went back to its
+    figure read apart. A total minus its part over an INNER JOIN is no link of the definition: said how instead."""
+    from supagent.knowledge import definitions, glossary
+
+    term = {"term": "net revenue", "definition": "The AMOUNT_EUR of the orders sold (STATUS PAID or DELIVERED), minus "
+            "the REFUND_EUR of the returns with STATUS REFUNDED of those orders."}
+    monkeypatch.setattr(glossary, "found", lambda q: [term] if "net revenue" in q.lower() else [])
+    monkeypatch.setattr(definitions, "_share_join_on", lambda: True)
+    inner = ('SELECT SUM(o."AMOUNT_EUR") - COALESCE(SUM(r."REFUND_EUR"), 0) AS net FROM "orders" o JOIN "returns" r '
+             'ON o."ORDER_ID" = r."ORDER_ID" WHERE o."ORDER_DATE" >= \'2026-09-14\' AND r."STATUS" = \'REFUNDED\'')
+    part = ('SELECT SUM(r."REFUND_EUR") FROM "returns" r JOIN "orders" o ON r."ORDER_ID" = o."ORDER_ID" WHERE '
+            'o."ORDER_DATE" >= \'2026-09-14\' AND r."STATUS" = \'REFUNDED\'')
+    total = 'SELECT SUM("AMOUNT_EUR") FROM "orders" WHERE "ORDER_DATE" >= \'2026-09-14\''
+    left = ('SELECT SUM(o."AMOUNT_EUR") - COALESCE(SUM(r."REFUND_EUR"), 0) FROM "orders" o LEFT JOIN "returns" r '
+            'ON o."ORDER_ID" = r."ORDER_ID"')
+    assert definitions.restricted_total(inner) == ("orders", "returns")
+    assert definitions.restricted_total(left) is None and definitions.restricted_total(part) is None
+    q = "Then what was the net revenue of the week of 14 to 20 September?"
+    found = definitions.unlinked(q, [total, inner])
+    assert found and "through an INNER JOIN" in found[1] and "only the orders rows that have a returns row" in found[1]
+    assert definitions.unlinked(q, [total, inner, part]) is None          # the part read through the join: linked
+    apart = definitions.unlinked(q, [total, 'SELECT SUM("REFUND_EUR") FROM "returns"'])
+    assert apart and "one INNER JOIN for both keeps only the rows that have a part" in apart[1]

@@ -627,3 +627,93 @@ def test_a_follow_up_about_a_field_the_previous_queries_never_read_runs_a_query(
         for o in added:
             db.session.delete(o)
         db.session.commit()
+
+
+def test_a_field_the_question_names_that_no_query_read_is_sent_back_once(ruled, monkeypatch):
+    """(0.10.7, main suite M1-0107n) "What share of the jobs of 23 September were relaunched?" counted with another
+    field's value (an execution type RERUN), 7.81 % for 4.93 %: the table has a flag named by the question's word,
+    RELAUNCHED, that no query read. An answer whose queries never read a field its question names is sent back once."""
+    from superset.extensions import db
+    from test_agent_loop import agent_with, call, say
+
+    from supagent.agent import FIELD_NAMED_NUDGE
+    from supagent.models import KObject
+
+    src = db.session.query(KObject).filter(KObject.kind == "index", KObject.name == "jobs").one().source_id
+    added = [KObject(source_id=src, kind="field", parent="jobs", name="RELAUNCHED", data_type="boolean")]
+    db.session.add_all(added)
+    db.session.commit()
+    try:
+        by_type = {"request": {"database_id": 1, "sql": "SELECT 100.0 * COUNT(*) FILTER (WHERE \"EXEC_TYPE\" = 'RERUN') "
+                               "/ COUNT(*) FROM \"jobs\" WHERE \"ENVIRONMENT_TYPE\" <> 'UAT'"}}
+        by_flag = {"request": {"database_id": 1, "sql": "SELECT 100.0 * COUNT(*) FILTER (WHERE \"RELAUNCHED\") / COUNT(*) "
+                               "FROM \"jobs\" WHERE \"ENVIRONMENT_TYPE\" <> 'UAT'"}}
+        q = "What share of the jobs were relaunched?"
+
+        def shares(name, args):
+            pct = 4.93 if "RELAUNCHED" in args["request"]["sql"] else 7.81
+            return json.dumps({"success": True, "columns": [{"name": "pct"}], "rows": [{"pct": pct}], "row_count": 1})
+
+        a, ran = agent_with(monkeypatch, [call("execute_sql", by_type), say("7.81 % of the jobs were relaunched."),
+                                          call("execute_sql", by_flag), say("4.93 % of the jobs were relaunched.")],
+                            results=shares)
+        answer, _trace = a.ask(q, [])
+        assert answer.startswith("4.93 %") and len(ran) == 2
+        sent = [m["content"] for m in a.llm.seen[-1] if m["role"] == "user"]
+        assert any(c == FIELD_NAMED_NUDGE.format(fields="RELAUNCHED") for c in sent)
+        b, ran_b = agent_with(monkeypatch, [call("execute_sql", by_flag), say("4.93 % of the jobs were relaunched.")],
+                              results=shares)
+        b.ask(q, [])
+        assert not b.usage.get("nudges")                                   # the field read: nothing said
+    finally:
+        for o in added:
+            db.session.delete(o)
+        db.session.commit()
+
+
+def test_an_investigation_says_where_the_rows_it_blames_ran(ruled, monkeypatch):
+    """(0.10.7, main suite M1-0107n) "Why was the official report of the 23rd late?" blamed three out-of-memory kills of
+    its batch and never said the server they ran on: the batch table's SERVER was never read. An investigation whose
+    tables say where each row ran (a server, a host, a node...) and whose queries read none of it, nor names one of
+    their values, is sent back once, its next step made to read it."""
+    from superset.extensions import db
+    from test_agent_loop import agent_with, call, say
+
+    from supagent import agent as A
+    from supagent.models import KObject
+
+    monkeypatch.setattr(A.Agent, "_investigating", lambda self, q: True)
+    src = db.session.query(KObject).filter(KObject.kind == "index", KObject.name == "jobs").one().source_id
+    added = [KObject(source_id=src, kind="field", parent="jobs", name="SERVER", data_type="keyword",
+                     stats={"values": ["zqw-srv-1", "zqw-srv-2"]})]
+    db.session.add_all(added)
+    db.session.commit()
+    try:
+        runs = {"request": {"database_id": 1, "sql": "SELECT \"STATUS\", \"ERROR_MESSAGE\" FROM \"jobs\" WHERE \"JOB\" = 'EOD' "
+                            "AND \"ENVIRONMENT_TYPE\" <> 'UAT'"}}
+        where = {"request": {"database_id": 1, "sql": "SELECT \"SERVER\", COUNT(*) FROM \"jobs\" WHERE \"JOB\" = 'EOD' AND "
+                             "\"ENVIRONMENT_TYPE\" <> 'UAT' GROUP BY 1"}}
+        rows = json.dumps({"success": True, "columns": [{"name": "SERVER"}], "rows": [{"SERVER": "zqw-srv-2"}], "row_count": 1})
+        plan = {"tasks": [{"id": 1, "title": "The facts", "status": "done", "note": "killed for memory"}]}
+        looked = {"names": ["EOD"], "until": "2026-09-23 08:00", "days": 7}
+        a, ran = agent_with(monkeypatch, [call("work_plan", plan), call("execute_sql", runs), call("records_about", looked),
+                                          say("The EOD batch was killed for memory three times."),
+                                          call("execute_sql", where)] +
+                            [say("The EOD batch was killed for memory three times on zqw-srv-2.")] * 5,
+                            results=lambda n, args: rows)                # (other checks may ask too)
+        a.names = a.names | {"records_about"}
+        answer, _trace = a.ask("Why was the EOD report late?", [])
+        assert answer.endswith("on zqw-srv-2.") and len([r for r in ran if r[0] == "execute_sql"]) == 2
+        assert any("whose rows say where each ran (" in m["content"] and "SERVER" in m["content"]
+                   for m in a.llm.seen[-1] if m["role"] == "user")
+        b, _ran = agent_with(monkeypatch, [call("work_plan", plan), call("execute_sql", runs), call("records_about", looked)] +
+                             [say("Killed for memory three times on zqw-srv-2.")] * 5,
+                             results=lambda n, args: rows)
+        b.names = b.names | {"records_about"}
+        b.ask("Why was the EOD report late?", [])
+        assert not any("whose rows say where each ran" in m["content"] for sent in b.llm.seen for m in sent
+                       if m["role"] == "user")                            # the answer names the server: not asked
+    finally:
+        for o in added:
+            db.session.delete(o)
+        db.session.commit()

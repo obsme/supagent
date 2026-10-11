@@ -437,7 +437,7 @@ def test_the_agent_knows_the_logs_and_learns_them_in_its_paths(app, monkeypatch)
 
     text = " ".join(agent.SECTIONS["investigation"].split())
     assert "and their logs (compare_logs: what they say that they do not usually)" in text
-    assert len(agent.SECTIONS["investigation"]) < 4000
+    assert len(agent.SECTIONS["investigation"]) < 4200   # (0.10.7: + the trigger of a change made hours before)
     assert {"compare_logs", "compare_groups"} <= agent.TOOLS_OF["investigation"] and "compare_logs" in agent.TOOLS_OF["status"]
     assert "compare_logs" in agent.QUERY_TOOLS           # (its figures come from the data)
     # the picture of a question says which of its tables hold lines of text, and their fields

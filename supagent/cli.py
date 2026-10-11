@@ -308,7 +308,8 @@ def settings_cmd(pairs: tuple[str, ...], unset: tuple[str, ...]) -> None:
 
 
 @supagent.command("test-llm", help="Get a token (middleware), find the model, ask for one word")
-@click.option("--profile", is_flag=True, help="Also: thinking on and off, tool calls, prompt cache (a minute)")
+@click.option("--profile", is_flag=True, help="Also: thinking on and off, tool calls, prompt cache (a minute); what "
+              "supagent found the server does (kept for every process) is printed in any case")
 @with_appcontext
 def test_llm(profile: bool) -> None:
     from supagent.llm import LLM
@@ -323,8 +324,13 @@ def test_llm(profile: bool) -> None:
                 out["profile"] = llm.profile()
     except Exception as ex:  # pylint: disable=broad-except
         raise click.ClickException(f"{type(ex).__name__}: {ex}") from ex
+    said = (out.pop("profile", None) or {}).get("said") or []
     for k, v in out.items():
         click.echo(f"{k}: {json.dumps(v) if isinstance(v, dict) else v}")
+    if said:                                          # (0.10.7) the server's profile, as supagent adapts to it
+        click.echo("adapted to the LLM:")
+        for line in said:
+            click.echo(f"  - {line}")
 
 
 @supagent.command(help="Learn now: metrics (promagg) and indices (osagg), relations, catalog, LLM descriptions")

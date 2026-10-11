@@ -365,3 +365,21 @@ def test_a_note_asked_in_words_is_saved_without_the_llm(app, clean, monkeypatch)
         from superset.extensions import db
 
         db.session.remove()
+
+
+def test_the_map_tool_is_offered_for_a_question_of_dependencies():
+    """(0.10.7) "If rack X loses power, which data stores go down with it, and which applications depend on them?"
+    was answered from an inventory index alone: the System map's tool was offered to investigations only."""
+    from supagent.agent import Agent
+
+    a = object.__new__(Agent)
+    a.rich, a.wants_saved_chart, a.intent_text = True, False, None
+    a.specs = [{"function": {"name": n}} for n in ("execute_sql", "describe_data", "system_links", "records_about")]
+    a._route_intents = lambda: set()
+    offered = lambda q: {s["function"]["name"] for s in a._specs_for(q)}   # noqa: E731
+    for q in ("If rack r1 loses power, which data stores go down with it, and which applications depend on them?",
+              "If cache-2 goes down, what is affected?", "What does a request to the site go through?",
+              "To which core switch is the rack uplinked?", "Which applications consume the order events?"):
+        assert "system_links" in offered(q), q
+    for q in ("How many orders failed between 10:00 and 12:00?", "What was the CPU of web-1 yesterday?"):
+        assert "system_links" not in offered(q), q

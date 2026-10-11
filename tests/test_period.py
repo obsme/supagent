@@ -231,7 +231,8 @@ def test_a_follow_up_is_grounded_in_the_previous_answer_only(ctx, monkeypatch):
 def test_a_follow_up_naming_what_no_tool_gave_is_sent_back_then_must_call_a_tool(ctx, monkeypatch):
     """"Which traders work on it?" after the book that lost the most: answered with no tool, "1. **Tracy** 2. **Alice**
     3. **Bob**" passed as a follow-up restating the chat (no number, no name with a digit; 0.9.1). Names the previous
-    answer does not hold take the exemption away; given again with no query, a tool call is made compulsory once."""
+    answer does not hold take the exemption away; (0.10.7) the step after that send-back must call a tool (before: only
+    after the same answer given again; "at 14:00" given again passed a second check that read the whole prompt)."""
     import json
 
     from test_agent_loop import agent_with, call, say
@@ -242,11 +243,11 @@ def test_a_follow_up_naming_what_no_tool_gave_is_sent_back_then_must_call_a_tool
     sql = {"request": {"database_id": 1, "sql": "SELECT DISTINCT \"TRADER\" FROM \"pnl\" WHERE \"BOOK\" = 'EQ_BOOK_A'"}}
     rows = json.dumps({"success": True, "columns": [{"name": "TRADER"}], "rows": [{"TRADER": "T37"}, {"TRADER": "T38"}],
                        "row_count": 2})
-    a, ran = agent_with(monkeypatch, [made_up, made_up, call("execute_sql", sql), say("T37 and T38 work on EQ_BOOK_A.")],
+    a, ran = agent_with(monkeypatch, [made_up, call("execute_sql", sql), say("T37 and T38 work on EQ_BOOK_A.")],
                         results=lambda n, args: rows)
     answer, _trace = a.ask("Which traders work on it?", history)
     assert answer == "T37 and T38 work on EQ_BOOK_A." and len(ran) == 1
-    assert a.llm.choices == [None, None, "required", None]               # compulsory once, after two answers
+    assert a.llm.choices == [None, "required", None]                     # compulsory at once after the send-back
     restated = say("**EQ_BOOK_A** lost 248,707 EUR on 22 September.")
     b, _ran = agent_with(monkeypatch, [restated])
     b.ask("How much did it lose?", history)
@@ -274,7 +275,10 @@ def test_a_follow_up_naming_a_value_no_query_used_needs_its_own_query(ctx, monke
     assert carry.new_values("And the flash PnL?", [history[0]["content"], history[1]["content"]], [prev]) == \
         ["flash (PNL_STATUS)"]
     assert carry.new_values("And the official one by book?", [history[0]["content"]], [prev]) == []   # used before
-    assert carry.new_values("And the flash PnL?", ["the flash was 576,885 EUR"], [prev]) == []        # in the answer
+    assert carry.new_values("And the flash PnL?", [history[0]["content"], "the flash matched the official one"],
+                            [prev]) == ["flash (PNL_STATUS)"]   # (0.10.7) an answer's words hold no figure of it
+    grouped = prev.replace("AND \"PNL_STATUS\" IN ('OFFICIAL', 'RESTATED') ", "") + " GROUP BY \"PNL_STATUS\""
+    assert carry.new_values("And the flash PnL?", [history[0]["content"]], [grouped]) == []   # every status computed
     made_up = say("The flash PnL of EQ_DESK on 22 September was 567,189 EUR as well.")
     sql = {"request": {"database_id": 1, "sql": prev.replace("IN ('OFFICIAL', 'RESTATED')", "= 'FLASH'")}}
     rows = json.dumps({"success": True, "columns": [{"name": "total"}], "rows": [{"total": 576885.24}], "row_count": 1})
@@ -884,3 +888,27 @@ def test_this_week_and_last_month_are_calendar_spans(world):  # noqa: F811
     assert refusal("How many jobs failed in the last 7 days?", "execute_sql", week("2026-09-17 00:00", "2026-09-24 00:00"),
                    thu) is None
     assert ranges_named("jobs last week", thu) == [(dt.datetime(2026, 9, 14), dt.datetime(2026, 9, 21))]
+
+
+def test_a_day_said_weeks_from_another_and_written_in_full():
+    """(0.10.7) "How does the 23rd's total compare with the same weekday one week earlier?" was answered with the
+    22nd: a week before a day named in the chat, or right after it ("than 23 September"), is a day of its own, and
+    the model is given the days in full."""
+    import datetime as dt
+
+    from supagent.knowledge.period import days_named, days_note
+
+    today = dt.date(2026, 9, 24)
+    earlier = ["What was our revenue on 22 September?", "And on the 23rd?",
+               "Which sales channel brought the most revenue that day?"]
+    note = days_note("How does the 23rd's total compare with the same weekday one week earlier?", earlier, today)
+    assert note == ('Dates: "the 23rd" is Wednesday 23 September 2026; "the same weekday one week earlier" is '
+                    'Wednesday 16 September 2026.')
+    assert days_named("the same weekday one week earlier than 23 September", today) == [dt.date(2026, 9, 16),
+                                                                                         dt.date(2026, 9, 23)]
+    assert days_named("And two weeks before?", today, anchor=dt.date(2026, 9, 23)) == [dt.date(2026, 9, 9)]
+    assert days_named("Et une semaine plus tôt ?", today, anchor=dt.date(2026, 9, 23)) == [dt.date(2026, 9, 16)]
+    assert days_named("And a week later?", today, anchor=dt.date(2026, 9, 16)) == [dt.date(2026, 9, 23)]
+    assert days_note("How many orders were placed on 23 September?", [], today) is None   # written in full
+    assert days_note("What about a week ago?", [], today) is None                         # from today: not this
+    assert days_note("And one week earlier?", [], today) is None                          # no day to count from

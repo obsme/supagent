@@ -31,14 +31,253 @@ RETRY_STATUS = {429, 500, 502, 503, 504}
 # a busy or restarting server (llama.cpp answers 503 "Loading model" for a minute or two): about 3 minutes
 _TEMPLATE_KWARGS: dict[str, bool] = {}     # base URL -> accepts chat_template_kwargs
 _CHOICE: dict[str, bool] = {}       # servers that accept tool_choice "required" (unknown: tried)
+_EFFORT: dict[str, bool] = {}       # servers that accept reasoning_effort (unknown: tried)
+_NONE: dict[str, bool] = {}         # servers that accept tool_choice "none" (unknown: tried)
+_REASONING: dict[str, bool] = {}    # base URL|model -> a model that reasons before each answer (seen in its answers)
+# (0.10.7) models that always reason before they answer, their reasoning counted in max_tokens (gpt-oss: the harmony
+# analysis channel, no enable_thinking): known by name before their first answer, else by what they answer
+REASONS_BY_NAME = re.compile(r"gpt-oss|deepseek-r1|\bqwq\b|reasoner|magistral|(?<![\w-])o[134](?:-mini|-pro)?(?![\w-])", re.I)
+REASONING_TOKENS = 4096     # what such a model may spend reasoning, on top of the tokens its answer is given
+# the harmony format of gpt-oss, when the server or a gateway did not read it: its tokens, its final channel, a
+# tool call written in the commentary channel, or the same with the special tokens dropped ("analysis...assistantfinal")
+HARMONY_TOKEN = re.compile(r"<\|(?:start|end|return|call|channel|message|constrain)\|>")
+HARMONY_FINAL = re.compile(r"<\|channel\|>\s*final\s*<\|message\|>", re.I)
+HARMONY_JOINED = re.compile(r"^\s*analysis.*?assistantfinal", re.S | re.I)
+HARMONY_CALL = re.compile(r"\bto=functions\.([A-Za-z_][\w.-]*)")
 # a request longer than the model's context (llama.cpp answers it with HTTP 400): never read as a refused field
 CONTEXT_ERROR = re.compile(r"exceeds? the available context|exceed_context_size|context (?:size|length|window)|"
                            r"maximum context length|too many tokens|prompt is too long", re.I)
 RETRY_DELAYS = (2.0, 5.0, 10.0, 20.0, 30.0, 45.0, 60.0)
+# (0.10.7) a server that could not read what the model wrote (llama.cpp with gpt-oss: HTTP 500 "The model produced
+# output that does not match the expected peg-native format"; a tool call it could not parse): no outage, the same
+# request fails the same way: said at once, for the agent to ask again with a note
+MODEL_OUTPUT_UNREAD = re.compile(r"does not match the expected|expected [\w-]+ format|peg-native|failed to parse|"
+                                 r"parse tool call|could not parse|tool call arguments|invalid tool call", re.I)
 
 
 class LLMError(Exception):
     pass
+
+
+# --------------------------------------------------------------------------- #
+# (0.10.7) the LLM's profile: what its server does, found by a few small calls of made-up text (the Test button,
+# `superset supagent test-llm --profile`, the nightly learning when none is known or it is a week old) and by the
+# answers themselves (a field refused, a reasoning seen), kept in supagent_meta for every process (the web server's
+# workers, the Celery workers): each adapts from its first call (room to reason, the tool_choice and the fields the
+# server takes) instead of learning it again by failing once. Any OpenAI-compatible server and model: Qwen, gpt-oss,
+# Llama, Mistral, DeepSeek...
+# --------------------------------------------------------------------------- #
+PROFILE_KEY = "llm_profile"
+PROFILE_DAYS = 7                 # probed again by the nightly learning after this many days
+PROFILE_READ_S = 60.0            # a process reads the stored profile again at most this often
+_PROFILE: dict[str, Any] = {"read_at": {}, "value": None}
+FAMILIES = (("gpt-oss", r"gpt-oss"), ("qwen", r"qwen|qwq"), ("deepseek", r"deepseek"), ("llama", r"llama"),
+            ("mistral", r"mistral|mixtral|magistral|codestral|ministral"), ("gemma", r"gemma"), ("phi", r"\bphi"),
+            ("granite", r"granite"), ("command", r"command-r|\bcohere"), ("glm", r"\bglm"),
+            ("openai", r"\bgpt-[345]|(?<![\w-])o[134](?:-mini|-pro)?(?![\w-])"), ("claude", r"claude"))
+PROFILE_FIELDS = ("reasons", "short_answer_empty", "reasoning_field", "reasoning_effort", "template_kwargs",
+                  "tool_calls", "tool_choice_required", "tool_choice_none", "harmony_in_content", "typography",
+                  "context")
+
+
+def family_of(model: str) -> str:
+    """The family of a model by its name (gpt-oss, qwen, llama, mistral...), "other" when none is known."""
+    for name, rx in FAMILIES:
+        if re.search(rx, model or "", re.I):
+            return name
+    return "other"
+
+
+def stored_profile() -> dict | None:
+    """The stored profile (supagent_meta), on a connection of its own (never the caller's transaction)."""
+    try:
+        from superset import db
+
+        from supagent.models import Meta
+
+        t = Meta.__table__
+        with db.engine.connect() as conn:
+            row = conn.execute(t.select().where(t.c.key == PROFILE_KEY)).first()
+        value = json.loads(row.value) if row is not None and row.value else None
+    except Exception:  # pylint: disable=broad-except   (no database here, or no row yet)
+        return None
+    _PROFILE["value"] = value
+    return value
+
+
+def save_profile(prof: dict) -> None:
+    try:
+        from superset import db
+
+        from supagent.models import Meta
+
+        t = Meta.__table__
+        with db.engine.begin() as conn:
+            conn.execute(t.delete().where(t.c.key == PROFILE_KEY))
+            conn.execute(t.insert().values(key=PROFILE_KEY, value=json.dumps(prof, default=str)))
+        _PROFILE["value"] = prof
+    except Exception as ex:  # pylint: disable=broad-except   (the next call learns it again)
+        log.debug("supagent: the LLM profile not kept: %s", ex)
+
+
+def apply_profile(prof: dict) -> None:
+    """A stored profile in this process's tables (what this process learned by itself is kept)."""
+    base = str(prof.get("base") or "")
+    for table, field in ((_CHOICE, "tool_choice_required"), (_NONE, "tool_choice_none"),
+                         (_EFFORT, "reasoning_effort"), (_TEMPLATE_KWARGS, "template_kwargs")):
+        if isinstance(prof.get(field), bool) and base not in table:
+            table[base] = prof[field]
+    if prof.get("reasons") and not prof.get("thinking"):
+        _REASONING[f"{base}|{prof.get('model') or ''}"] = True
+
+
+def adapt(base: str, model: str) -> None:
+    """The stored profile of this server and model applied in this process (read at most every PROFILE_READ_S)."""
+    key = f"{base}|{model or ''}"
+    now = time.time()
+    if now - _PROFILE["read_at"].get(key, 0.0) < PROFILE_READ_S:
+        return
+    _PROFILE["read_at"][key] = now
+    prof = stored_profile()
+    if prof and prof.get("base") == base and (not model or prof.get("model") == model):
+        apply_profile(prof)
+
+
+def _learned(base: str, model: str, field: str, value: Any) -> None:
+    """A fact an answer taught (a field refused, a reasoning seen) kept in the stored profile, for the other processes
+    (written only when it changes it)."""
+    prof = _PROFILE["value"] if _PROFILE["value"] is not None else stored_profile()
+    if prof and (prof.get("base") != base or prof.get("model") != model):
+        prof = None                                    # another server or model: this one's profile starts
+    prof = dict(prof or {"base": base, "model": model, "family": family_of(model), "source": "answers"})
+    if prof.get(field) == value:
+        return
+    prof[field] = value
+    prof["learned_at"] = datetime.datetime.utcnow().isoformat(timespec="seconds")
+    save_profile(prof)
+
+
+def profile_said(prof: dict | None) -> list[str]:
+    """What supagent does for this LLM, in words (the admin page, test-llm)."""
+    if not prof:
+        return ["not profiled yet: press Test the LLM (or run superset supagent test-llm --profile)"]
+    out = [f"{prof.get('model')} ({prof.get('family') or family_of(str(prof.get('model') or ''))} family)"]
+    if prof.get("reasons"):
+        out.append(f"reasons before it answers: each call gets {REASONING_TOKENS} tokens more for it, no stop "
+                   "strings, a cut empty answer asked again with more room")
+    if prof.get("short_answer_empty"):
+        out.append("a short answer came back empty without that room (its reasoning took the tokens)")
+    if prof.get("reasoning_effort") is True and prof.get("reasons"):
+        out.append("takes reasoning_effort: llm.reasoning_effort is sent when set (low, medium, high)")
+    elif prof.get("reasoning_effort") is False:
+        out.append("refuses reasoning_effort: not sent")
+    if prof.get("tool_calls") is False:
+        out.append("made no tool call when asked: the agent needs a model and server with tool calling")
+    if prof.get("tool_choice_required") is False:
+        out.append("refuses tool_choice \"required\": \"auto\" is sent, the agent's checks ask for the call")
+    if prof.get("tool_choice_none") is False:
+        out.append("refuses tool_choice \"none\": a closing answer is asked without the tools")
+    if prof.get("template_kwargs") is False:
+        out.append("refuses chat_template_kwargs: not sent")
+    if prof.get("harmony_in_content"):
+        out.append("its server leaves the harmony format in the text: supagent reads it (final channel, tool calls)")
+    if prof.get("typography"):
+        out.append("writes non-breaking hyphens or narrow spaces in names: made plain before any use")
+    if len(out) == 1:
+        out.append("nothing to adapt: it answers, calls tools and takes every field as asked")
+    if prof.get("context"):
+        out.append(f"context: {int(prof['context']):,} tokens" + (" (small for long investigations: 32k or more "
+                                                                     "advised)" if int(prof["context"]) < 32768 else ""))
+    return out
+
+
+def _json_at(text: str, at: int) -> Any:
+    """The JSON object that begins at or after `at` in `text`, or None."""
+    start = text.find("{", at)
+    if start < 0:
+        return None
+    try:
+        return json.JSONDecoder().raw_decode(text[start:])[0]
+    except ValueError:
+        return None
+
+
+def harmony_read(msg: dict) -> dict:
+    """(0.10.7) An answer of gpt-oss whose server did not read its harmony format: the final channel as the content
+    (the analysis left out), a tool call written in the commentary channel as a tool call. An answer without the
+    format's markers comes back as it was (the word "analysis" alone is no marker)."""
+    text = msg.get("content")
+    if not isinstance(text, str) or not text:
+        return msg
+    joined = HARMONY_JOINED.search(text)
+    call = HARMONY_CALL.search(text)
+    if not (HARMONY_TOKEN.search(text) or joined or (call and re.search(r"\bcommentary\b", text[:call.start()]))):
+        return msg
+    out = dict(msg)
+    if call and not msg.get("tool_calls"):
+        args = _json_at(text, call.end())
+        if isinstance(args, dict):
+            out["tool_calls"] = [{"id": "harmony-0", "type": "function",
+                                  "function": {"name": call.group(1), "arguments": json.dumps(args)}}]
+            out["content"] = ""
+            return out
+    finals = HARMONY_FINAL.split(text)
+    if len(finals) > 1:
+        text = finals[-1]
+    elif joined:
+        text = text[joined.end():]
+    out["content"] = HARMONY_TOKEN.sub("", text).strip()
+    return out
+
+
+# (0.10.7) the typography of gpt-oss: names written with a non-breaking hyphen ("orders\u2011db"), numbers with a narrow
+# no-break space, quotes curled: a name that matches nothing (in a query's value, in the checks that compare the
+# answer with what the tools gave, in what the user copies); quotes are left as written
+PLAIN_TEXT = str.maketrans({"\u2010": "-", "\u2011": "-", "\u202f": " ", "\u00a0": " "})
+PLAIN_ARGS = PLAIN_TEXT      # (curled quotes kept: "l\u2019\u00e9quipe" is a value of its own in some data)
+
+
+def _plain(value: Any) -> Any:
+    if isinstance(value, str):
+        return value.translate(PLAIN_ARGS)
+    if isinstance(value, list):
+        return [_plain(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    return value
+
+
+def plain_typography(msg: dict) -> dict:
+    """(0.10.7) An answer's hyphens and spaces as the data writes them, and a tool call's arguments: plain hyphens and
+    spaces. Dashes and quotes are left as the model wrote them (a typographic apostrophe can be part of a value)."""
+    out = msg
+    text = msg.get("content")
+    if isinstance(text, str) and text != text.translate(PLAIN_TEXT):
+        out = {**out, "content": text.translate(PLAIN_TEXT)}
+    calls = msg.get("tool_calls")
+    if calls:
+        fixed = []
+        for c in calls:
+            fn = (c or {}).get("function") or {}
+            args = fn.get("arguments")
+            if isinstance(args, str) and args:
+                try:                                     # (escaped or not in the JSON: read, then written again)
+                    read = json.loads(args)
+                    plain = _plain(read)
+                    new = json.dumps(plain) if plain != read else args
+                except ValueError:
+                    new = args.translate(PLAIN_ARGS)
+                if new != args:
+                    c = {**c, "function": {**fn, "arguments": new}}
+            fixed.append(c)
+        out = {**out, "tool_calls": fixed}
+    return out
+
+
+def reasoned(data: dict, msg: dict) -> bool:
+    """The answer shows that the model reasoned before it (a field for the reasoning, or reasoning tokens counted)."""
+    details = ((data.get("usage") or {}).get("completion_tokens_details") or {})
+    return bool(msg.get("reasoning_content") or msg.get("reasoning") or (details.get("reasoning_tokens") or 0) > 0)
 
 
 class EmptyAnswer(LLMError):
@@ -134,6 +373,7 @@ class LLMConfig:
     temperature: float = 0.2
     thinking: bool = False
     extra_headers: dict | None = None
+    reasoning_effort: str = ""
 
     @classmethod
     def from_settings(cls) -> "LLMConfig":
@@ -147,7 +387,8 @@ class LLMConfig:
                    scope=st.get("llm.middleware.scope"), renew_before=st.get("llm.middleware.renew_before"),
                    ca_bundle=st.get("llm.ca_bundle"), verify_tls=st.get("llm.verify_tls"),
                    timeout=st.get("llm.timeout"), temperature=st.get("llm.temperature"),
-                   thinking=st.get("llm.thinking"), extra_headers=st.get("llm.extra_headers") or {})
+                   thinking=st.get("llm.thinking"), extra_headers=st.get("llm.extra_headers") or {},
+                   reasoning_effort=st.get("llm.reasoning_effort") or "")
 
     def verify(self) -> Any:
         if not self.verify_tls:
@@ -237,6 +478,7 @@ class LLM:
         self.session = requests.Session()
         self._model = self.cfg.model
         self.last_usage: dict[str, Any] | None = None     # seconds and tokens of the last chat()
+        adapt(self.base, self.cfg.model)                 # (0.10.7) what the server was found to do, from the start
 
     def _request(self, method: str, path: str, **kw: Any) -> requests.Response:
         renewed = False
@@ -258,7 +500,8 @@ class LLM:
             if r.status_code == 401 and self.cfg.auth == "middleware" and not renewed:
                 renewed = True                   # the token expired early or was revoked: once more
                 continue
-            if r.status_code in RETRY_STATUS and attempt < len(RETRY_DELAYS):
+            if r.status_code in RETRY_STATUS and attempt < len(RETRY_DELAYS) and \
+                    not (r.status_code == 500 and MODEL_OUTPUT_UNREAD.search(r.text[:1000])):
                 time.sleep(RETRY_DELAYS[attempt])
                 continue
             if r.status_code in (401, 403):
@@ -279,7 +522,7 @@ class LLM:
         return self._model
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None, max_tokens: int | None = None,
-             tool_choice: str | None = None) -> dict:
+             tool_choice: str | None = None, stop: list[str] | None = None) -> dict:
         """One chat completion; returns the assistant message (content and/or tool_calls). An empty
         answer (seen with local models, often right after a big tool result) is asked again
         EMPTY_RETRIES times before EmptyAnswer. Inside background(), waits first while answers
@@ -293,12 +536,23 @@ class LLM:
             except Exception:  # pylint: disable=broad-except   (never blocks the work)
                 pass
         body: dict[str, Any] = {"model": self.model, "messages": messages, "temperature": self.cfg.temperature}
+        reasoning = self.reasons()
+        effort = str(getattr(self.cfg, "reasoning_effort", "") or "")
+        if effort and _EFFORT.get(self.base, True):
+            body["reasoning_effort"] = effort           # (0.10.7) gpt-oss: low, medium, high
+        if tools and tool_choice == "none" and not _NONE.get(self.base, True):
+            tools = None                                # (a server without "none": the tools left out instead)
         if tools:
             body["tools"] = tools
-            body["tool_choice"] = tool_choice if tool_choice in ("auto", "required") and \
-                _CHOICE.get(self.base, True) else "auto"
-        if max_tokens:
-            body["max_tokens"] = max_tokens
+            if tool_choice == "none":                   # (0.10.7) the tools declared, none to call: a text answer
+                body["tool_choice"] = "none"
+            else:
+                body["tool_choice"] = tool_choice if tool_choice in ("auto", "required") and \
+                    _CHOICE.get(self.base, True) else "auto"
+        if max_tokens:                                  # (0.10.7) a model that reasons first: its reasoning counts
+            body["max_tokens"] = max_tokens + (REASONING_TOKENS if reasoning else 0)
+        if stop and not reasoning:                      # (a stop string met in the reasoning would cut it: none)
+            body["stop"] = list(stop)                   # (0.10.7) a step without tools ends where a tool call begins
         if not self.cfg.thinking and _TEMPLATE_KWARGS.get(self.base, True):
             body["chat_template_kwargs"] = {"enable_thinking": False}   # Qwen3 and the like: no reasoning
         self.last_usage = self.last_finish = None
@@ -313,9 +567,20 @@ class LLM:
                         raise                                    # (a context too long is no refused field)
                     if body.get("tool_choice") == "required" and re.search(r"tool.?choice|required", said, re.I):
                         _CHOICE[self.base] = False               # a server that only knows "auto"
+                        _learned(self.base, self.model, "tool_choice_required", False)
                         body["tool_choice"] = "auto"
+                    elif body.get("tool_choice") == "none" and re.search(r"tool.?choice|none", said, re.I):
+                        _NONE[self.base] = False                 # a server without "none": no tools then
+                        _learned(self.base, self.model, "tool_choice_none", False)
+                        body.pop("tool_choice")
+                        body.pop("tools", None)
+                    elif "reasoning_effort" in body and re.search(r"reasoning.?effort", said, re.I):
+                        _EFFORT[self.base] = False               # a server or gateway without it
+                        _learned(self.base, self.model, "reasoning_effort", False)
+                        body.pop("reasoning_effort")
                     elif "chat_template_kwargs" in body:
                         _TEMPLATE_KWARGS[self.base] = False      # a gateway that refuses unknown fields
+                        _learned(self.base, self.model, "template_kwargs", False)
                         body.pop("chat_template_kwargs")
                     else:
                         raise
@@ -332,13 +597,35 @@ class LLM:
             _record(body.get("model") or "", one, time.time() - t0, len(tools or []), None)
             self.last_usage = add_usage(self.last_usage or {}, one)
             self.last_finish = (data["choices"][0] or {}).get("finish_reason")    # "length": cut by max_tokens
+            msg = plain_typography(harmony_read(msg))
+            if reasoned(data, msg) and not _REASONING.get(self._key()):
+                _REASONING[self._key()] = True           # (0.10.7) the next calls give its reasoning room
+                if not self.cfg.thinking:                # (a model that reasons with thinking off: kept for all)
+                    _learned(self.base, self.model, "reasons", True)
+                log.info("supagent: the LLM %s reasons before it answers: its calls get %d tokens more", self.model,
+                         REASONING_TOKENS)
             text = re.sub(r"<think>.*?</think>", "", msg.get("content") or "", flags=re.S)
             if text.strip() or msg.get("tool_calls"):
                 return msg
+            if self.last_finish == "length" and body.get("max_tokens"):   # (0.10.7) the reasoning took the answer's
+                _REASONING[self._key()] = True                             # tokens: again, with room for both
+                body["max_tokens"] = int(body["max_tokens"]) + 2 * REASONING_TOKENS
+                body.pop("stop", None)
         raise EmptyAnswer("the LLM returned an empty answer")
+
+    def _key(self) -> str:
+        return f"{self.base}|{self.model}"
+
+    def reasons(self) -> bool:
+        """(0.10.7) Whether this model reasons before each answer, its reasoning counted in max_tokens: llm.thinking
+        on, a known reasoning model by its name (gpt-oss ...), or its answers seen reasoning."""
+        return bool(_REASONING.get(self._key()) or getattr(self.cfg, "thinking", False) or
+                    REASONS_BY_NAME.search(self.model or ""))
 
     def _raw(self, body: dict) -> tuple[dict, float]:
         body = {"model": self.model, "temperature": 0, **body}
+        if body.get("max_tokens") and self.reasons():   # (0.10.7) the probes of a reasoning model: room to reason
+            body["max_tokens"] = int(body["max_tokens"]) + REASONING_TOKENS
         t0 = time.time()
         r = self._request("POST", "/chat/completions", data=json.dumps(body))
         return r.json(), round(time.time() - t0, 2)
@@ -387,6 +674,100 @@ class LLM:
                                "works": cache[1]["cached_tokens"] >= 0.5 * max(1, cache[1]["prompt_tokens"])}
         return out
 
+    def _probe_call(self, body: dict) -> tuple[dict, str | None]:
+        """One call of the probe, sent as it is (no room added): (its answer, None) or ({}, the error)."""
+        try:
+            r = self._request("POST", "/chat/completions", data=json.dumps({"model": self.model, "temperature": 0,
+                                                                              **body}))
+            return r.json(), None
+        except (LLMError, ValueError) as ex:
+            return {}, str(ex)[:300]
+
+    def _context_size(self) -> int | None:
+        """The model's context, when the server says it (vLLM: max_model_len in /models; llama.cpp: /props)."""
+        try:
+            for m in self._request("GET", "/models").json().get("data") or []:
+                if m.get("id") == self.model:
+                    n = m.get("max_model_len") or (m.get("meta") or {}).get("n_ctx") or m.get("context_length")
+                    if n:
+                        return int(n)
+        except (LLMError, ValueError, TypeError):
+            pass
+        try:
+            root = re.sub(r"/v1/?$", "", self.base)
+            props = self.session.get(root + "/props", headers={**(self.cfg.extra_headers or {}),
+                                                              **auth_headers(self.cfg)},
+                                     verify=self.cfg.verify(), timeout=20).json()
+            n = (props.get("default_generation_settings") or {}).get("n_ctx") or props.get("n_ctx")
+            return int(n) if n else None
+        except Exception:  # pylint: disable=broad-except   (a server without it)
+            return None
+
+    def probe(self, save: bool = True) -> dict:
+        """(0.10.7) What this server and model do, by a few small calls of made-up text (never the users' data): a
+        short answer (does it reason first, its reasoning counted, and come back empty when short), reasoning_effort,
+        chat_template_kwargs, a tool call with tool_choice auto, required and none, the typography of a name, the
+        context size. Kept (supagent_meta) and applied in this process; the other processes read it."""
+        model = self.model
+        prof: dict[str, Any] = {"base": self.base, "model": model, "family": family_of(model), "source": "probe",
+                                "at": datetime.datetime.utcnow().isoformat(timespec="seconds")}
+        ask = [{"role": "user", "content": "Reply with the single word OK."}]
+        # the calls as the agent makes them: thinking off for the models that have the switch (Qwen3...), so that
+        # "reasons" means a model that reasons all the same (gpt-oss)
+        no_think = {} if self.cfg.thinking else {"chat_template_kwargs": {"enable_thinking": False}}
+        data, err = self._probe_call({"messages": ask, "max_tokens": 16, **no_think})
+        prof["template_kwargs"] = not (no_think and err and re.search(r"HTTP (400|422)", err))
+        if not prof["template_kwargs"]:
+            no_think = {}
+            data, err = self._probe_call({"messages": ask, "max_tokens": 16})
+        msg = ((data.get("choices") or [{}])[0].get("message") or {}) if not err else {}
+        text = str(msg.get("content") or "")
+        prof["reasons"] = bool(reasoned(data, msg) or REASONS_BY_NAME.search(model or ""))
+        prof["reasoning_field"] = "reasoning_content" if msg.get("reasoning_content") else \
+            ("reasoning" if msg.get("reasoning") else "")
+        prof["harmony_in_content"] = bool(HARMONY_TOKEN.search(text) or HARMONY_JOINED.search(text))
+        prof["short_answer_empty"] = not err and not harmony_read(msg).get("content", "").strip() and \
+            ((data.get("choices") or [{}])[0].get("finish_reason") == "length")
+        room = REASONING_TOKENS if prof["reasons"] or prof["short_answer_empty"] else 0
+        if prof["short_answer_empty"]:
+            prof["reasons"] = True
+        data, err = self._probe_call({"messages": ask, "max_tokens": 64 + room, "reasoning_effort": "low", **no_think})
+        prof["reasoning_effort"] = not (err and re.search(r"HTTP (400|422)", err))
+        tool = {"type": "function", "function": {
+            "name": "ticket_status", "description": "The status of a support ticket, by its number",
+            "parameters": {"type": "object", "required": ["number"], "properties": {"number": {"type": "string"}}}}}
+        asked = [{"role": "system", "content": "Answer only from the tools: you know nothing about the tickets."},
+                 {"role": "user", "content": "What is the status of ticket 4711?"}]
+
+        def called(d: dict) -> bool:
+            m = harmony_read((d.get("choices") or [{}])[0].get("message") or {})
+            return any((c.get("function") or {}).get("name") == "ticket_status" for c in m.get("tool_calls") or [])
+
+        data, err = self._probe_call({"messages": asked, "tools": [tool], "tool_choice": "auto",
+                                      "max_tokens": 300 + room, **no_think})
+        prof["tool_calls"] = None if err else called(data)
+        data, err = self._probe_call({"messages": asked, "tools": [tool], "tool_choice": "required",
+                                      "max_tokens": 300 + room, **no_think})
+        prof["tool_choice_required"] = not (err and re.search(r"HTTP (400|422)", err))
+        data, err = self._probe_call({"messages": asked, "tools": [tool], "tool_choice": "none",
+                                      "max_tokens": 300 + room, **no_think})
+        prof["tool_choice_none"] = not (err and re.search(r"HTTP (400|422)", err))
+        data, err = self._probe_call({"messages": [{"role": "user", "content": (
+            "Write exactly this line and nothing else: the server zq-node-17 and the database db-a1 hold 2 000 rows")}],
+            "max_tokens": 120 + room, **no_think})
+        said = str(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "") if not err else ""
+        prof["typography"] = said != said.translate(PLAIN_TEXT)
+        prof["context"] = self._context_size()
+        prof["thinking"] = bool(self.cfg.thinking)      # what the calls were (a model with thinking on reasons)
+        prof["said"] = profile_said(prof)
+        if save:
+            save_profile(prof)
+        _PROFILE["read_at"].pop(f"{self.base}|{model}", None)
+        for table in (_CHOICE, _NONE, _EFFORT, _TEMPLATE_KWARGS):
+            table.pop(self.base, None)                   # what the probe found, over what this process had guessed
+        apply_profile(prof)
+        return prof
+
     def check(self) -> dict:
         """What `superset supagent test-llm` and the admin page's test button show."""
         t0 = time.time()
@@ -398,7 +779,27 @@ class LLM:
         msg = self.chat([{"role": "user", "content": "Reply with the single word OK."}], max_tokens=16)
         out["answer"] = (msg.get("content") or "").strip()[:80]
         out["seconds"] = round(time.time() - t0, 2)
+        try:                                           # (0.10.7) what the server does, kept for every process
+            out["profile"] = self.probe()
+        except Exception as ex:  # pylint: disable=broad-except   (the test itself answered)
+            out["profile"] = {"said": [f"not profiled: {type(ex).__name__}: {str(ex)[:200]}"]}
         return out
+
+
+def ensure_profile() -> dict | None:
+    """(0.10.7) The LLM profiled when none is known for its address and model, or it is PROFILE_DAYS old (the
+    nightly learning calls it): what a new or upgraded server does is found before the users' questions meet it."""
+    try:
+        client = LLM()
+        prof = stored_profile()
+        fresh = prof and prof.get("source") == "probe" and prof.get("base") == client.base and \
+            prof.get("model") == client.model and prof.get("at") and \
+            datetime.datetime.utcnow() - datetime.datetime.fromisoformat(str(prof["at"])) < \
+            datetime.timedelta(days=PROFILE_DAYS)
+        return prof if fresh else client.probe()
+    except Exception as ex:  # pylint: disable=broad-except   (the learning goes on without it)
+        log.info("supagent: the LLM not profiled: %s", str(ex)[:300])
+        return None
 
 
 @contextmanager

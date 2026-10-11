@@ -1,5 +1,212 @@
 # Changes
 
+## 0.10.7 — 2026-10-11
+
+The agent's answers made steady (the team's request of 9 October): questions on the System map's paths (from a part to
+the metrics, the documents and the parts to check), root causes with their decoys, the fastest way for simple
+questions, and an honest "no data". Developed on open question sets; at the end, at the owner's request, the
+held-out sets were used too: the release candidate's held-out failures were fixed (each as a class of failure, with
+tests on other data, no question's text or value in the code) and the sets run again. The held-out figures below
+therefore measure questions the last fixes were made against, not unseen ones. One held-out grader was corrected
+before the final run: it read "0 minutes late" and "failed 0 times" as a late report and a failure.
+
+Measured on the frozen build 7eb7412 with Qwen3.6-35B-A3B (llama.cpp, its server restarted first), every set twice,
+under the rule written before any run (absolute targets):
+* Held-out sets (75 + 25 questions, twice: 200 answers): **185 right (92.5%), 11 wrong without a mark**; the rule asked
+  190 and at most 4: NOT met. Round 1: 74/75 and 21/25; round 2: 69/75 and 21/25.
+* Open sets (156 + 25 questions, twice: 362 answers): **355 right (98.1%), 7 wrong without a mark**; the rule asked 95%
+  and at most 7: met. Round 1: 154/156 and 23/25; round 2: 154/156 and 24/25.
+* A simple question answered over its budget of calls and seconds counts as a miss in these figures.
+* 1517 unit tests passed; no lab name or benchmark figure in the code; the upgrade 0.10.6 -> 0.10.7 on a copy of a lab's
+  data: tables v18 unchanged, its 29 settings kept (same digest), health 200; the knowledge search on a lab map: 80/80
+  names found (78 asked).
+Published although the held-out clause of the rule were not met: the owner asked for this release by the afternoon of 11
+October, after a last loop of fixes (above).
+
+Known gaps, seen in the final run (for 0.10.8): a name the question says that the data writes as a code (a country
+and its ISO code) can be refused as a condition nobody asked for, and the count then covers more than was asked; an
+answer sent back by a check can be replaced by a reply to the check; a follow-up going back to an earlier subject
+("back to ...") can keep the subject of the turns in between; an investigation can find the change behind a failure
+and miss the error its part logged; "which database user held it" can be answered with the user that the lines show
+waiting for the lock; a part asked about in a yes or no can be confirmed as a cause because its alert fired at the
+same time; an observation the question states at a time of day can be denied from hourly totals that hide a drop of
+some minutes; the consumers reached through a mirror (two links on the map) can be missed; a metric counted by its
+samples (COUNT(*)) is refused again for each new query, which spends the calls of a simple question. Read by hand,
+two of the held-out answers counted wrong say the right thing (a "no data" written in other words; a right count
+followed by another day's figure); the figures above stay as graded.
+
+Questions on the System map
+* **The routes from a part to another** (`system_links` with `to`): each route a list of links, the shortest first,
+  distinct routes only, from each named part apart; given first in the tool's result, like **what a failure reaches**
+  (a server, a rack, a room or a cluster: the parts on it, then the ones that call them), the long chains cut short.
+* **An answer on what a failure affects names every part it reaches** (system_links' `if_it_fails`: on it, then
+  through it, then further), or says why one is not affected.
+* A question of dependencies goes to the map's tool first; the servers a part runs on are said with where they are in
+  the data (their metrics' and logs' labels); a scrape target of a host is said; a file named after a part speaks for
+  it; a data source's address comes before its type.
+
+Investigations
+* **An investigation about to run out of calls with its records never looked up spends one on what changed behind
+  the cause first** (a deployment): its calls had gone to queries that failed.
+* **Records with a start and an end (alerts, incidents, maintenance) are read by their overlap with the window** in an
+  investigation, once per answer: an alert raised the day before and still firing was never read.
+* Facts asked by their name ("the export of the 28th") are a lookup with the whole picture of their parts and their
+  records; a cause said with a verb stays an investigation; a recurring thing asked as a cause is compared with its
+  other days; the records that began just after the time given are read too; `records_about` reads a record table that
+  is an index pattern.
+* **A cause blamed whose records were never looked up** is sent back once (its changes, jobs and alerts read first).
+* **A yes or no asked about a suspect is said first**, then why (out of calls too); a suspect named with a hedge is
+  checked, not repeated. "What was the cause?" is no yes or no: it is not asked for one.
+* A subject, an aspect or a value that only watches others (a monitoring job) is never taken for a blamed part.
+* **Where the rows it blames ran** (a server, a host, a node read in their table) is part of an investigation's answer:
+  read once when no query did.
+* The work plan's step "what changed behind the cause" counts as done once the records were looked up (nothing found
+  included); a task of the plan that is the answer itself ("compile the final answer") is written by answering.
+* **Who did something on a part** (which database user, account or session held, ran, deleted...) is read in the
+  log lines of that part's servers, not taken from a change's author: an answer whose queries read none of them is
+  sent back once; the service user is read where its error says.
+
+Metrics
+* "Which metrics...?" asks for their names: the first query of their values is sent back once (one more is allowed).
+* **The data dictionary of one metric gives the values of its labels in all its data**: the learning reads an hour of
+  series, which an incident's rare value (result = error) is not in; describe_data of that metric adds them ("ok,
+  declined (also in its data: error)") instead of letting the agent conclude the metric cannot count errors.
+* "Which metrics show it?" after an incident reads the data to tell which moved; a follow-up that names a category ("on
+  the database side") and no value of its own means the values of that category the chat named: they are searched with
+  it. A family's metrics are offered together.
+
+Figures and follow-ups
+* A follow-up asking a new aggregate ("and its average?") or a new value (named in the plural too: "timeouts" for the
+  value TIMEOUT) needs its own query; an average per day of an
+  amount sums each day first; "its" refers to the chat's subject, not to the previous question's own narrowing; a
+  follow-up counts the rows of the answer it goes on from; its time is checked against the hours of the answer before;
+  a figure asked after an investigation is answered as one figure.
+* A follow-up's answer that gives names, times or figures no result holds is sent back with a query made compulsory
+  ("at what time was it?" after the day's maximum is read, not guessed).
+* **A follow-up answered with the previous answer written again** (a root cause's whole report for "how many times
+  were they killed?") is sent back once with the question it has to answer, said in the first sentence.
+* **A field the question names is read**: "how many jobs were relaunched?" counts the flag RELAUNCHED, not another
+  field's value that looks like it (said once when no query read it).
+* A total minus its part (the sales minus the refunds of those orders) is not computed over one INNER JOIN, which keeps
+  only the rows that have a part: the total over all its rows, the part through the join. A join of a raw index that
+  the connector refuses (written WITH) is answered with the join that runs (the tables themselves, aggregated).
+* Sizes in binary units are computed with binary factors; the statistics of single runs come from the runs' records;
+  days written in full ("the day after 26 September") are said as dates.
+
+Honesty
+* **No zero for data that is not collected**; an absence of data is said first, then where it was looked for; a zero
+  counted by a text search for a name no field holds is sent back (where its records are is looked for first).
+* A health check with no check defined is said so, not counted as a check that failed.
+* A query written in the answer with a result made up is run; an answer that stopped in the middle, or that only
+  promises the answer or announces one more check ("let me verify ...") when out of calls, is asked again once; an
+  unreadable tool call is retried once; the very same call sent a third time ends the calls (the answer is written
+  from the results); an answer that ends inside a table row or a code block left open is asked again, whatever its
+  length.
+* A word of a data name is not a value (a value's word written as part of a queried table's name, "network receive
+  errors" for a ..._network_receive_errs_total counter, is not taken for a team named network); a filter value that is
+  another field's name is said; a question back ends with its question.
+* When the calls run out after a check sent an answer back, the answer written last is given (with its marks), not
+  "the model wrote no text" and a raw result; an answer written again after any check says nothing of the check; a
+  check that corrects one detail (sizes in binary units, a count, a zero) asks for the whole answer again, not the
+  detail alone.
+* An answer built from a tool's result (the map, the dictionary, a dashboard's or a dataset's description) is not
+  sent back for names no tool gave: its headings and the keys of its lists ("**Routing layer**", "- **Purpose**:")
+  were taken for names, a tool made compulsory, and the model wrote in circles; an answer with no tool result behind
+  it is checked as before. What an answer says was done to a note is checked in a chat about notes only.
+* A step that had to call a tool and went round in circles, with no result yet, is asked for the call again (not
+  for a final answer "from the results above", which were none).
+* "Compare with X." after several measures compares every measure the chat asked, not the last one only.
+* **A term the team defined with some values of a field is computed with those values**: "the orders delivered"
+  computed with the orders paid too (a wider rule of the team, for sales, put in place of the definition) is sent
+  back once (by code, `agent.definition_links`); a value another term of the question or the question itself names
+  is allowed. The glossary given with a question says so.
+* **"Which part has the most ...?" answered from single rows that repeat a part** (one trader's row for a book) is
+  said with the result: the rows are summed, counted or averaged per part before the comparison.
+* A day said in several words ("the day before yesterday", "3 days ago", "last week", "this morning") is one date:
+  the words before it name the period's event ("closed the day before yesterday": the closing time).
+* **A follow-up that names its subject and asks another measure** ("What was <name>'s average latency that day?"
+  after "Which model had the most failures?") is about that subject, not the failures the previous question kept to
+  (told by the earlier answers' queries, whatever words were used); the same name with no other measure ("And
+  <other>'s?") keeps them. When a follow-up's conditions are sent back, the agent decides (a message with no scope of
+  its own goes on from the chat's) instead of asking the user back; a question back asked again word for word for a
+  new question is sent back.
+* **"(a) OR (b) AND <filters>" is never run as written**: refused with the WHERE it means, "((a) OR (b)) AND
+  <filters>" (a comparison of two days counted the first day's rows unfiltered when the refused call was sent again).
+* **A level asked at a time of day is read at that moment** ("the memory use at 09:30"), not as the average of the
+  hour that starts then: sent back once to read the samples at the moment.
+* Sent back for the chat's period, an answer that says the period with no query run since is sent back with a query
+  made compulsory (a follow-up's count over every day was said to be the week's).
+* A failed call refused when sent again is no failure of the source, and a call without the expression an error
+  names runs (SUM(CAST(n AS BIGINT)) refused by a metrics source, then SUM(n) refused too).
+* An answer's opening "I have all the information needed ... No additional tool calls are needed." is removed.
+* **A memory that applies only when the user says X** ("When the user says 'X', filter by APPLICATION='X'") is not
+  given with a question whose chat never says X (told "applies only then", a model still filtered by X), and another
+  memory that only names X ("the critical applications are X and Y") does not make that filter asked for a question
+  it has nothing to do with.
+* "It happens every night: was that related to the problem?" is answered after comparing with the other nights:
+  what happens at the same hours every night is the usual, not the cause of a problem that happened once.
+* A dashboard (a value that shows other parts) is never blamed as a cause.
+* The metrics found by search_knowledge say the values of their small labels in all their data, beyond the hour
+  the learning sampled ("result: error" only in an incident's hours), as describe_data of one metric does.
+
+The fastest way
+* A simple question searches the knowledge once and reads the dictionary at most twice before its query, and lists
+  no databases once the dictionary said where the data is; after its fifth call it is told once to answer when the
+  results hold the answer.
+* "Which metrics ...?" asks for names: each new query of their values is sent back (two at most), not only the first;
+  the same query sent again runs (when the values are needed to tell which ones).
+* A search of the knowledge of one kind that finds nothing searches every kind (a runbook kept as a wiki page is
+  found when the guides were searched); a search that found nothing is not the question's one search.
+* **The knowledge given with a question holds the sentence that answers it**: of two pieces of one page found, the one
+  that writes the names of the question is given ("which one is its primary?" gets "the primary runs on ...").
+* "Which data stores ...?" lets a query keep the kinds of store (database, cache, broker, storage) without a send-back.
+
+The knowledge search
+* **The System map's explanations that the AI wrote are said so** wherever the agent reads them (the map's pieces of
+  search_knowledge and of the knowledge given with a question, the brief's "What to do when following them",
+  system_links): "- a monitors b (explained by the AI): ..." (a person's own words as they are). An answer gave the
+  AI's advice on following an alert's link as "what the runbook says", the runbook itself in the same result.
+* "guide", "doc", "runbook", "wiki", "documentation"... search the catalog's guides and the documents and sites
+  together; a kind that finds nothing searches the documentation and the users' notes, then every kind.
+* An excerpt of a piece is chosen by the words of the question it keeps whole: a runbook's line of steps was cut
+  from the knowledge given with the question while its title was kept.
+* `records_about` reads the servers (and groups of servers) the System map says the named parts run on: an alert of
+  a cache is kept under the server it runs on.
+
+Documents and sites
+* **A wiki's pages are read through every way a page links to another**: through the site's own URL as its API gives
+  it (a wiki read through another name or address), over http or https, with or without the default port, by a short
+  link (…/x/AbCd), by title in viewpage.action?spaceKey=…&title=…, and in the storage format by address (ri:url) or by
+  the page's id (ri:content-entity). A site read as web pages follows its links written another way (http or https,
+  capitals, a default port), each page read once.
+* A link's full address is said after its words when they do not say it ("the dashboard (https://...)").
+* **"Pages" on each document**: every page read (title, address, space, size, links, images), the pages not read and
+  why (not readable, no text, too large, docs.skip_titles, read by another document), and the limit of pages reached
+  with how many linked pages were left. New addresses read 200 pages at most by default (was 20).
+
+The LLM
+* **supagent adapts itself to the LLM it is given**: what the server and the model do is found by a few small calls of
+  made-up text (does the model reason first, does a short answer come back empty, does the server take
+  reasoning_effort, chat_template_kwargs, tool_choice required and none, how the model writes a name, its context),
+  kept for every process (web workers, Celery workers) and applied from their first call; what the answers teach (a
+  field refused, a reasoning seen) is kept too. Made by the Test the LLM button (which says what supagent adapts), by
+  `superset supagent test-llm`, and by the nightly learning when none is known or it is a week old.
+* **Models that always reason (gpt-oss)**: room to reason added to every call, no stop strings, a cut empty answer
+  asked again with more room, the harmony format read when a server leaves it in the text, names written with
+  non-breaking hyphens or narrow spaces made plain, a closing answer asked with the tools declared and tool_choice
+  "none", an output the server could not read retried as a call, not as an outage. New setting
+  `llm.reasoning_effort` (empty: the server's default; low, medium, high). New setting `llm.keep_reasoning` (off; not
+  measured): a reasoning model's reasoning sent back with its tool calls within one answer, as OpenAI advises for
+  gpt-oss.
+
+Learning
+* One reading of the documents at a time; a diagram's source is read by the diagram reader only.
+
+0.10.6.1 and 0.10.6.2 are in this release (their sections below).
+
+Upgrade from 0.10.6.2: install the wheel and restart; tables v18 unchanged; two new settings (llm.reasoning_effort,
+empty by default; llm.keep_reasoning, off).
+
 ## 0.10.6.2 — 2026-10-09
 
 The team's reports of 9 October on 0.10.6.1: a value rejected in To review left the links and the items proposed with

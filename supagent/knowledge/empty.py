@@ -101,6 +101,25 @@ def _elsewhere_on() -> bool:
         return True
 
 
+def _named_field(w: str, others: list[tuple[str, str, dict]] | None) -> list[tuple[str, str]]:
+    """(0.10.7) The other fields of the query's tables named by `w` ("RELAUNCHED" for the field RELAUNCHED or
+    IS_RELAUNCHED: "What share of the jobs were relaunched?" was filtered on STATUS = 'RELAUNCHED' and answered "none
+    was relaunched"), with how to filter on them (= true for a field of true and false), two at most."""
+    word = _loose(w)
+    if len(word) < 4:
+        return []
+    out: list[tuple[str, str]] = []
+    for name, _table, st in others or []:
+        if word != _loose(name) and word not in re.split(r"[^a-z0-9]+", name.lower()):
+            continue
+        known, _complete = _values(st)
+        flags = bool(known) and {str(k).lower() for k in known} <= {"true", "false", "0", "1"}
+        out.append((name, " = true" if flags else ""))
+        if len(out) == 2:
+            break
+    return out
+
+
 def _holders(w: str, others: list[tuple[str, str, dict]] | None) -> list[tuple[str, str]]:
     """(field, the value as it is written there) for the other fields of the query's tables whose learned values
     hold `w` (exactly, else in another case): a value named with the wrong field ("STATUS = 'TIMEOUT'" where
@@ -141,6 +160,11 @@ def _value_hint(column: str, wanted: list[str], stats: dict, backend: str,
             parts.append((f"'{w}' is not a value of \"{column}\"; it is a value of {where}" if complete else
                           f"'{w}' is a value of {where}") + " (" + "; ".join(
                 f'filter on "{n}" = \'{v}\'' for n, v in held) + ")")
+            continue
+        named = _named_field(w, [o for o in others or [] if o[0] != column])
+        if named:                                      # (0.10.7) "STATUS = 'RELAUNCHED'" where RELAUNCHED is a field
+            parts.append(f"'{w}' is not a value of \"{column}\"; it is the name of the field " + " or ".join(
+                f'"{n}" (filter on "{n}"{how})' for n, how in named))
             continue
         close = difflib.get_close_matches(w, known, n=3, cutoff=0.6)
         if close:
@@ -253,7 +277,8 @@ def why_empty(database: Any, sql: str, counted: bool = False) -> str:
                     "does not cover that period (it starts later, or stopped), rather than a figure of 0.")
         if not hints:
             return ""
-        if any("is a value of" in h or "is written" in h for h in hints):   # the value is there, filtered wrongly:
+        if any("is a value of" in h or "is written" in h or "is the name of the field" in h for h in hints):   # the
+            #                                               value is there, filtered wrongly (or a field of its own):
             return ("Nothing matched (0). From the data dictionary: " + "; ".join(hints[:4]) + ". Run the query "
                     "again with the value as the data holds it (the field and the spelling above), rather than a "
                     "count of 0 or saying that it does not exist.")

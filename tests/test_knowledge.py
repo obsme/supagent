@@ -513,3 +513,22 @@ def test_a_wrong_mark_holds_for_the_label_name_whatever_metric_stands_for_it(wor
     db.session.commit()
     out = R.learn_relations()
     assert out["same_values"] == 0 and out["rejected"] == 1
+
+
+def test_a_family_asked_by_its_start_lists_its_metrics(world):
+    """(0.10.7) "Which metrics show it on the database side?": describe_data asked for "pg_stat_database" (no metric
+    of that name) gave the topic's best metrics, without the family's locks and transaction metrics."""
+    from superset.extensions import db
+
+    from supagent.knowledge.describe import describe
+    from supagent.knowledge.store import upsert
+    from supagent.security import acting_as
+
+    for name in ("node_load1", "node_memory_free_bytes"):
+        upsert(world["run"], world["s_prom"], "metric", "", name, {"metric_type": "gauge", "stats": {"series": 4}})
+    db.session.commit()
+    with acting_as("admin"):
+        text = describe("load of the servers", "node_stats")
+    assert "there is no index or metric named 'node_stats'" in text
+    assert "(the metrics whose name begins with node_: node_cpu_seconds_total, node_load1, node_memory_free_bytes)" \
+        in text

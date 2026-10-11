@@ -31,7 +31,7 @@ HOURS = re.compile(r"\b\d{1,2}[:h]\d{2}\b|\b\d{1,2}\s*(?:am|pm)\b|\b(night|morni
 # a day said relative to another ("And on the 23rd?", "Et le 23 ?", "the day before", "la veille", "that day"): its
 # month, or its day, is the one of the day named just before it (in the same text, or else in the questions before)
 BARE_DAY = re.compile(
-    r"\b(?:the|on)\s+(?P<en>\d{1,2})(?:st|nd|rd|th)(?=\s*(?:[?.!,;:)]|$|(?:and|or|instead|too|also|then|please|at|"
+    r"\b(?:the|on)\s+(?P<en>\d{1,2})(?:st|nd|rd|th)(?=\s*(?:[?.!,;:)]|['’]s\b|$|(?:and|or|instead|too|also|then|please|at|"
     r"as well)\b))|\ble\s+(?P<fr>\d{1,2})(?:er)?(?=\s*(?:[?.!,;:)]|$|(?:et|ou|aussi|alors|plut[ôo]t|[àa])\b))", re.I)
 TWO_DAYS_AGO = re.compile(r"\b(?:the\s+)?day\s+before\s+yesterday\b|\bavant[- ]hier\b", re.I)
 WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6,
@@ -48,6 +48,14 @@ DAY_BEFORE = re.compile(r"\b(?:the\s+)?day\s+before\b(?!\s+yesterday)|\bthe\s+pr
                         r"\ble\s+jour\s+(?:d'avant|pr[ée]c[ée]dent)\b", re.I)
 DAY_AFTER = re.compile(r"\b(?:the\s+)?(?:next|following)\s+day\b|\b(?:the\s+)?day\s+after\b(?!\s+tomorrow)|"
                        r"\ble\s+lendemain\b|\ble\s+jour\s+(?:d'apr[èe]s|suivant)\b", re.I)
+# (0.10.7) "the same weekday one week earlier", "two weeks before", "une semaine plus tôt": a day said from another one
+# (a model took "one week earlier" than 23 September for the 22nd); "a week ago" is from today, not here
+WEEK_SHIFT = re.compile(r"\b(?:(?:the\s+)?same\s+(?:week)?day\s+(?:of\s+)?)?(?P<n>one|a|1|two|2|three|3|four|4)\s+weeks?\s+"
+                        r"(?P<way>earlier|before|prior|later|after)\b|"
+                        r"\b(?P<nfr>une|deux|trois|quatre|1|2|3|4)\s+semaines?\s+(?P<wayfr>plus\s+t[ôo]t|avant|auparavant|"
+                        r"plus\s+tard|apr[èe]s)\b", re.I)
+WEEKS = {"one": 1, "a": 1, "1": 1, "two": 2, "2": 2, "three": 3, "3": 3, "four": 4, "4": 4, "une": 1, "deux": 2,
+         "trois": 3, "quatre": 4}
 SAME_DAY = re.compile(r"\b(?:that|the same|this same) day\b(?!\s+(?:last|of last|the previous|previous|a week|one "
                       r"week|the week|a month|of the previous|before|after)\b)|\bce jour[- ]l[àa]\b|"
                       r"\ble m[êe]me jour\b(?!\s+(?:de la semaine|du mois|la semaine|le mois))", re.I)
@@ -130,6 +138,10 @@ def _days_in(text: str, today: dt.date, anchor: dt.date | None = None) -> list[t
     for rx, delta in ((DAY_BEFORE, -1), (DAY_AFTER, 1), (SAME_DAY, 0)):
         for m in rx.finditer(text):
             items.append((m.start(), m.end(), ("shift", delta), False))
+    for m in WEEK_SHIFT.finditer(text):                # (0.10.7) "one week earlier", "deux semaines avant"
+        n = WEEKS[(m.group("n") or m.group("nfr")).lower()]
+        back = re.match(r"(?:earlier|before|prior|plus\s+t|avant|aupar)", (m.group("way") or m.group("wayfr")).lower())
+        items.append((m.start(), m.end(), ("shift", -7 * n if back else 7 * n), False))
     items.sort(key=lambda x: x[0])
     out: list[tuple[int, int, dt.date, bool]] = []
     last = anchor
@@ -138,7 +150,8 @@ def _days_in(text: str, today: dt.date, anchor: dt.date | None = None) -> list[t
             out.append((start, end, v, True))
             last = v
             continue
-        right_after = next((x[2] for x in items[i + 1:] if x[3] and 0 <= x[0] - end <= 3), None)
+        right_after = next((x[2] for x in items[i + 1:] if x[3] and 0 <= x[0] - end and (
+            x[0] - end <= 3 or re.fullmatch(r"\s*(?:than|que|from)\s+", text[end:x[0]], re.I))), None)
         base = right_after if v[0] == "shift" and right_after else last
         if base is None:
             continue
@@ -149,6 +162,18 @@ def _days_in(text: str, today: dt.date, anchor: dt.date | None = None) -> list[t
         out.append((start, end, day, False))
         last = day
     return out
+
+
+def days_note(question: str, earlier: list[str], today: dt.date) -> str | None:
+    """(0.10.7) The days a question names from another day ("the 23rd", "the day before", "that day", "the same
+    weekday one week earlier"), written in full for the model: it took "one week earlier" than 23 September for the
+    22nd. None when the question names none, or none can be read (no day before it)."""
+    text = question or ""
+    rel = [(s, e, d) for s, e, d, full in _days_in(text, today, anchor_of(earlier, today)) if not full]
+    if not rel:
+        return None
+    said = "; ".join(f'"{text[s:e].strip()}" is {d:%A} {d.day} {d:%B %Y}' for s, e, d in rel[:4])
+    return f"Dates: {said}."
 
 
 def anchor_of(questions: list[str], today: dt.date) -> dt.date | None:
@@ -323,6 +348,12 @@ def whole_day(question: str, today: dt.date) -> dt.date | None:
 EVENT_GENERIC = {"time", "date", "timestamp", "datetime", "at", "ts", "day", "dt", "utc", "on", "of", "local", "the"}
 DATE_PHRASES = (DAY_RANGE, DAY_MONTH, MONTH_DAY, ISO_DAY,
                 re.compile(rf"\b(?:in|during|for|of|since)\s+{MONTH}", re.I),
+                # (0.10.7) a day said in several words: the words before the whole phrase name its event ("tickets
+                # closed the day before yesterday": closed, not "before")
+                re.compile(r"\b(?:the\s+day\s+before\s+yesterday|(?:\d+|one|two|three|four|five|six|seven)\s+days?\s+"
+                           r"ago|last\s+(?:week|month|year|night|monday|tuesday|wednesday|thursday|friday|saturday|"
+                           r"sunday)|this\s+(?:week|month|year|morning|afternoon)|avant[- ]hier|il\s+y\s+a\s+\d+\s+"
+                           r"jours?)\b", re.I),
                 re.compile(r"\b(yesterday|today|hier|aujourd|that day|the same day|ce jour|le m[êe]me jour)", re.I))
 EVENT_WINDOW = 3                       # words before a date phrase that may name its event
 
@@ -649,6 +680,52 @@ def day_equality(sql: str, tables: set[str]) -> str | None:
         return (f"tool error (not run: date): {field} holds a date and a time (e.g. {sample}), so {field} = "
                 f"'{day}' matches only {day} 00:00 and finds nothing. For that day use \"{field}\" >= '{day}' AND "
                 f"\"{field}\" < '{nxt}'. If that exact instant is meant, send this same call again unchanged.")
+    return None
+
+
+# (0.10.7) records that run from a start to an end (alerts, incidents, maintenance, runs): their two time fields
+START_FIELD = re.compile(r"^(?:starts?|started|begin|begins|began|opened|fired|raised)(?:[_ .]?(?:at|time|date|ts|on))?$",
+                         re.I)
+END_FIELD = re.compile(r"^(?:ends?|ended|finish(?:ed)?|closed|resolved|cleared|stopped)(?:[_ .]?(?:at|time|date|ts|on))?$",
+                       re.I)
+
+
+def _bound(field: str, ops: str, sql: str) -> str | None:
+    m = re.search(rf"(?<![\w@.]){re.escape(field)}\"?\s*(?:{ops})\s*(?:(?:TIMESTAMP|DATE)\s+)?'([^']+)'", sql, re.I)
+    return m.group(1) if m else None
+
+
+def active_refusal(tool: str, args: dict) -> str | None:
+    """(0.10.7) An investigation's query that keeps the records of a table with a start and an end time (alerts,
+    incidents, maintenance) that STARTED in the window: the ones that began before and still ran in it are left out
+    (an alert raised the day before and still firing in the window was never read). Sent back once with the
+    condition of the records active in the window."""
+    if tool not in SQL_TOOLS:
+        return None
+    from supagent.knowledge.excluded import query_texts
+    from supagent.knowledge.rulecheck import _tables
+
+    sqls = [q for q in query_texts(args) if q]
+    if not sqls:
+        return None
+    sql = sqls[-1]
+    tables = _tables(sql)
+    if not tables:
+        return None
+    for table, fields in sorted(_date_fields(tables).items()):
+        starts = [f for f in fields if START_FIELD.match(f.split(".")[-1])]
+        ends = [f for f in fields if END_FIELD.match(f.split(".")[-1])]
+        for start in starts:
+            lo, hi = _bound(start, ">=|>", sql), _bound(start, "<=|<", sql)
+            if not lo or not hi or any(re.search(rf"(?<![\w@.]){re.escape(e)}(?![\w])", sql) for e in ends):
+                continue
+            end = ends[0] if ends else None
+            if end is None:
+                continue
+            return (f"tool error (not run: active in the window): this query keeps the rows of {table} that STARTED "
+                    f"between {lo} and {hi}; the ones that began before and still ran then are left out. For what "
+                    f"was active in the window: {start} < '{hi}' AND ({end} > '{lo}' OR {end} IS NULL). If only the "
+                    "ones that started then are meant, send this same call again unchanged.")
     return None
 
 

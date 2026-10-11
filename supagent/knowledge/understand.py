@@ -149,6 +149,35 @@ def norm(name: str) -> str:
     return re.sub(r"[\s_]+", "-", str(name or "").strip().lower()).strip("-")
 
 
+# (0.10.7) the names of files and folders that name no part (a stem or a folder of a repository's layout)
+LAYOUT_NAMES = {"main", "app", "application", "index", "config", "configs", "configuration", "settings", "values",
+                "defaults", "default", "tasks", "handlers", "vars", "templates", "files", "meta", "readme", "site",
+                "hosts", "inventory", "inventories", "docker-compose", "compose", "kustomization", "chart", "charts",
+                "src", "lib", "libs", "test", "tests", "docs", "doc", "scripts", "script", "jobs", "job", "bin", "cmd",
+                "pkg", "internal", "java", "com", "resources", "deploy", "deployment", "deployments", "manifests",
+                "base", "overlays", "prod", "production", "staging", "dev", "roles", "playbooks", "group-vars",
+                "host-vars", "rules", "dashboards", "provisioning", "datasources", "services", "service", "apps",
+                "clusters", "crontab", "dags", "pipeline", "pipelines", "events", "init", "setup", "utils", "common"}
+
+
+def file_part(path: str, names: "Names", own: dict[str, str]) -> str | None:
+    """(0.10.7) The part a repository's file is named after, else its nearest folder: a configuration of a tool that
+    several parts run (prometheus/prometheus-ams1.yml), a repository of jobs (jobs/reporting_export.py) or of
+    services (services/checkout/src/...) speak for the part their file or folder names, not for the tool's name
+    ("prometheus": another part's other name) nor for the repository."""
+    segs = [x for x in str(path or "").split("/") if x]
+    if not segs:
+        return None
+    stem = re.sub(r"(\.[A-Za-z0-9]{1,6})+$", "", segs[-1])
+    for c in [stem] + list(reversed(segs[:-1])):
+        if len(c) < 3 or norm(c) in LAYOUT_NAMES or names.hosts.get(norm(c)):
+            continue
+        p = names.part(c) or own.get(norm(c))
+        if p:
+            return p
+    return None
+
+
 def lang_of(path: str) -> str:
     from supagent.knowledge.docs import sample_base
 
@@ -550,7 +579,9 @@ def _monitoring(text: str, names: "Names", own: dict[str, str], me: str | None) 
 
     def at_host(t: Any) -> str | None:                    # "http://grafana:3000", "alertmanager:9093"
         host = re.sub(r"^\w+://", "", str(t or "")).split("/")[0].split("@")[-1].rsplit(":", 1)[0]
-        return resolve(host) if host and "{" not in host else None
+        if not host or "{" in host:
+            return None
+        return resolve(host) or (resolve(host.split(".")[0]) if "." in host else None)   # (0.10.7) "mimir.int.example"
 
     def pick(cands: list[str], who: str | None) -> str | None:
         """The one part meant: the only one, else the only one declared where the subject is (the storage
@@ -797,6 +828,59 @@ RECEIVES = re.compile(r"(?i)\b(?:collect(?:s|ing|ed)?|receiv(?:es|ing|ed)|gets?|
 ROUTE = re.compile(r"\b(?:through|via|por\s+medio\s+de|a\s+trav[eé]s\s+de|über|attraverso)\s+", re.I)
 ROUTE_TO = re.compile(r"\b(?:to|into|on\s+to|towards|onto|hacia|vers|zum|zur|verso)\s+(?:the\s+|el\s+|la\s+|le\s+|l['’]\s*|"
                       r"den\s+|dem\s+|der\s+|il\s+|lo\s+)?$", re.I)
+# (0.10.7) the source of a diagram written in a page or a file (Mermaid, PlantUML): the diagram reader reads its
+# arrows; read as sentences too, a Mermaid source's lines ran into one another (a dot in a node's name, "orders.placed",
+# ended no line) and an arrow's label ("publishes / writes") linked its part to every part of the following lines
+DIAGRAM_HEAD = re.compile(r"(?:(?:graph|flowchart)\s+(?:TD|TB|BT|RL|LR)\b|sequenceDiagram\b|classDiagram\b|"
+                          r"stateDiagram(?:-v2)?\b|erDiagram\b|C4(?:Context|Container|Component)\b)")
+DIAGRAM_LINE = re.compile(r"-->|---|-\.->|==>|->>|-->>|-\)|[\[({]|^(?:subgraph|end|classDef|class|style|click|"
+                          r"participant|actor|note|linkStyle|direction|%%)\b", re.I)
+
+
+MERMAID_BOX = re.compile(r"([A-Za-z0-9_][\w.:-]*)\s*[\[({>]+\s*\"?([^\]){}\"|\n]+?)\"?\s*[\]){}]+")
+
+
+def _boxes_said(line: str) -> str:
+    """A Mermaid line's boxes whose label says more than their name ("db[(shopdb on dbsrv1)]"): "db (shopdb on
+    dbsrv1).", each its own sentence; the arrows and their labels are the diagram reader's."""
+    return " ".join(f"{i} ({lab.strip()})." for i, lab in MERMAID_BOX.findall(line)
+                    if lab.strip() and norm(lab) != norm(i))
+
+
+def diagram_free(text: str) -> str:
+    """The text with the sources of its diagrams blanked (the same length, its lines kept): a ```mermaid or ```plantuml
+    fence, an @startuml ... @enduml block, a Mermaid block that starts with its header ("graph LR", "flowchart TD",
+    "sequenceDiagram"...) and goes on while its lines are diagram statements. Of a Mermaid line, only what its boxes'
+    labels say of them stays, a sentence each."""
+    out: list[str] = []
+    mode = ""                                           # "mermaid-fence", "fence", "plant", "mermaid" or ""
+    for ln in text.split("\n"):
+        s = ln.strip()
+        keep = None                                     # what stays of a blanked line ("": nothing)
+        if mode in ("fence", "mermaid-fence"):
+            keep = _boxes_said(ln) if mode == "mermaid-fence" and not s.startswith("```") else ""
+            mode = "" if s.startswith("```") else mode
+        elif mode == "plant":
+            keep, mode = "", ("" if s.lower().startswith("@enduml") else "plant")
+        elif re.match(r"```\s*mermaid\b", s, re.I):
+            keep, mode = "", "mermaid-fence"
+        elif re.match(r"```\s*(plantuml|puml)\b", s, re.I):
+            keep, mode = "", "fence"
+        elif s.lower().startswith("@startuml"):
+            keep, mode = "", "plant"
+        elif DIAGRAM_HEAD.match(s):
+            keep, mode = "", "mermaid"
+        elif mode == "mermaid" and s and DIAGRAM_LINE.search(s) and not s.startswith("#"):
+            keep = _boxes_said(ln)
+        else:
+            mode = "" if mode == "mermaid" else mode
+        if keep is None:
+            out.append(ln)
+        else:
+            out.append(keep[:len(ln)].ljust(len(ln)) if len(keep) <= len(ln) else " " * len(ln))
+    return "\n".join(out)
+
+
 FLOW_SOURCE = re.compile(r"(^|-)(rabbitmq|rabbit|kafka|nats|activemq|artemis|pulsar|sqs|kinesis|queue|broker|mq|redis|"
                          r"mysql|mariadb|postgres|postgresql|pgsql|mongo|mongodb|cassandra|db|database|elasticsearch|"
                          r"opensearch|s3|minio|bucket|storage)(-|$)", re.I)   # (0.10.4) what is read, never calls
@@ -1168,7 +1252,7 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
     if source in ("doc", "wiki"):
         unit_part = me or ""
         tools = {norm(t) for t, _rx in TOOLS}
-        prose = text
+        prose = diagram_free(text)                    # (0.10.7) a diagram's arrows: its reader's
         for t0, header, rows in _tables(text):
             roles = [next((v for v, rx in COLUMNS if rx.search(h)), None) for h in header]
             vcol = next((i for i, h in enumerate(header) if VIP_TEXT.search(h)), None)
@@ -1221,6 +1305,7 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                         if not role or not re.search(r"\w", value):
                             continue
                         if role == "runs_on":
+                            value = re.sub(r"(?i)^(?:on|in|at)\s+(?:the\s+)?(?=\S)", "", value)   # (0.10.7) "on db-01"
                             if PLATFORMS.match(value) or EVERY_SERVER.fullmatch(value):
                                 continue                          # Kubernetes, a cloud, "all": where, but no host
                             fact(part, "runs_on", names.hosts.get(norm(value)) or re.sub(r"\s*\(.*\)", "", value),
@@ -1732,6 +1817,9 @@ def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
                 owner = u["built"]                         # proxy_pass is the reverse proxy's, not nginx's)
             if u["kind"] == "page":
                 owner = _page_owner(u["title"], names, own) or owner
+            elif "speaks" not in u and not u.get("built") and len(u["found"]["workloads"]) != 1 and \
+                    (not owner or owner in (u["found"]["tool"], doc_owner.get(d.id))):
+                owner = file_part(u.get("path") or "", names, own) or owner   # (0.10.7) the part its name says
             owner = (names.part(owner) or own.get(norm(owner)) or owner) if owner else None
             if row is None:
                 row = KUnit(doc_id=d.id, ukey=u["ukey"][:512])

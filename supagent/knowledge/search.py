@@ -207,9 +207,26 @@ def capped(found: list[dict[str, Any]], k: int, per: int = PER_PAGE) -> list[dic
     return out
 
 
-def excerpt(text: str, query: str, size: int = EXCERPT_CHARS) -> str:
+PAGE_KINDS = ("doc", "context")           # pieces cut from a page by their size: one line of the prompt per page
+NAME_WRITTEN = re.compile(r"[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)+")
+
+
+def names_written(question: str) -> set[str]:
+    """The names a question writes whole, with a dash, a dot or an underscore (db-a, srv-db-01, rack r-1b), in lower
+    case; not a date, a time or a number."""
+    return {n.lower() for n in NAME_WRITTEN.findall(question or "") if not re.fullmatch(r"[\d.:_-]+", n)}
+
+
+def holds_names(text: str | None, names: set[str]) -> int:
+    """How many of `names` a text writes as names (not inside a longer one: db-a is not in stg-db-a)."""
+    low = (text or "").lower()
+    return sum(1 for n in names if re.search(r"(?<![\w-])" + re.escape(n) + r"(?![\w-])", low))
+
+
+def excerpt(text: str, query: str, size: int = EXCERPT_CHARS, lines: bool = False) -> str:
     """The part of a piece (`size` characters) that holds the most of the query's words, from a line or a sentence
-    start; the piece's address (its "Source:" line) kept in front; "…" where it is cut."""
+    start; the piece's address (its "Source:" line) kept in front; "…" where it is cut. (0.10.7) `lines`: from a
+    line start only (a System map piece: a link's line kept from its start, with who explained it)."""
     from supagent.knowledge.pgstore import words
 
     text = text or ""
@@ -223,20 +240,79 @@ def excerpt(text: str, query: str, size: int = EXCERPT_CHARS) -> str:
         if len(text) <= size:
             return head + text
     wanted = set(words(query))
-    starts = [0] + [i + 1 for i, ch in enumerate(text) if ch == "\n" or (ch == " " and i and text[i - 1] in ".:;")]
-    found = [(mm.start(), w) for mm in re.finditer(r"[A-Za-z0-9_]+", text) for w in words(mm.group(0)) if w in wanted]
+    starts = [0] + [i + 1 for i, ch in enumerate(text)
+                    if ch == "\n" or (not lines and ch == " " and i and text[i - 1] in ".:;")]
+    found = [(mm.start(), mm.end(), w) for mm in re.finditer(r"[A-Za-z0-9_]+", text) for w in words(mm.group(0))
+             if w in wanted]
+
+    def kept(at: int) -> str:                     # the part from `at`, ended with its last whole line or sentence
+        part = text[at:at + size]
+        if at + size < len(text):
+            cut = max(part.rfind("\n"), part.rfind(". "))
+            part = part[:cut + 1] if cut > size // 2 else part
+        return part
+
     best, best_at = -1, 0
     for at in starts:
         if at > len(text) - size // 2 and best >= 0:
             break
-        got = len({w for pos, w in found if at <= pos < at + size})
-        if got > best or (got == best and got > 0):    # the same words from a later start: they open the part
-            best, best_at = got, at
-    part = text[best_at:best_at + size]
-    if best_at + size < len(text):
-        cut = max(part.rfind("\n"), part.rfind(". "))
-        part = part[:cut + 1] if cut > size // 2 else part
+        end = at + len(kept(at))                  # (0.10.7) the words the part keeps, not those its end cuts off
+        got = len({w for start, stop, w in found if at <= start and stop <= end})   # ("what does the runbook say to
+        if got > best or (got == best and got > 0):    # check": its title kept, its line of steps cut; the same words
+            best, best_at = got, at                    # from a later start: they open the part
+    part = kept(best_at)
     return head + ("\u2026" if best_at else "") + part.strip() + ("\u2026" if best_at + len(part) < len(text) else "")
+
+
+MAP_PIECE = re.compile(r"^map:(\d+)$")
+LINK_KIND = re.compile(r"(?<= )link:[0-9a-f]{4,}(?= )")    # a kind of link a person named ("link:3f2a...")
+
+
+def as_shown(found: list[dict[str, Any]]) -> dict[str, str]:
+    """(0.10.7) The text of each System map piece of `found` as the agent reads it: a link whose explanations the AI
+    wrote says so before them ("- a monitors b (explained by the AI): ..."), a link of a kind a person named reads "is
+    linked to" (its words say what it is), the stored piece (searched, embedded) unchanged. {ref: text}, for the map
+    pieces shown otherwise than stored only."""
+    ids = {int(m.group(1)): f for f in found if (m := MAP_PIECE.match(str(f.get("ref") or "")))}
+    if not ids:
+        return {}
+    from supagent.knowledge.brief import ai_explained
+    from supagent.models import Link
+
+    refs = [f"facet:{i}" for i in ids]
+    try:
+        rows = db.session.query(Link.a_ref, Link.b_ref, Link.note, Link.detail, Link.explained_by).filter(
+            or_(Link.a_ref.in_(refs), Link.b_ref.in_(refs)), Link.status == "approved",
+            Link.explained_by.isnot(None)).all()
+    except Exception as ex:  # pylint: disable=broad-except   (the pieces as they are)
+        db.session.rollback()
+        log.warning("supagent search: who explained the map's links: %s", str(ex)[:300])
+        return {}
+    said: dict[str, list[tuple[str, str]]] = {}
+    for a_ref, b_ref, note, detail, who in rows:
+        by = ai_explained(who)
+        words = " ".join(t for t in ((note or "").strip(), (detail or "").strip()) if t)
+        if by and words:
+            for ref in {a_ref, b_ref} & set(refs):
+                said.setdefault(f"map:{ref.split(':', 1)[1]}", []).append((words, by))
+    out: dict[str, str] = {}
+    for i, f in ids.items():
+        marks = said.get(f"map:{i}", [])
+        lines = (f.get("text") or "").split("\n")
+        for n, line in enumerate(lines):
+            if not line.startswith("- "):
+                continue
+            line = LINK_KIND.sub("is linked to", line, count=1)
+            if " (explained by " not in line:
+                for words, by in marks:
+                    if line.endswith(": " + words):
+                        line = f"{line[:-len(words) - 2]} ({by}): {words}"
+                        break
+            lines[n] = line
+        text = "\n".join(lines)
+        if text != (f.get("text") or ""):
+            out[f"map:{i}"] = text
+    return out
 
 
 # (0.10.6) A question about how the system is built (its parts, what depends on what, a chain, what a failure
@@ -390,6 +466,23 @@ def usage_apart(text: str) -> tuple[str, str]:
     return "\n".join(ln for ln in lines if ln.strip() not in taken), " ".join(taken)
 
 
+LIVE_METRICS = 3     # the metric pieces of the prompt's block whose labels' values are read in all their data
+
+
+def live_values_note(piece: dict[str, Any], shown: str) -> str:
+    """" (also in its data: label: values)" for a metric piece: the values of its small labels in all its data that
+    its text does not say (the tools' reading, as the user who asks); "" when there are none or they cannot be read."""
+    try:
+        from supagent import tools
+
+        with tools._as_user():
+            note = tools._live_label_note(piece, shown)
+        return " " + note.strip() if note else ""
+    except Exception:  # pylint: disable=broad-except   (the piece as it was)
+        log.debug("supagent search: the live values of %s not read", piece.get("title"), exc_info=True)
+        return ""
+
+
 def knowledge_block(question: str, shown: set[str] | None = None, with_charts: bool = False,
                     prefer: dict[str, int] | None = None) -> str:
     """The knowledge relevant to a question, for the agent's prompt (short). `shown`: what the
@@ -420,13 +513,19 @@ def knowledge_block(question: str, shown: set[str] | None = None, with_charts: b
 
     gone = gone_names()
     found = [f for f in found if f["kind"] not in ("recipe", "memory") or not mentions_gone(f["text"], gone)]
-    given, kept = set(shown), []
+    names = names_written(question)
+    given, kept, page_at = set(shown), [], {}
     for f in found:          # one line per metric or index name, glossary term, entry, page of a document
         key = f["title"] if f["kind"] in OBJECT_KINDS else (f["ref"] if f["kind"] == "glossary"
                                                             else page_of(f["ref"], f.get("text")))
         if key in given:
-            continue
-        given.add(key)
+            at = page_at.get(key)    # (0.10.7) another piece of a page given: it is the page's line when it holds more
+            if at is not None and holds_names(f["text"], names) > holds_names(kept[at]["text"], names):   # of the
+                kept[at] = f         # names the question writes ("On which servers does db-a run, and which one
+            continue                 # is its primary?": the piece saying another database's primary was given, the
+        given.add(key)               # one saying db-a's left out as the same page)
+        if f["kind"] in PAGE_KINDS:
+            page_at[key] = len(kept)
         kept.append(f)
     from supagent.knowledge.experience import words
 
@@ -462,8 +561,10 @@ def knowledge_block(question: str, shown: set[str] | None = None, with_charts: b
     # says counts as said by the knowledge when a query's conditions are checked)
     if verdict.get("searched_also"):
         lines[0] += "\n(The question was also searched as the AI wrote it again: a word of it matched nothing.)"
+    live_left = LIVE_METRICS
+    shown_as = as_shown(found)               # (0.10.7) the map's links the AI explained, said so
     for f in found:
-        body, usage = f["text"] or "", ""
+        body, usage = shown_as.get(f["ref"], f["text"] or ""), ""
         if f["kind"] in OBJECT_KINDS:                 # (0.10.6) how to compute it, kept whole: a window around
             body, usage = usage_apart(body)           # the question's words cut "SQL: a counter: use rate or
             if usage and all(" ".join(u.split()) in " ".join(excerpt(f["text"] or "", question, 450).split())
@@ -472,10 +573,13 @@ def knowledge_block(question: str, shown: set[str] | None = None, with_charts: b
             elif usage:                               # per-second rate): the room taken from those descriptions,
                 body = LABEL_ABOUT.sub(r"\1", body)    # the labels and their values kept
         size = max(180, 450 - len(usage))
-        text = " ".join(excerpt(body, question, size).split())
+        text = " ".join(excerpt(body, question, size, lines=f["kind"] == "map").split())
         about = [t.split(": ", 1)[1] for t in cats.get(f["ref"], []) if not t.startswith("aspect")][:3]
         line = (f"- [{f['kind']}] {f['title']}" + (f" ({', '.join(about)})" if about else "") + f": {text[:size]}"
                 + (f" {usage}" if usage else ""))
+        if f["kind"] == "metric" and live_left > 0:   # (0.10.7) its labels' values in all its data that the
+            live_left -= 1                            # learning's hour had not ("result: error"): as the tools say
+            line += live_values_note(f, text[:size])
         if sum(len(x) for x in lines) + len(line) > budget:
             break
         lines.append(line)

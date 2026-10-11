@@ -48,6 +48,12 @@ SPECS: list[Spec] = [
     Spec("llm.timeout", 900, "int", "Seconds to wait for one LLM answer"),
     Spec("llm.temperature", 0.2, "float", "Sampling temperature"),
     Spec("llm.thinking", False, "bool", "Let reasoning models think before each step (slower)"),
+    Spec("llm.reasoning_effort", "", "choice", "Reasoning effort sent to models that always reason (gpt-oss: low, "
+         "medium, high; empty: the server's default; not sent to a server that refuses it)",
+         choices=("", "low", "medium", "high")),
+    Spec("llm.keep_reasoning", False, "bool", "(0.10.8, to measure) Send a reasoning model's reasoning back with its "
+         "tool calls, within one answer, as the server gave it (reasoning_content or reasoning): gpt-oss keeps its "
+         "plan from one call to the next, as OpenAI advises for its tool calls; off: as before"),
     Spec("llm.max_answer_tokens", 8192, "int", "Tokens of one LLM answer at most: a model that repeats itself "
          "stops there (0: the LLM server's own limit; with llm.thinking, four times this)"),
     Spec("llm.extra_headers", {}, "json", "More HTTP headers for the LLM calls (JSON object)"),

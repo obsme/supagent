@@ -356,10 +356,15 @@ def test_an_unreadable_tool_call_is_sent_back_not_an_error(ctx, monkeypatch):
     answer, _trace = a.ask("Make me a dashboard")
     assert answer.startswith("Done: 2 charts saved.") and len(ran) == 1
     assert "could not be read" in a.llm.seen[-1][-1]["content"]
-    b, _ran = agent_with(monkeypatch, [call("execute_sql", {"sql": "SELECT 1"}), bad, bad, bad,
+    b, _ran = agent_with(monkeypatch, [call("execute_sql", {"sql": "SELECT 1"}), bad, bad,
                                        say("One query ran; the charts are still to do.")])
     answer, _trace = b.ask("Make me a dashboard")
     assert answer.startswith("One query ran; the charts are still to do.")          # what was done, not an error
+    # (0.10.7) one retry only (the same context gave four unreadable calls of three minutes each), and when the
+    # closing step fails too, the answer says why it stopped, not "too many tool calls"
+    c, _ran = agent_with(monkeypatch, [call("execute_sql", {"sql": "SELECT 1"}), bad, bad, bad])
+    answer, _trace = c.ask("Make me a dashboard")
+    assert "could not be read" in answer and "too many tool calls" not in answer
 
 
 def test_a_nested_aggregate_on_metrics_gets_the_way_to_write_it():
@@ -659,8 +664,9 @@ def test_a_follow_up_answered_without_a_query_that_says_one_ran_is_sent_back(ctx
     answer, _trace = a.ask("Back to the September returns: how many of them were refunded?", history)
     sent = [m["content"] for m in a.llm.seen[-1] if m["role"] == "user" and m["content"] == NO_TOOL_NUDGE]
     assert sent and ran and answer.startswith("537") and "required" in a.llm.choices
-    # the check turned off, as before: one reminder without a compulsory query; the same made-up answer given again
-    # is kept, only marked
+    # the check turned off: one reminder; (0.10.7) its figure, 589, is in no result the last answer gave (the refunded
+    # ones are 537), so the next step must call a tool all the same (a made-up figure is not answered again from the
+    # chat); the same made-up answer given again without one is kept, only marked
     from supagent.agent import UNSUPPORTED_NOTE
 
     settings.set_value("agent.claimed_query_check", False)
@@ -669,7 +675,7 @@ def test_a_follow_up_answered_without_a_query_that_says_one_ran_is_sent_back(ctx
         b.follow_up = True
         answer, _trace = b.ask("Back to the September returns: how many of them were refunded?", history)
         assert answer.startswith(made_up) and answer.endswith(UNSUPPORTED_NOTE) and not ran_b
-        assert "required" not in b.llm.choices
+        assert "required" in b.llm.choices
     finally:
         settings.set_value("agent.claimed_query_check", True)
 
@@ -721,3 +727,19 @@ def test_a_bare_doubt_gets_the_note_that_keeps_an_undefined_reading(ctx, monkeyp
     b.ask("You included the test orders. Leave them out.", history)
     first = b.llm.seen[0][-1]["content"]
     assert CORRECTION_NOTE.split("\n")[0][:60] in first and BARE_DOUBT_NOTE.split("\n")[0][:60] not in first
+
+
+def test_the_same_call_sent_a_third_time_ends_the_calls(ctx, monkeypatch):
+    """(0.10.7, main suite M2-0107n) After a check, an answer sent the very same query six times ("you already made
+    exactly this call") until its calls ran out. The same call sent again twice gets one more turn, then the answer
+    is written from the results."""
+    from supagent.agent import REPEAT_NOTE, REPEAT_STOP_NOTE
+
+    sql = {"request": {"database_id": 1, "sql": "SELECT APP, COUNT(*) n FROM jobs GROUP BY 1"}}
+    a, ran = agent_with(monkeypatch, [call("execute_sql", sql)] * 4 + [say("A: 3, B: 2.")] * 3)
+    a.max_steps = 12
+    answer, trace = a.ask("How many jobs per application?")
+    tools = [m["content"] for sent in a.llm.seen for m in sent if m["role"] == "tool"]
+    assert len(ran) == 1 and REPEAT_STOP_NOTE in tools and REPEAT_NOTE in tools
+    assert len([t for t in trace if t.get("tool") == "execute_sql"]) == 4          # then no tool: the answer
+    assert answer.startswith("A: 3, B: 2.") and "Stopped" not in answer           # its calls were not used up

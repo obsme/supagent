@@ -32,6 +32,7 @@ GRAM = 5                # words of a question read together as one value at most
 WORD = re.compile(r"[A-Za-z0-9](?:[\w.:/@-]*[A-Za-z0-9])?")
 _CACHE: dict[str, Any] = {"stamp": None, "values": None, "parents": None, "compact": None}
 _NAMES: dict[str, Any] = {"stamp": None, "names": None}
+_PAIRS: dict[str, Any] = {"stamp": None, "pairs": None}
 
 Key = tuple[str, str, int]          # (label | field, its name, source)
 
@@ -130,6 +131,40 @@ def _lines(held: dict[Key, str], parents: dict[Key, list[str]], names: dict[int,
     return lines
 
 
+def _name_pairs() -> set[tuple[str, str]]:
+    """(0.10.7) The pairs of words that follow each other in the names of the metrics, indices, fields and labels
+    (node_network_receive_errs_total: (network, receive), (receive, errs)...): a word of a question said with the next
+    one as in such a name is that name's word, not a value ("network receive errors" is not the team network)."""
+    from supagent.knowledge.freshness import stamp
+    from supagent.models import KObject
+
+    now = stamp()
+    if _PAIRS["pairs"] is not None and _PAIRS["stamp"] == now:
+        return _PAIRS["pairs"]
+    pairs: set[tuple[str, str]] = set()
+    for (name,) in db.session.query(KObject.name).filter(KObject.gone_at.is_(None),
+                                                          KObject.kind.in_(("metric", "index", "field", "label"))):
+        parts = [w for w in re.split(r"[^a-z0-9]+", re.sub(r"([a-z])([A-Z])", r"\1_\2", str(name or "")).lower()) if w]
+        pairs.update(zip(parts, parts[1:]))
+    _PAIRS.update(stamp=now, pairs=pairs)
+    return pairs
+
+
+def _name_word(words: list[str], i: int, pairs: set[tuple[str, str]]) -> bool:
+    """The question's word i read with its neighbour as in a data name: "network receive", "receive errors"
+    (the plural and an abbreviation's start: errs, errors)."""
+    w = words[i].lower()
+    if not w.isalpha():
+        return False
+
+    def near(a: str, b: str) -> bool:
+        return any(x == a and (y == b or (len(y) >= 3 and b.startswith(y)) or (len(b) >= 3 and y.startswith(b)))
+                   for x, y in pairs if x == a)
+    after = words[i + 1].lower() if i + 1 < len(words) else ""
+    before = words[i - 1].lower() if i > 0 else ""
+    return bool(after and near(w, after)) or bool(before and any(x == before and y == w for x, y in pairs))
+
+
 def where(query: str, limit: int = PIECES) -> list[dict[str, Any]]:
     """Pieces saying where the values a question names are: a value of the data (the labels and fields that hold it,
     the category values named so), a value of the categories (where it is in the data); the most specific first."""
@@ -148,10 +183,17 @@ def where(query: str, limit: int = PIECES) -> list[dict[str, Any]]:
     found: list[tuple[int, str, str, dict[Key, str], list[Any]]] = []      # (specific, ref, said, held, categories)
     seen: set[str] = set()
     covered: set[int] = set()
+    try:
+        pairs = _name_pairs()
+    except Exception:  # pylint: disable=broad-except   (the values without this check)
+        db.session.rollback()
+        pairs = set()
     for i, n, w in grams:
         span = set(range(i, i + n))
         if not _value_like(w) or span & covered or compact(w) in seen:
             continue
+        if n == 1 and pairs and _name_word(words, i, pairs):
+            continue                                   # (0.10.7) a word of a data name said in it, not a value
         held = _held(w, values)
         mine = {k: v for k, v in held.items() if k[2] in allowed}
         if mine and len({k for k in held}) <= COMMON:

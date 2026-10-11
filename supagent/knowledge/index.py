@@ -18,6 +18,7 @@ import datetime as dt
 import hashlib
 import logging
 import re
+import threading
 from typing import Any, Iterator
 
 from superset import db
@@ -804,7 +805,98 @@ def embed_pending(limit: int | None = None) -> dict[str, Any]:
     return {"embedded": done, "left": left}
 
 
+INDEX_LEASE, INDEX_AGAIN = "index:lease", "index:again"
+LEASE_S = 1800                 # a reading's lease (a process that died with it: free after this many seconds)
+_INDEX = threading.Lock()
+
+
 def index_knowledge() -> dict[str, Any]:
+    """What the documents state read (the units whose text changed), proposed, synchronized and embedded. (0.10.7)
+    One reading at a time, in this process and the others: two documents fetched together read the same units at the
+    same time and proposed the same values, links and search pieces twice (the database refused one of them, its
+    proposals or pieces lost until the next reading). A reading asked meanwhile is done by the running one, once
+    more when it ends."""
+    if not _INDEX.acquire(blocking=False):
+        _again(True)
+        return {"queued": "a reading of the documents is running: it reads them again when it ends"}
+    try:
+        if not _lease(True):
+            _again(True)
+            return {"queued": "a reading of the documents is running elsewhere: it reads them again when it ends"}
+        try:
+            out: dict[str, Any] = {}
+            for _ in range(5):
+                _again(False)
+                out = _index_once()
+                if not _again():
+                    break
+        finally:
+            _lease(False)
+    finally:
+        _INDEX.release()
+    if _again():                                   # asked between the last check and the end: read again now
+        return index_knowledge()
+    return out
+
+
+def _lease(take: bool) -> bool:
+    """The reading's lease taken for this process (unless another one holds it), or given back."""
+    import os
+    import socket
+    import time
+
+    from sqlalchemy.exc import IntegrityError
+
+    from supagent.models import Meta
+
+    me, now = f"{socket.gethostname()}:{os.getpid()}", time.time()
+    try:
+        if take and db.session.get(Meta, INDEX_LEASE) is None:
+            try:
+                db.session.add(Meta(key=INDEX_LEASE, value=""))
+                db.session.commit()
+            except IntegrityError:                 # made by another process meanwhile
+                db.session.rollback()
+        row = db.session.query(Meta).filter(Meta.key == INDEX_LEASE).with_for_update().first()
+        holder, _, until = (row.value or "").rpartition("|") if row is not None else ("", "", "")
+        try:
+            held = float(until or 0) > now
+        except ValueError:
+            held = False
+        if take:
+            if holder and holder != me and held:
+                db.session.rollback()
+                return False
+            row.value = f"{me}|{now + LEASE_S:.0f}"
+        elif row is not None and holder == me:
+            row.value = ""
+        db.session.commit()
+        return True
+    except Exception:  # pylint: disable=broad-except   (no lease to be had: read anyway, as before 0.10.7)
+        db.session.rollback()
+        return take
+
+
+def _again(value: bool | None = None) -> bool:
+    """Whether a reading was asked while one ran (value: asked, or cleared)."""
+    from supagent.models import Meta
+
+    try:
+        row = db.session.get(Meta, INDEX_AGAIN)
+        if value is None:
+            return bool(row is not None and row.value)
+        if row is None:
+            db.session.add(Meta(key=INDEX_AGAIN, value="1" if value else ""))
+        else:
+            row.value = "1" if value else ""
+        db.session.commit()
+        return value
+    except Exception:  # pylint: disable=broad-except
+        db.session.rollback()
+        return False
+
+
+def _index_once() -> dict[str, Any]:
     out: dict[str, Any] = {}
     try:                                       # what the documents state (0.10): the units whose text changed
         from supagent.knowledge import understand

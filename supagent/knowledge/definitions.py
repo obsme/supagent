@@ -67,14 +67,102 @@ def unlinked(question: str, queries: list[str]) -> tuple[dict[str, Any], str] | 
     tables: set[str] = set().union(*(ts for _q, ts in per)) if per else set()
     if not terms or len(tables) < 2:
         return None
+    restricted = None
     for q, ts in per:
         if len(ts) >= 2 and re.search(r"\bJOIN\b|\bIN\s*\(\s*SELECT\b|\bEXISTS\s*\(", q, re.I):
+            cut = restricted_total(q) if _share_join_on() else None
+            if cut:                                      # (0.10.7) linked, but the total kept only its rows with a
+                restricted = restricted or cut           # part ("the sales minus the refunds of those orders" as one
+                continue                                 # INNER JOIN: 0 when every refund is its order's amount)
             return None                                  # linked in a query
     term = terms[0]
     phrase = RELATED_ROWS.search(term["definition"]).group(0)
+    if restricted:
+        return term, (f"your query subtracts {restricted[1]} from {restricted[0]} through an INNER JOIN: the total is "
+                      f"then only the {restricted[0]} rows that have a {restricted[1]} row. Compute the total over all "
+                      f"its rows (a query of its own, or FROM {restricted[0]} LEFT JOIN {restricted[1]}), the part of "
+                      "those rows through the join with the total's conditions, then subtract")
     return term, (f"your queries read {' and '.join(sorted(tables))} apart, each with its own conditions, while the "
                   f"definition relates them: \"{phrase}\" are the rows of the first part, linked by their key "
-                  "(the period goes on the first part only)")
+                  "(the period goes on the first part only); a total minus such a part is the total over all its rows "
+                  "(a query of its own) minus the part read through the JOIN on the key with the total's conditions: "
+                  "one INNER JOIN for both keeps only the rows that have a part")
+
+
+# (0.10.7) a condition taking several values of one field: F IN ('A', 'B') (not NOT IN), F = 'A' OR F = 'B'
+IN_LIST = re.compile(r"(?<![\w\"`])[\"`]?([A-Za-z_][A-Za-z0-9_]*)[\"`]?\s+(NOT\s+)?IN\s*\(\s*('[^'\n]*'(?:\s*,\s*'[^'\n]*')*)"
+                     r"\s*\)", re.I)
+OR_CHAIN = re.compile(r"(?<![\w\"`])([\"`]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*=\s*'[^'\n]*'(?:\s+OR\s+(?:[A-Za-z_]\w*\.)?\1\2\1"
+                      r"\s*=\s*'[^'\n]*')+", re.I)
+ONE_VALUE = re.compile(r"(?<![\w\"`])[\"`]?([A-Za-z_][A-Za-z0-9_]*)[\"`]?\s*=\s*'([^'\n]*)'", re.I)
+
+
+def _said_in(value: str, definition: str) -> bool:
+    """Does the definition name this value? As a word, its case aside ("shipments dispatched" names 'DISPATCHED',
+    CLOSED_WON is "closed won"); a value under 4 letters only as written ("the EU requests", not "us")."""
+    norm = " ".join(re.sub(r"[_\-]+", " ", value).split())
+    if not norm:
+        return False
+    if len(re.sub(r"[^A-Za-z]", "", norm)) < 4:
+        return re.search(rf"(?<![A-Za-z0-9]){re.escape(norm)}(?![A-Za-z0-9])", definition.replace("_", " ")) is not None
+    text = re.sub(r"[_\-]+", " ", definition.lower())
+    return re.search(rf"(?<![a-z0-9]){re.escape(norm.lower())}(?![a-z0-9])", text) is not None
+
+
+def _conditions(sql: str) -> list[tuple[str, list[str]]]:
+    """The values each condition of a query takes: [(field, [values])], NOT IN left out."""
+    out = []
+    spans = []
+    for m in IN_LIST.finditer(sql):
+        spans.append(m.span())
+        if not m.group(2):
+            out.append((m.group(1), re.findall(r"'([^'\n]*)'", m.group(3))))
+    for m in OR_CHAIN.finditer(sql):
+        spans.append(m.span())
+        out.append((m.group(2), re.findall(r"=\s*'([^'\n]*)'", m.group(0))))
+    for m in ONE_VALUE.finditer(sql):
+        if not any(a <= m.start() < b for a, b in spans):
+            out.append((m.group(1), [m.group(2)]))
+    return out
+
+
+def _terms_said(text: str) -> list[dict[str, Any]]:
+    from supagent.knowledge.glossary import found
+
+    low = (text or "").lower()
+    return [t for t in found(text) if any(re.search(rf"(?<![a-z0-9_]){re.escape(n.strip().lower())}(?![a-z0-9_])", low)
+                                          for n in str(t.get("term") or "").split("/") if len(n.strip()) >= 2)]
+
+
+def widened(question: str, queries: list[str], intent: str | None = None) -> tuple[dict[str, Any], str] | None:
+    """(the term, what differs) when a term of the question is defined with some values of a field ("the shipments
+    dispatched") and the answer's last query that conditions on them takes other values of that field too
+    (STAGE IN ('DISPATCHED', 'PACKED'): a wider rule of the team, "shipments count when DISPATCHED or PACKED", put
+    in place of the definition). The terms the message itself says, else those of the question as understood ("And
+    in week 6?"). By code, no LLM call (agent.definition_links)."""
+    terms = _terms_said(question) or (_terms_said(intent) if intent and intent != question else [])
+    selects = [q for q in queries or [] if q and re.search(r"\bSELECT\b", q, re.I)]
+    # a value another term of the question or the question itself names is asked ("the VaR and the stressed VaR")
+    asked = "\n".join([question or "", intent or ""] + [t.get("definition") or "" for t in terms])
+    for term in terms:
+        definition = term.get("definition") or ""
+        if not COMPUTABLE.search(definition):          # says what a word means, not which rows it counts
+            continue
+        for q in reversed(selects):                    # the last query on the defined values decides (a query run
+            said = [(f, vs) for f, vs in _conditions(q)   # again with the definition makes up for the first one)
+                    if any(_said_in(v, definition) for v in vs)]
+            if not said:
+                continue
+            for f, vs in said:
+                extra = [v for v in vs if not _said_in(v, asked)]
+                if extra:
+                    named = [v for v in vs if _said_in(v, definition)]
+                    return term, (f"your condition on {f} takes {', '.join(repr(v) for v in vs)}: the definition names "
+                                  f"{', '.join(repr(v) for v in named)}, not {', '.join(repr(v) for v in extra)} (a "
+                                  "wider rule of the team does not change what this term counts); keep only the "
+                                  "values the definition names")
+            break
+    return None
 
 
 # "what share of that week's sales was refunded?": a part of those rows that something happened to, counted within
@@ -125,6 +213,22 @@ def restricted_whole(sql: str) -> tuple[str, str] | None:
     """(the whole's table, the part's table) when a share is computed as an aggregate of one table over an aggregate
     of another joined to it by INNER joins only: the whole keeps only its rows that have a part (the refunds of a
     week over the sales of the refunded orders: 100 %). Columns without their table: not judged."""
+    pair = _inner_pair(sql, "Div")                       # (the part's, the whole's)
+    return (pair[1], pair[0]) if pair else None
+
+
+def restricted_total(sql: str) -> tuple[str, str] | None:
+    """(0.10.7) (the total's table, the part's table) when a total minus a part of it is computed as an aggregate of
+    one table minus an aggregate of another joined to it by INNER joins only ("the sales minus the refunds of those
+    orders" as SUM(o.amount) - SUM(r.refund) FROM orders JOIN returns): the total keeps only its rows that have a part
+    (0 when every refund is its order's whole amount)."""
+    return _inner_pair(sql, "Sub")
+
+
+def _inner_pair(sql: str, op: str) -> tuple[str, str] | None:
+    """(the tables of the left operand, of the right one) of a division or subtraction (`op`) between aggregates of
+    different tables in a SELECT whose joins are all INNER; None otherwise (columns without their table: not
+    judged)."""
     import sqlglot
     from sqlglot import exp
 
@@ -144,8 +248,8 @@ def restricted_whole(sql: str) -> tuple[str, str] | None:
             ts = {c.table for c in node.find_all(exp.Column)}
             return None if not ts or "" in ts else {names.get(t, t) for t in ts}
 
-        for div in sel.find_all(exp.Div):
-            part, whole = tables_of(div.this), tables_of(div.expression)
-            if part and whole and not part & whole:
-                return ", ".join(sorted(whole)), ", ".join(sorted(part))
+        for node in sel.find_all(getattr(exp, op)):
+            left, right = tables_of(node.this), tables_of(node.expression)
+            if left and right and not left & right:
+                return ", ".join(sorted(left)), ", ".join(sorted(right))
     return None

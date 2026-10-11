@@ -300,7 +300,15 @@ tomorrow query sql table chart dashboard dataset field fields column columns row
 breakdown details detail key finding findings recommendation recommendations next step steps important
 monday tuesday wednesday thursday friday saturday sunday january february march april may june july august september
 october november december the this that these those which what who where when why how and for with from per all other
-others overall impact here there also only""".split())
+others overall impact here there also only
+purpose purposes description descriptions type types kind kinds label labels unit units source sources meaning usage use
+example examples definition formula expression interpretation explanation scope role name names metric metrics measure
+measures owner location environment version current usual normal threshold thresholds limit limits peak trend evidence
+timeline action actions reason reasons context background observation observations caveat caveats limitation
+limitations comparison difference method approach frequency interval window period range granularity resolution
+aggregation calculation filter filters condition conditions format index database schema tags""".split())
+# (0.10.7) the keys of a list that describes things ("- **Purpose**: ...", "**Unit:** bytes") are labels: words of
+# the answer's own frame, which no tool result has to hold
 
 
 def presented_names(answer: str) -> list[str]:
@@ -313,8 +321,9 @@ def presented_names(answer: str) -> list[str]:
     spans = []
     for m in BOLD.finditer(prose):
         span = m.group(1) or m.group(2)
-        if len(span.split()) <= 3 and not re.match(r"\s*:", prose[m.end():m.end() + 2]):
-            spans.append(span)                         # "**Tracy**", not "**Root cause**:"
+        if len(span.split()) <= 3 and not span.rstrip().endswith(":") and \
+                not re.match(r"\s*:", prose[m.end():m.end() + 2]):
+            spans.append(span)                         # "**Tracy**", not "**Root cause**:" nor "**Root cause:**"
     for m in LIST_HEAD.finditer(prose):
         if len(m.group(1).split()) <= 3:
             spans.append(m.group(1))

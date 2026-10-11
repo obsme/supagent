@@ -196,15 +196,29 @@ def memories_for(user_id: int | None, limit: int = 15, groups: list[int] | None 
     return mine + group + team
 
 
+def triggered(text: str, asked: str) -> bool:
+    """(0.10.7) A memory that says when it applies ("When the user says 'X' ...", "Quand je dis X ...") applies when
+    the question or the chat says X; any other memory always."""
+    from supagent.knowledge.conditions import TRIGGER
+
+    t = TRIGGER.search(text or "")
+    if t is None:
+        return True
+    trigger = (t.group(1) or t.group(2) or "").strip().lower()
+    return not trigger or trigger in (asked or "").lower()
+
+
 KIND_ORDER = {"rule": 0, "preference": 1, "fact": 2}
 ENTRY_CHARS = 400
 
 
-def prompt_block(user_id: int | None, shown: set[str] | None = None) -> str:
+def prompt_block(user_id: int | None, shown: set[str] | None = None, asked: str | None = None) -> str:
     """The memories given with every question, within memory.prompt_chars: rules, then
     preferences, then facts (the user's own first, the newest first). Facts left out are still
     found by the knowledge search when a question is about them (`shown` gets the refs of the
-    ones given, not given twice)."""
+    ones given, not given twice). (0.10.7) With `asked` (the question and the chat), a memory that applies only
+    when the user says X ("When the user says 'X', filter by F='X'") is not given when they do not say X: told
+    "applies only then", a model still filtered a question that never named X."""
     items = memories_for(user_id)
     if not items:
         return ""
@@ -219,6 +233,8 @@ def prompt_block(user_id: int | None, shown: set[str] | None = None) -> str:
     for m in sorted(items, key=lambda m: KIND_ORDER.get(m.kind, 3)):     # stable: mine, then the team's
         if mentions_gone(m.text, gone):                # about a metric or index that no longer exists
             continue
+        if asked is not None and not triggered(m.text, asked):
+            continue                                   # (0.10.7) "when the user says X" and X not said
         who = "team" if m.scope == "team" else "this user's team" if m.scope == "group" else "this user"
         text = " ".join((m.text or "").split())
         line = f"- ({who}, {m.kind}) {text[:ENTRY_CHARS]}{'...' if len(text) > ENTRY_CHARS else ''}"

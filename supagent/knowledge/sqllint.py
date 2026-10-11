@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Callable
 
@@ -97,11 +98,60 @@ def or_then_and(sql: str) -> str | None:
     return None
 
 
+def _and_leaves(node: Any) -> list:
+    """The conditions of an AND chain, in order."""
+    from sqlglot import exp
+
+    return _and_leaves(node.this) + _and_leaves(node.expression) if isinstance(node, exp.And) else [node]
+
+
+def grouped_alternatives(sql: str) -> str | None:
+    """(0.10.7) The WHERE meant, when every alternative of an OR is written in parentheses and the conditions of all
+    of them are joined with AND after the last one (or before the first): "(day 1) OR (day 2) AND <filters>" means
+    "((day 1) OR (day 2)) AND <filters>": the first day's rows went unfiltered, and the answer took that total over
+    the right one it had just read (resent unchanged, the query ran). The condition to write, or None."""
+    from sqlglot import exp
+
+    tree = _parse(sql)
+    if tree is None:
+        return None
+    for clause in tree.find_all(exp.Where):
+        if not isinstance(clause.this, exp.Or):
+            continue
+        branches, todo = [], [clause.this]
+        while todo:                                    # the branches in order (left to right)
+            node = todo.pop(0)
+            if isinstance(node, exp.Or):
+                todo = [node.this, node.expression] + todo
+            else:
+                branches.append(node)
+        if len(branches) < 2:
+            continue
+        first, last = _and_leaves(branches[0]), _and_leaves(branches[-1])
+        middle = branches[1:-1]
+        if not all(isinstance(b, exp.Paren) for b in middle):
+            continue
+        sql_of = lambda n: n.sql(dialect="duckdb")  # noqa: E731
+        if len(first) == 1 and isinstance(first[0], exp.Paren) and len(last) > 1 and isinstance(last[0], exp.Paren):
+            alts = [first[0]] + middle + [last[0]]     # (a) OR (b) AND c
+            return f"({' OR '.join(sql_of(a) for a in alts)}) AND " + " AND ".join(sql_of(c) for c in last[1:])
+        if len(last) == 1 and isinstance(last[0], exp.Paren) and len(first) > 1 and isinstance(first[-1], exp.Paren):
+            alts = [first[-1]] + middle + [last[0]]    # c AND (a) OR (b)
+            return " AND ".join(sql_of(c) for c in first[:-1]) + f" AND ({' OR '.join(sql_of(a) for a in alts)})"
+    return None
+
+
 def or_and_refusal(name: str, args: dict) -> str | None:
     if name not in ("execute_sql", "export_excel", "chart_from_sql", "create_virtual_dataset", "save_sql_query"):
         return None
     req = args.get("request") if isinstance(args.get("request"), dict) else args
-    branch = or_then_and(str((req or {}).get("sql") or ""))
+    sql = str((req or {}).get("sql") or "")
+    meant = grouped_alternatives(sql)
+    if meant:                                          # (0.10.7) never run as written: the meaning is plain
+        return ("tool error (not run: AND before OR, the alternatives in parentheses): in this WHERE, AND binds "
+                "before OR, so the conditions joined with AND apply to one alternative only and the other is counted "
+                f"without them. Write the WHERE as: {meant[:900]}")
+    branch = or_then_and(sql)
     if not branch:
         return None
     return ("tool error (not run: AND before OR): in this WHERE, AND binds before OR, so the conditions joined with "
@@ -187,13 +237,135 @@ def per_day_refusal(question: str, name: str, args: dict) -> str | None:
     from sqlglot import exp
 
     tree = _parse(sql)
-    if tree is None or not any(True for _ in tree.find_all(exp.Avg)) or DAY_STEP.search(sql):
+    if tree is None or not any(True for _ in tree.find_all(exp.Avg)):
         return None
+    if DAY_STEP.search(sql):
+        daily = _daily_avg(tree)                         # (0.10.7) the day's step averages an amount's records
+        if not daily:
+            return None
+        return (f"tool error (not run: average per day): the question asks for an average per day, and this query's "
+                f"per-day step averages each day's records (AVG({daily}) grouped by the day: several records a day, "
+                f"one per book, trader, order...), so the result is an average of averages. A day's figure of an "
+                f"amount is the SUM of its records: AVG over the per-day SUM(x) (GROUP BY the day), or SUM(x) / "
+                f"COUNT(DISTINCT the day). If each day's average record is meant, send this same call again unchanged.")
     return ("tool error (not run: average per day): the question asks for an average per day, and this query "
             "averages the records themselves (AVG over every row: several a day, one per book, trader, order...). An "
             "average per day of a total is each day's total averaged over the days: SUM(x) / COUNT(DISTINCT the day), "
             "or AVG over a per-day SUM (GROUP BY the day). If the average of the records is meant, send this same "
             "call again unchanged.")
+
+
+AMOUNT = re.compile(r"pnl|p_?l\b|amount|amt|revenue|sales|turnover|volume|qty|quantity|notional|cost|fee|spend|"
+                    r"profit|loss|margin|income|expense|orders?\b|count|errors?\b|requests?\b|bytes", re.I)
+DAY_COLUMN = re.compile(r"date|cob|day|_dt\b|\bdt\b|\bts\b|time", re.I)
+
+
+def _daily_avg(tree) -> str | None:
+    """(0.10.7) The amount a query's per-day step averages ("SELECT day, AVG(amount) ... GROUP BY day" under an AVG
+    over the days: an average of each day's average record, M1-0107m): the column, or None. Only amounts (a PnL, a
+    revenue, a count of orders): a latency, a load or a price averaged per day is each day's figure."""
+    from sqlglot import exp
+
+    for sel in tree.find_all(exp.Select):
+        group = sel.args.get("group")
+        if not group or not any(DAY_COLUMN.search(g.sql()) for g in group.expressions):
+            continue
+        for avg in sel.find_all(exp.Avg):
+            if avg.find_ancestor(exp.Select) is not sel:
+                continue                                 # (an AVG of a query inside this one)
+            cols = [c.name for c in avg.find_all(exp.Column)]
+            if cols and all(AMOUNT.search(c) for c in cols):
+                return cols[0]
+    return None
+
+
+def grouped_fixed(sql: str) -> list[tuple[str, str]]:
+    """(0.10.7) The columns a query groups by and keeps at one value (WHERE "BOOK" = 'ALL' ... GROUP BY "BOOK"):
+    (column, value). Its result can only be that value."""
+    from sqlglot import exp
+
+    tree = _parse(sql)
+    sel = tree if isinstance(tree, exp.Select) else (tree.find(exp.Select) if tree is not None else None)
+    if sel is None or not sel.args.get("group") or not sel.args.get("where"):
+        return []
+    items = sel.expressions
+    grouped = set()
+    for g in sel.args["group"].expressions:
+        if isinstance(g, exp.Literal) and g.is_int and 0 < int(g.this) <= len(items):
+            g = items[int(g.this) - 1].unalias()
+        if isinstance(g, exp.Column):
+            grouped.add(g.name.lower())
+
+    def conjuncts(node: Any) -> list[Any]:
+        return conjuncts(node.left) + conjuncts(node.right) if isinstance(node, exp.And) else [node]
+
+    out = []
+    for c in conjuncts(sel.args["where"].this):
+        c = c.unnest() if isinstance(c, exp.Paren) else c
+        if isinstance(c, exp.EQ) and isinstance(c.left, exp.Column) and isinstance(c.right, exp.Literal) and \
+                c.left.name.lower() in grouped:
+            out.append((c.left.name, c.right.name))
+    return out
+
+
+def grouped_fixed_refusal(question: str, name: str, args: dict) -> str | None:
+    """(0.10.7) "Which books breached their limit most often?" ran GROUP BY "BOOK" with "BOOK" = 'ALL' kept from the
+    question before (about desks), and answered with that one row: a column the question asks about, grouped and
+    kept at one value, is sent back once before it runs."""
+    if name not in ("execute_sql", "export_excel"):
+        return None
+    req = args.get("request") if isinstance(args.get("request"), dict) else args
+    asked = (question or "").lower()
+    for col, value in grouped_fixed(str((req or {}).get("sql") or "")):
+        word = col.lower().replace("_", " ")
+        if re.search(rf"\b{re.escape(word)}(?:e?s)?\b", asked):
+            return (f"tool error (not run: grouped and kept at one value): this query groups by \"{col}\" and keeps "
+                    f"only \"{col}\" = '{value}': its result can only be '{value}', where the question asks about the "
+                    f"{word} values. A condition of an earlier query (another question) is not this one's: remove "
+                    "it (or keep what the question means, e.g. leave out a total row). If the question does mean "
+                    "that one value, send this same call again unchanged.")
+    return None
+
+
+# (0.10.8) "Which book lost the most money on 22 September?" answered from the single row with the lowest PnL (one
+# trader's), the book's rows never summed: a question of which <part> has the most or the least
+WHICH_EXTREME = re.compile(r"\bwhich\s+([a-z][a-z_-]{2,}?)(?:e?s)?\b[^?.;]{0,80}?\b(?:the\s+)?(?:most|least|highest|lowest|"
+                           r"biggest|largest|smallest|worst|best|top)\b", re.I)
+
+
+def per_part_note(question: str, args: dict, result: str) -> str | None:
+    """(0.10.8) A question of which <part> has the most or the least of something, answered by a query of single rows
+    (nothing grouped nor aggregated) whose rows name one part several times: said with the result (one part's rows
+    are summed per part before the comparison; nothing is refused: a table of one row per part is not concerned)."""
+    m = WHICH_EXTREME.search(question or "")
+    if not m:
+        return None
+    from sqlglot import exp
+
+    req = args.get("request") if isinstance(args.get("request"), dict) else args
+    tree = _parse(str((req or {}).get("sql") or ""))
+    if tree is None or tree.find(exp.Group) or tree.find(exp.AggFunc) or tree.find(exp.Window):
+        return None
+    word = m.group(1).lower().replace("-", " ").replace("_", " ")
+    part = next((c.name for c in tree.find_all(exp.Column)
+                 if c.name.lower().replace("_", " ") in (word, word + "s", word + "es", word.rstrip("s"))), None)
+    if part is None:
+        return None
+    try:
+        rows = (json.loads(result) or {}).get("rows") or []
+    except (ValueError, TypeError, AttributeError):
+        return None
+    counts: dict[str, int] = {}
+    for r in rows[:200]:
+        if isinstance(r, dict) and r.get(part) is not None:
+            counts[str(r[part])] = counts.get(str(r[part]), 0) + 1
+    many = sorted(((n, v) for v, n in counts.items() if n > 1), reverse=True)
+    if not many:
+        return None
+    said = ", ".join(f"{v} {n} times" for n, v in many[:3])
+    return (f"\n(Note: \"{part}\" repeats in these rows ({said}): the question asks which {word} has the most or the "
+            f"least, so each {word}'s rows are summed (or counted, averaged: what the question means) per {word} "
+            f"(GROUP BY \"{part}\") before the comparison, unless the single rows are what it compares.)")
 
 
 LOW_FIRST = {"min", "minimum", "lowest", "least", "smallest"}
@@ -254,6 +426,29 @@ def time_from_bucket(question: str, answer: str, queries: list[str]) -> tuple[st
         if grain in ("hour", "day", "week", "month") and mi == "00":
             return f"{int(h):02d}:{mi}", grain
     return None
+
+
+# (0.10.7) a value asked at a moment: "the memory use at 09:30" (not "around", "between", "from")
+AT_MOMENT = re.compile(r"(?<!around )(?<!about )(?<!between )(?<!from )(?<!after )(?<!before )(?<!until )\bat\s+(\d{1,2})"
+                       r"(?::(\d{2})|\s*h(\d{2})?)\b", re.I)
+AVERAGED = re.compile(r"\b(?:AVG|MEAN)\s*\(", re.I)     # a level averaged (a count summed per hour: that hour)
+
+
+def value_at_moment(question: str, queries: list[str]) -> tuple[str, str] | None:
+    """(0.10.7) (the moment asked, the bucket) when the question asks a value at a time of day ("What was the
+    memory use of the cache at 09:30?") and every query that read it averaged it over buckets of an hour or more:
+    the average of the hour is not the value at the moment when it moves within the hour (a level rising fast)."""
+    m = AT_MOMENT.search(question or "")
+    if not m or TIME_ASKED.search(question or "") or not queries:
+        return None
+    hour, minute = int(m.group(1)), m.group(2) or m.group(3) or "00"
+    if hour > 23:
+        return None
+    reading = [q for q in queries if re.search(r"\bSELECT\b", q or "", re.I)]
+    if not reading or not all(bucket_grain(q) in ("hour", "day", "week", "month") and AVERAGED.search(q)
+                              for q in reading):
+        return None                                    # a query read the samples themselves
+    return f"{hour:02d}:{minute}", bucket_grain(reading[-1])
 
 
 # ------------------------------------------------------------------------------------------------------------------

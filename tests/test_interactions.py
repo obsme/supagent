@@ -89,8 +89,8 @@ def test_what_a_document_states_is_proposed_with_its_sentence(doc, app):
         assert m["proposed_interactions"] == 0 and any(k["kind"] == "sends_to" for k in m["links"])
     lines = "\n".join(build("why is Billing late?")["lines"])
     assert "- They send data to: ledger db (service: only Payments, writes its results there)." in lines
-    assert ("- What to do when following them (the map's explanations): Payments sends data to ledger db: When "
-            "Payments is slow at its end, check the ledger db in that window.") in lines
+    assert ("- What to do when following them (the map's explanations): Payments sends data to ledger db (explained by "
+            "the AI): When Payments is slow at its end, check the ledger db in that window.") in lines   # (0.10.7)
 
 
 def test_a_rejected_interaction_is_never_proposed_again_and_a_changed_text_is_read_again(doc, app):

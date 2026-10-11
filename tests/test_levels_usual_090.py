@@ -145,6 +145,6 @@ def test_the_investigation_instructions_follow_the_stages_and_the_usual():
                    "what is not affected must be free of it",
                    "A day the team documented, with the effect it documented, is the explanation"):
         assert phrase in text, phrase
-    assert len(SECTIONS["investigation"]) < 4000
+    assert len(SECTIONS["investigation"]) < 4200   # (0.10.7: + the trigger of a change made hours before)
     for word in ("batch", " job", " feed ", "feeds they"):         # worded for any table, not for one kind of system
         assert word not in text, word
