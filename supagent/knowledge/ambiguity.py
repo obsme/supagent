@@ -147,10 +147,83 @@ def db_values_of(head: str) -> dict[str, list[str]]:
     return out
 
 
+# (0.10.8, the team's request of 11 October) a short first question asking a measure of nothing named ("what is the
+# number of errors?", "what is the CPU usage?", "how is the memory?") when the data holds it for many parts: the agent
+# made many calls over every application, component and server. It asks back at once, suggesting the main parts (and
+# a period when none is said), and runs no query.
+MEASURE = re.compile(
+    r"\b(?:errors?|failures?|failed|fails?|exceptions?|crash(?:es|ed)?|restarts?|timeouts?|latenc(?:y|ies)|"
+    r"response\s+times?|requests?|alerts?|warnings?|incidents?|outages?|downtimes?|[45]xx|[45]\d\d|"
+    # (0.10.8, the team: "not only errors, even for metrics") the measures a team monitors per part
+    r"cpu|memory|mem|ram|heap|gc|swap|disks?|storage|space|filesystems?|inodes?|load|throughput|traffic|bandwidth|"
+    r"network|usage|utili[sz]ation|saturation|connections?|sessions?|queues?|lag|backlog|uptime|availability|"
+    r"iops|threads?|temperature|power|pods?|containers?|metrics?|performance|health|status|"
+    r"erreurs?|[ée]checs?|pannes?|alertes?|latences?|incidents?|m[ée]moire|disques?|espace|charge|d[ée]bit|"
+    r"trafic|r[ée]seau|utilisation|connexions?|files?|disponibilit[ée]|sant[ée]|[ée]tat|m[ée]triques?)\b", re.I)
+SHORT_WORDS = 10
+GENERIC = frozenset("""what whats is are was were be been the a an of in on at for to from by with and or there any some our
+my we us me you your our all total number count amount how many much rate level current now today yesterday tonight
+this last past previous week weeks month months day days hour hours minute minutes morning afternoon evening night
+show give tell list get display see find have has had do did does it its so far overall currently recent recently
+latest new please quel quelle quels quelles combien de du des le la les un une est sont il y a nombre total taux
+aujourd hui hier ce cette semaine mois jour matin soir nuit derniers dernières montre donne liste
+running run up down stopped started available used free consumed high low slow fast ok okay fine good bad normal
+healthy unhealthy busy idle full open closed active pending waiting peak average max min maximum minimum mean median
+going doing looking like look en cours haut bas lent moyen moyenne pic plein libre utilisé utilisée""".split())
+OPEN_CATEGORIES = ("application", "component", "service", "server")
+
+
+def _generic(word: str) -> bool:
+    """A word that names nothing of the system: a word of a question, of a period, a measure, or one of those
+    misspelled ("nulber" for number)."""
+    import difflib
+
+    w = word.lower()
+    if w in GENERIC or MEASURE.fullmatch(w) or DAY_WORDS.fullmatch(w) or w.isdigit():
+        return True
+    return len(w) >= 5 and bool(difflib.get_close_matches(w, [g for g in GENERIC if len(g) >= 5], n=1, cutoff=0.8))
+
+
+def map_parts() -> dict[str, list[str]]:
+    """{category: its values} of the System map's applications, components, services and servers (the parts to
+    suggest), the most linked first (the main parts of the system before the small ones)."""
+    from supagent.knowledge.brief import _graph
+
+    g = _graph()
+    links = lambda x: len((g.get("out") or {}).get(x, [])) + len((g.get("in") or {}).get(x, []))  # noqa: E731
+    out: dict[str, dict[str, int]] = {}
+    for vid, v in (g.get("values") or {}).items():
+        cat = str(v.get("cat") or "")
+        if cat.lower() in OPEN_CATEGORIES:
+            name = str(v.get("name"))
+            out.setdefault(cat, {})[name] = max(out.get(cat, {}).get(name, 0), links(vid))
+    return {c: sorted(vs, key=lambda n: (-vs[n], n)) for c, vs in out.items()}
+
+
+def open_measure(question: str, history: list[dict] | None,
+                 parts_of: Callable[[], dict[str, list[str]]] | None = None) -> dict[str, Any] | None:
+    """{"kind": "open", "said", "parts", "period"} when a short message that starts the conversation asks a measure
+    and names nothing (no part, table, value: every word a question's, a period's or a measure's), and the System
+    map has at least two applications, components, services or servers; None otherwise."""
+    if any(h.get("content") for h in history or []):
+        return None
+    q = (question or "").strip()
+    words = re.findall(r"[A-Za-zÀ-ÿ0-9][\w'-]*", q)
+    if not words or len(words) > SHORT_WORDS:
+        return None
+    m = MEASURE.search(q)
+    if not m or not all(_generic(p) for w in words for p in re.split(r"['’]", w) if len(p) > 1):   # what's, d'erreurs
+        return None
+    parts = (parts_of or map_parts)()
+    if sum(len(v) for v in parts.values()) < 2:
+        return None
+    return {"kind": "open", "said": m.group(0), "parts": parts, "period": bool(DAY_WORDS.search(q))}
+
+
 def ask_first(question: str, history: list[dict] | None,
               values_of: Callable[[str], dict[str, list[str]]] | None = None) -> dict[str, Any] | None:
-    """What makes the question one to ask back first: {"kind": "choice", "said", "field", "candidates"} or
-    {"kind": "unclear", "said"}; None when it can be answered."""
+    """What makes the question one to ask back first: {"kind": "choice", "said", "field", "candidates"},
+    {"kind": "unclear", "said"} or {"kind": "open", "said", "parts", "period"}; None when it can be answered."""
     words = no_antecedent(question, history)
     if words:
         return {"kind": "unclear", "said": words}
@@ -158,7 +231,7 @@ def ask_first(question: str, history: list[dict] | None,
     found = singular_choice(question, text, values_of or db_values_of)
     if found:
         return {"kind": "choice", "said": found[0], "field": found[1], "candidates": found[2]}
-    return None
+    return open_measure(question, history)
 
 
 def note(found: dict[str, Any]) -> str:
@@ -166,7 +239,14 @@ def note(found: dict[str, Any]) -> str:
     if found["kind"] == "choice":
         names = ", ".join(found["candidates"])
         return (f"(Ask back first: the question says \"{found['said']}\" and several {found['field']} values match: "
-                f"{names}. Answer only with one short question asking which one is meant (name them); run no query.)")
+                f"{names}. Answer only with one short question asking which one is meant (name them); run no query. Its last line is that question, ending with a question mark.)")
+    if found["kind"] == "open":
+        shown = "; ".join(f"{cat}: " + ", ".join(vs[:8]) + (f" and {len(vs) - 8} more" if len(vs) > 8 else "")
+                          for cat, vs in found["parts"].items())
+        when = "" if found.get("period") else " and for which period (today, yesterday, the last days)"
+        return (f"(Ask back first: this message asks \"{found['said']}\" without saying of which part, and the system has "
+                f"many ({shown}). Answer only with one short question asking which one is meant{when}, suggesting the "
+                "main ones above as choices (and \"all of them\" if a total is wanted); run no query. Its last line is that question, ending with a question mark.)")
     return (f"(Ask back first: this message starts the conversation and says \"{found['said']}\" without saying of "
             "what. Answer only with one short question asking what it means (name the two or three kinds of data it "
-            "could be, from the knowledge above); run no query.)")
+            "could be, from the knowledge above); run no query. Its last line is that question, ending with a question mark.)")

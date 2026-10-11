@@ -13,6 +13,7 @@ every status is in them."""
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 from dataclasses import dataclass, field
@@ -333,6 +334,46 @@ STATUS_BOUNDS = {399.0, 400.0, 499.0, 500.0}
 FLAG_TEXTS = {"true", "false", "yes", "no", "y", "n"}
 
 
+# (0.10.8) a code the data writes for a name the people said ('DE' for "Germany", 'EUR' for "euros", 'nl' for
+# "Dutch"): the countries (ISO 3166), currencies (ISO 4217) and languages (ISO 639) of the CLDR data that Superset's
+# Babel carries, named in the languages teams write in. A count of one country's orders was refused as "a condition
+# nobody asked for" and the answer counted every country.
+CODE_LOCALES = ("en", "fr", "de", "es", "it", "nl", "pt")
+
+
+@functools.lru_cache(maxsize=1)
+def code_names() -> dict[str, frozenset[str]]:
+    """A code (lower case) -> the names it stands for (lower case), from Babel's CLDR data; empty without Babel."""
+    try:
+        from babel import Locale
+    except ImportError:
+        return {}
+    out: dict[str, set[str]] = {}
+    for lang in CODE_LOCALES:
+        try:
+            loc = Locale.parse(lang)
+        except Exception:                               # noqa: BLE001 - a locale this Babel does not carry
+            continue
+        for names in (loc.territories, loc.currencies, loc.languages):
+            for code, name in names.items():
+                if code.isalpha() and 2 <= len(code) <= 3 and name:
+                    out.setdefault(code.lower(), set()).add(" ".join(name.lower().split()))
+    return {k: frozenset(v) for k, v in out.items()}
+
+
+def _code_said(core: str, support: Support) -> bool:
+    """A value that is such a code is said when the people's words name what it stands for (every word of a name)."""
+    from supagent.knowledge.describe import stem
+
+    if not re.fullmatch(r"[a-z]{2,3}", core):
+        return False
+    for name in code_names().get(core, ()):
+        words = re.findall(r"[a-z0-9\u00c0-\u00ff]+", name)
+        if words and all(w in support.words or (len(w) >= 4 and stem(w) in support.words) for w in words):
+            return True
+    return False
+
+
 def _fail_said(words: set[str]) -> bool:
     fam = VALUE_WORDS["fail"] | {"fail"}
     return any(w in fam or any(len(f) >= 4 and w.startswith(f) for f in fam) for w in words)
@@ -381,6 +422,8 @@ def _value_said(value: Any, column: str, support: Support) -> bool:
             return True                                 # le = '2700' for "45 minutes"
     except ValueError:
         pass
+    if _code_said(core, support):
+        return True                                     # (0.10.8) 'DE' for "Germany": a code of a name said
     words = support.words
     if re.search(r"[a-z0-9]_[a-z0-9]", core):             # a code (FX_SPOT): a part said inside another code
         free = re.sub(r"[a-z0-9À-ÿ]+(?:_[a-z0-9À-ÿ]+)+", " ", support.text)   # (FX_OPT_G10) does not say it

@@ -30,7 +30,7 @@ PARENTS = 3             # metrics or indices named per label or field
 PIECES = 3              # pieces at most for a question
 GRAM = 5                # words of a question read together as one value at most ("pnl eod flash commodities")
 WORD = re.compile(r"[A-Za-z0-9](?:[\w.:/@-]*[A-Za-z0-9])?")
-_CACHE: dict[str, Any] = {"stamp": None, "values": None, "parents": None, "compact": None}
+_CACHE: dict[str, Any] = {"stamp": None, "values": None, "parents": None, "compact": None, "hosts": None}
 _NAMES: dict[str, Any] = {"stamp": None, "names": None}
 _PAIRS: dict[str, Any] = {"stamp": None, "pairs": None}
 
@@ -60,9 +60,13 @@ def _index() -> tuple[dict[str, dict[Key, str]], dict[Key, list[str]]]:
 
     import sqlalchemy as sa
 
+    from supagent.knowledge.values import HOST_FIELD, host_aliases
+
     values: dict[str, dict[Key, str]] = defaultdict(dict)
     parents: dict[Key, list[str]] = defaultdict(list)
     squeezed: dict[str, set[str]] = defaultdict(set)
+    hosts: dict[str, set[str]] = defaultdict(set)    # (0.10.8) a host's shorter names -> its values (web01 ->
+    #                                                   web01.corp.example, web01:9100), of host labels and fields
     read: dict[Key, set[int]] = defaultdict(set)     # the stats a label or field name was read from (their hash)
     rows = db.session.query(KObject.kind, KObject.name, KObject.parent, KObject.source_id,
                             sa.cast(KObject.stats, sa.Text))
@@ -78,6 +82,7 @@ def _index() -> tuple[dict[str, dict[Key, str]], dict[Key, list[str]]]:
             stats = json.loads(raw) if isinstance(raw, str) else raw
         except ValueError:
             continue
+        host = bool(HOST_FIELD.search(name or ""))
         for v in (stats or {}).get("values") or [] if isinstance(stats, dict) else []:
             s = str(v).strip()
             if _value_like(s):
@@ -86,7 +91,10 @@ def _index() -> tuple[dict[str, dict[Key, str]], dict[Key, list[str]]]:
                 c = compact(s)
                 if c != low:
                     squeezed[c].add(low)
-    _CACHE.update(stamp=now, values=values, parents=parents, compact=squeezed)
+                for alias in host_aliases(s) if host else []:
+                    if _value_like(alias):
+                        hosts[alias].add(low)
+    _CACHE.update(stamp=now, values=values, parents=parents, compact=squeezed, hosts=hosts)
     return values, parents
 
 
@@ -112,11 +120,23 @@ def _names() -> dict[str, set[int]]:
 
 
 def _held(text: str, values: dict[str, dict[Key, str]]) -> dict[Key, str]:
-    """Where a value is held, written as the question writes it or with other separators."""
+    """Where a value is held, written as the question writes it or with other separators; (0.10.8) a host also by
+    its full name, its short name or its address (web01, web01.corp.example, web01:9100), whichever the
+    data writes."""
+    from supagent.knowledge.values import HOST_FIELD, host_aliases, same_host
+
     out: dict[Key, str] = {}
     for low in [text.lower()] + sorted(_CACHE["compact"].get(compact(text)) or ()):
         for key, written in (values.get(low) or {}).items():
             out.setdefault(key, written)
+    # and the host labels and fields that write it otherwise, even when another one writes it as asked (an alert's
+    # instance web01, the metrics' web01:9100)
+    longer = sorted((_CACHE.get("hosts") or {}).get(text.lower()) or ())         # web01.corp.example for web01
+    shorter = [a for a in host_aliases(text) if a != text.lower()]               # web01 for web01.corp.example
+    for low in longer + shorter:
+        for key, written in (values.get(low) or {}).items():
+            if HOST_FIELD.search(key[1] or "") and same_host(text, written):
+                out.setdefault(key, written)
     return out
 
 

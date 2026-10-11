@@ -890,6 +890,18 @@ RATE_ASKED = re.compile(r"\b(per\s+(?:second|sec|minute|min|hour)|rps|qps|throug
                         r"heure)|d[ée]bit|taux)\b|/\s*s\b", re.I)
 
 
+# (0.10.8) a count its query names as samples ("COUNT(*) AS sample_count", "COUNT(value) AS points"): the samples are
+# what it counts, said by its name; it runs (an answer on a metric's data refused each new query that looked at it)
+SAMPLES_NAMED = re.compile(r"sample|point|scrape|datapoint", re.I)
+
+
+def _named_samples(count: Any) -> bool:
+    from sqlglot import exp
+
+    parent = count.parent
+    return isinstance(parent, exp.Alias) and bool(SAMPLES_NAMED.search(parent.alias or ""))
+
+
 def count_of_counter(database: Any, sql: str, question: str = "") -> str | None:
     """COUNT(...) over a counter, histogram or summary of a metrics database counts samples (one per series
     and scrape), not the requests, jobs or errors the question counts: the reason, or None. For a "how many"
@@ -903,8 +915,8 @@ def count_of_counter(database: Any, sql: str, question: str = "") -> str | None:
         tree = sqlglot.parse_one(sql, read="duckdb")
     except Exception:  # pylint: disable=broad-except
         return None
-    counts = list(tree.find_all(exp.Count))
-    if not counts:
+    counts = [c for c in tree.find_all(exp.Count) if not _named_samples(c)]
+    if not counts:                                      # (0.10.8) COUNT(*) AS sample_count: the samples, as named
         return None
     ctes = {c.alias_or_name for c in tree.find_all(exp.CTE)}
     names = {t.name for t in tree.find_all(exp.Table) if t.name and t.name not in ctes}
@@ -1003,7 +1015,8 @@ def rate_as_count(database: Any, sql: str, question: str) -> str | None:
     except Exception:  # pylint: disable=broad-except
         return None
     for agg in tree.find_all(exp.Sum, exp.Avg):
-        if isinstance(agg.this, exp.Column) and agg.this.name.lower() == "rate":
+        inner = [agg.this] if isinstance(agg.this, exp.Column) else list(agg.this.find_all(exp.Column))
+        if any(c.name.lower() == "rate" for c in inner):  # (0.10.8) SUM(CASE WHEN code = '503' THEN rate ELSE 0 END) too
             return ("tool error (not run: rate): the question asks how many, and this query adds up rate, the "
                     "per-second rate of each series in each time bucket: not a number of requests, jobs or errors. "
                     "For the number over the period use SUM(increase) (with FILTER (WHERE ...) for a part, e.g. "

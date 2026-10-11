@@ -1,5 +1,110 @@
 # Changes
 
+## 0.10.8 — 2026-10-11
+
+The team's requests of 11 October and the known gaps of 0.10.7. A short first question that names nothing ("what is the
+number of errors?", "how is the CPU?") is asked back at once with the main parts of the System map suggested, instead of
+many calls over everything; a name written in another case or with other separators, and a server named by its short
+name, its full name or its address with a port, are searched as the data writes them; all but one of the gaps listed
+with 0.10.7 are fixed as classes (each with tests on other data, no question's text or value in the code). Developed and
+measured on the open question sets only: the held-out sets were used in 0.10.7's last fix loop, so 0.10.8 has no
+held-out figure; new sealed sets come with 0.10.9. Published at the owner's request once the full open run below ended.
+
+Measured on the release's code (build 089239c) with Qwen3.6-35B-A3B (llama.cpp), each open set once (development
+figures: these sets were used to find the fixes):
+* Main open set (156 questions + 6 written for the team's requests: 162): **159 right (98.1%), 3 wrong without a
+  mark**; of the 156, 155 (0.10.7's final run: 154 and 154).
+* Observability open set (25 steps + 4 written for the team's requests: 29): **24 right (82.8%), 5 wrong without a
+  mark**; of the 25, 21 (0.10.7's final run: 23 and 24; an earlier build of 0.10.8 the same evening: 25). Read by hand,
+  none of the four comes from this release's changes (no name rewritten, no question asked back in them): an
+  investigation that missed one of its causes, and its follow-up's count; a route asked to "the payment gateway"
+  looked for to another part; a question whose queries two checks refused in turn (known gaps, below).
+* The team's requests (10 questions): 7 right. A short question that names nothing was asked back with no call each
+  time; two were asked back with kinds of errors as suggestions instead of the System map's parts, one with its
+  list of choices after the question. A server given by its full name where the metrics write name:port is answered
+  (it was asked back before).
+* A simple question answered over its budget of calls and seconds counts as a miss in these figures.
+* 1563 unit tests passed; no lab name or benchmark figure in the code; the upgrade 0.10.7 -> 0.10.8 on a copy of a lab's
+  data: tables v18 unchanged, its 29 settings kept (same digest), health 200, a smoke 5/5; the knowledge search on a lab
+  map: 80/80 names found twice (as 0.10.7).
+
+Questions that name nothing
+* **A short first message that asks a measure and names nothing is asked back before any call**: "What is the number
+  of errors?", "what is the nulber of errors" (misspelled words too), "Combien d'erreurs hier ?", "How many requests
+  failed?", and the same for what a team monitors per part (CPU, memory, heap, disk, space, load, latency, throughput,
+  traffic, network, connections, queues, lag, uptime, availability, pods, health, status...). One short question back
+  asks which part, and which period when none is said, and suggests the System map's main applications, components,
+  services and servers (the most linked first, eight per category, with how many more), and "all of them" when a total
+  is wanted. Only when the map has two parts at least; a question that names a part, a value or a table, a follow-up or
+  a longer request is answered as before (checked on the four question sets of the labs: only the open questions
+  written for it are asked back).
+
+Names as the data writes them
+* **A name written another way than the data writes it is searched as the data writes it**: a query comparing a field
+  or a metric's label (=, IN, <>, NOT IN; PromQL label matchers) with 'HOST-A-07', 'host_a_7' or 'web 01' for the data's
+  host-a-07 and Web-01 found nothing. Before the query runs, the value is rewritten as the data writes it when exactly
+  one learned value of that field or label is written so (case, separators - _ . / : and spaces, leading zeros); an
+  exact value is never touched, two candidates leave it as written. The result says it: "'HOST-A-07' is written
+  'host-a-07' in the data: the query used it so."
+* **A server is found by its full name, its short name or its address with a port, whichever is asked**: the data
+  writes web01.corp.example (or web01.corp.example:9100, a metric's instance) and the question says web01, or the
+  other way. On a field or a label that holds hosts (host, hostname, instance, node, server, fqdn, device, target...),
+  queries (SQL, PromQL, and the conditions of compare_groups, compare_logs and what_they_share) are rewritten as above
+  when exactly one learned value is that host (an address of the asked port first); the System map finds a server by
+  its short name, and a full name or an address finds the server of that name; check_health matches the named
+  servers to the series by any of their names; records_about looks for the names as each target field writes them;
+  the knowledge search says where every spelling of a host is in the data. Never another host of the same short name
+  (web01.corp.example is not web01.dmz.example: two of them are left as written, and an empty result lists both),
+  never an IP prefix, never a word that every question uses (a server named graph... is not found by "graph").
+
+Investigations
+* **The part an investigation blames has its own log lines read**: the change behind a failure was found and the error
+  the part logged was never read; such an answer is sent back once to read the part's error lines of the window and say
+  the error.
+* **"Who held it?" is not answered with a user the lines only show waiting for the lock**: an answer naming a user or
+  an application that the results only show waiting is sent back once to read the server's lines of the window without
+  a word filter, the longest durations first.
+* **An observation the question states at a time of day is read by minutes before it is denied**: "orders dropped to
+  almost nothing around 08:00" was denied from hourly totals that hid a drop of some minutes.
+* A question of how parts are linked (what consumes, depends on, runs on...) answered without the map's tool is sent
+  back once with system_links made compulsory (consumers reached through a mirror were missed); a count question, or an
+  answer the data gave, is never sent back by it.
+
+Figures and follow-ups
+* **A code the data writes for a name the people said is said**: a country, a currency, a language (the ISO codes of
+  the CLDR data that Superset's Babel carries, named in seven languages); a count of one country's orders written with
+  the country's code was refused as a condition nobody asked for, and the answer counted every country.
+* **A message that goes back to an earlier question ("Back to ...: ...")** is told which question its words name and
+  that its conditions (the subject, the day, the filters) are that question's, not the later questions'; what it asks,
+  and in which unit, is its own.
+* COUNT(*) on a metric named as samples (sample_count, points, scrapes) runs (it was refused again for each new query);
+  a rate summed inside a CASE is sent back as a rate, like SUM(rate).
+* **A windowed PromQL function whose window is the whole period asked is read once, at its end**: increase(x[45m]) over
+  08:00..08:45 was read as a range of points, each looking 45 minutes back, and the answer gave a busier window's
+  figure.
+* Sent back for a value at a moment, the answer reads it in one query with all it needs (a share read in three queries
+  took a simple question over its budget).
+* **A zero from a word searched in a text, when the word is a value of another field of the table, is sent back** with
+  that field to count with ("none of its failures were timeouts" when TIMEOUT is an error category).
+* An answer cut a second time gets the older tool results shortened and is asked once more (its context was near the
+  model's limit).
+
+Honesty
+* **A reply to a check that argues instead of answering keeps the answer it replaced** (when it gives none of its
+  figures and names, or only some of them in a shorter text): a right list sent back came back as "the question asks
+  ... so I used the field X", the list never written again.
+* An opening that announces the answer ("Based on my investigation, I can now provide you with the answer:") is removed;
+  an answer that points at a result instead of giving its value ("(value from earlier result)", "[value]") is sent back
+  once to write each value or leave the row out.
+
+Known gaps, seen in the measured run (for 0.10.9): a chart change asked ("make it a pie chart") can be left as an
+unsaved preview when the model asks for one, and the answer says the chart changed (the check of claimed changes missed
+"I've successfully updated"); a time filter written in epoch milliseconds on a numeric time field can be refused as a
+condition nobody asked for while the period check asks for one, until the calls run out; a short question that names
+nothing can be asked back with kinds of data as suggestions instead of the System map's parts, or with its list of
+choices after the question; a part asked about in a yes or no can be confirmed as a cause because its alert fired at the
+same time (listed with 0.10.7: not fixed in 0.10.8).
+
 ## 0.10.7 — 2026-10-11
 
 The agent's answers made steady (the team's request of 9 October): questions on the System map's paths (from a part to

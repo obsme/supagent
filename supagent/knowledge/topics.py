@@ -197,6 +197,36 @@ class Decision:
     topic: int | None            # the subject it belongs to (None: a new one)
     how: str                     # why (logged; the tests read it)
     back: bool = False           # it goes back to an earlier subject
+    returns_to: str | None = None                     # (0.10.8) the earlier question it goes back to, by its words
+    after: list[str] = field(default_factory=list)    # the subject's questions asked after that one
+
+
+ORDINAL = re.compile(r"\b(\d{1,4})(?:st|nd|rd|th|er|e|ème|eme)\b", re.I)
+
+
+def _named_terms(text: str) -> set[str]:
+    """The words of a question that say what it is about (not its words of time) and its numbers ("the 21st": 21)."""
+    plain = BACK_TO.sub(" ", ORDINAL.sub(r"\1", text or ""))
+    return _subject_terms(plain) | set(re.findall(r"\b\d{1,4}\b", plain))
+
+
+def returned_to(question: str, s: Subject) -> tuple[str, list[str]] | None:
+    """(0.10.8) "Back to the failures of the 21st: how many were there the day before?" after "How many jobs failed on
+    21 September?", "Which application had the most failures that day?", "How many jobs did that application run that
+    day in total?": the question it goes back to is the one its words name best (only one), when it is not the last
+    one; with the questions asked after it. The answer counted the last question's scope (one application's runs)."""
+    asked = [str(q.content or "") for q, _a in s.exchanges]
+    if len(asked) < 2:
+        return None
+    mine = _named_terms(question)
+    scores = [len(mine & _named_terms(q)) for q in asked]
+    best = max(scores)
+    if best < 2 or scores.count(best) > 1:
+        return None
+    i = scores.index(best)
+    if i == len(asked) - 1:
+        return None
+    return " ".join(asked[i].split())[:300], [" ".join(q.split())[:200] for q in asked[i + 1:]]
 
 
 def overlap(q_terms: set[str], q_tables: set[str], q_values: set[str], s: Subject) -> float:
@@ -354,6 +384,10 @@ def assign(messages: list[Any], question_msg: Any, answer_msg: Any, llm: Any = N
         return Decision(last, "off"), [{"role": m.role, "content": str(m.content or "")[:HISTORY_CHARS], "message": m}
                                        for m in flat]
     d = decide(str(question_msg.content or ""), subs, last, llm)
+    if d.topic in subs and BACK_TO.search(str(question_msg.content or "")):
+        named = returned_to(str(question_msg.content or ""), subs[d.topic])
+        if named:
+            d.returns_to, d.after = named
     if d.topic is None:
         d.topic = max([sid for sid in subs] + [0]) + 1
     question_msg.topic = answer_msg.topic = d.topic

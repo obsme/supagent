@@ -150,6 +150,14 @@ then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with t
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
 
+## Upgrade from 0.10.7 to 0.10.8
+
+The wheel on every host, then restart; nothing to run (tables v18, no new setting). A short first question that names
+nothing is asked back with the main parts suggested; names written another way, and servers by their short name, full
+name or address, are found as the data writes them; all but one of the gaps listed with 0.10.7 are fixed. Measured on
+the open sets: 159/162 and 24/29 right, 3 and 5 wrong without a mark, with Qwen3.6-35B-A3B (llama.cpp); no held-out
+figure for 0.10.8 (the held-out sets were used in 0.10.7's last fix loop). INSTALL.txt, *From 0.10.7 to 0.10.8*.
+
 ## Upgrade from 0.10.6.2 to 0.10.7
 
 The wheel on every host, then restart; nothing to run (tables v18; two new settings, `llm.reasoning_effort`, empty by

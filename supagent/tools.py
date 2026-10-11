@@ -1696,12 +1696,34 @@ def _median(values: list[float]) -> float:
     return ordered[n // 2] if n % 2 else (ordered[n // 2 - 1] + ordered[n // 2]) / 2
 
 
+# (0.10.8) a function over a window ([45m]) as long as the period asked: one instant at the period's end
+WINDOWED = re.compile(r"\b(?:increase|rate|irate|delta|idelta|changes|resets|[a-z]+_over_time)\s*\(", re.I)
+WINDOW = re.compile(r"\[\s*(\d+(?:ms|[smhdwy]))\s*(?::[^\]]*)?\]")
+WINDOW_NOTE = ("one instant at the end of the period: the expression's window is the whole period asked, so each "
+               "series' value is that period's (a range of points would each look back that long, before its start too)")
+
+
+def _window_is_range(expr: str, span_ms: int) -> bool:
+    """Every [window] of a windowed function in `expr` is as long as the period start..end (one step of 15 s
+    either way): increase(x[45m]) from 08:00 to 08:45."""
+    from promagg.timegrid import parse_duration
+
+    windows = WINDOW.findall(expr or "")
+    if not windows or not WINDOWED.search(expr or "") or "offset" in (expr or "").lower():
+        return False
+    try:
+        return all(abs(parse_duration(w) - span_ms) <= 15_000 for w in windows)
+    except Exception:  # pylint: disable=broad-except
+        return False
+
+
 @mcp.tool
 def promql_query(expr: str, start: str | None = None, end: str | None = None, step: str | None = None,
                  database: str | int | None = None, max_series: int = 50) -> dict:
     """Run a PromQL expression on the metrics database and return each series (labels,
     min / max / avg / last and up to 60 points). `start` / `end`: local times like
-    "2030-01-15 02:00" or "now-6h" (end alone or start == end: one instant). `step` like "5m"
+    "2030-01-15 02:00" or "now-6h" (end alone or start == end: one instant; a windowed function whose window is
+    the whole period, increase(x[1h]) over one hour, is read once at its end). `step` like "5m"
     (default: about 200 points). Use for questions SQL cannot express (ratios of two metrics,
     offsets, label_replace...); the SQL tables of the same database cover the usual cases.
     A query of a few series over at most two days also says what each was over the same window of the
@@ -1725,7 +1747,10 @@ def promql_query(expr: str, start: str | None = None, end: str | None = None, st
                     t0, t1 = t1, t0
                 if (t1 - t0) > MAX_PROMQL_RANGE_DAYS * 86_400_000:
                     raise ToolError(f"time range longer than {MAX_PROMQL_RANGE_DAYS:g} days")
-                if t0 == t1:
+                whole = t0 != t1 and _window_is_range(expr, t1 - t0)
+                if whole:                       # (0.10.8) increase(x[45m]) from 08:00 to 08:45: the window asked is
+                    t0 = t1                     # the value at 08:45; a range query's points each look 45 minutes
+                if t0 == t1:                    # back, before 08:00 too (197 orders said for 11)
                     series = conn.client.query(expr, t1)
                     step_ms = 0
                 else:
@@ -1760,6 +1785,7 @@ def promql_query(expr: str, start: str | None = None, end: str | None = None, st
                         **({"hint": hint} if hint else {}),
                         "start": f"{conn.zone.local(t0):%Y-%m-%d %H:%M}", "end": f"{conn.zone.local(t1):%Y-%m-%d %H:%M}",
                         "step": duration(step_ms) if step_ms else "instant", "series_count": total,
+                        **({"note": WINDOW_NOTE} if whole else {}),
                         **({"against_usual": usual} if usual else {}),
                         "series": items, "truncated": total > max_series}
             finally:
@@ -1800,13 +1826,21 @@ def _breaches(conn: Any, series: list, op: str, threshold: float, min_ms: int, s
     return out
 
 
+def names_hit(labels: dict, wanted: set) -> set:
+    """(0.10.8) The names of `wanted` a series' labels hold, in any case and with any separators, a host by its full
+    name, its short name or its address (values.names_hit)."""
+    from supagent.knowledge.values import names_hit as hit
+
+    return hit(labels, wanted)
+
+
 def _excursions(conn: Any, series: list, op: str, threshold: float, step_ms: int, wanted: set) -> list[dict]:
     """(0.10.4) Where a check's threshold was crossed on the named entities, however briefly: the highest (or lowest)
     value, when, and the minutes beyond it. The team's check needs the crossing to last (its `for`); a System map link
     or a question may name the limit without a duration, so the agent sees these too."""
     out = []
     for s in series:
-        if not ({str(v).lower() for v in (getattr(s, "labels", None) or {}).values()} & wanted):
+        if not names_hit(getattr(s, "labels", None) or {}, wanted):
             continue
         bad = [(t, v) for t, v in s.points if not math.isnan(v) and (v > threshold if op == "above" else v < threshold)]
         if not bad:
@@ -1893,16 +1927,15 @@ def check_health(start: str, end: str, entities: list[str] | None = None, checks
                     if err:
                         errors[name] = err
                         continue
-                    if wanted and any({str(v).lower() for v in (getattr(x, "labels", None) or {}).values()} & wanted
-                                      for x in series or []):
-                        matched = True
+                    if wanted and any(names_hit(getattr(x, "labels", None) or {}, wanted) for x in series or []):
+                        matched = True                # (0.10.8) a name in any case, a host by any of its names
                     op = "above" if "above" in c else "below"
                     thr = float(c.get(op))
                     min_ms = parse_duration(str(c.get("for", "0s"))) if c.get("for") else 0
                     breached = set()
                     for b in _breaches(conn, series or [], op, thr, min_ms, step):
                         breached.add(tuple(sorted((str(k), str(v)) for k, v in b["labels"].items())))
-                        hit = {str(v).lower() for v in b["labels"].values()} & wanted
+                        hit = names_hit(b["labels"], wanted)
                         if wanted and not hit:
                             hidden += 1
                             continue
@@ -4105,13 +4138,13 @@ def _servers_of_named(names: list[str]) -> list[str]:
     cache runs on: "the cache" looked up, its eviction alert on its server never found). [] when the map cannot
     be read."""
     try:
-        from supagent.knowledge.brief import _graph
+        from supagent.knowledge.brief import _by_host, _graph
         from supagent.knowledge.datalinks import SERVERISH
 
         g = _graph()
         V, out = g["values"], []
         for n in names:
-            for i in g["names"].get(" ".join(str(n).lower().split()), [])[:2]:
+            for i in (g["names"].get(" ".join(str(n).lower().split())) or _by_host(str(n), g))[:2]:
                 for kind, b, _note in g["out"].get(i, []):
                     name = V[b]["name"]               # a server or a group of servers (not a namespace, a cluster:
                     if kind == "runs_on" and SERVERISH.search(V[b]["cat"] or "") and name not in out and \
@@ -4169,6 +4202,25 @@ def _record_tables() -> list[tuple[str, list[str], list[str]]]:
     return out[:RECORD_TABLES]
 
 
+def _spellings(table: str, field: str, names: list[str]) -> list[str]:
+    """(0.10.8) How a field of a record table writes these names, by the values the data dictionary learned of it:
+    another case, other separators, a host's full name, short name or address (web01.corp.example, web01:9100
+    for web01). [] when the field's values are not known."""
+    try:
+        from superset.extensions import db as meta
+
+        from supagent.knowledge.values import spellings
+        from supagent.models import KObject
+
+        o = (meta.session.query(KObject).filter(KObject.kind == "field", KObject.parent == table, KObject.name == field,
+                                                KObject.gone_at.is_(None)).first())
+        known = [str(v) for v in ((o.stats or {}).get("values") or []) if v not in (None, "")] if o is not None else []
+        return spellings(names, known)
+    except Exception as ex:  # pylint: disable=broad-except   (the names as given)
+        log.info("supagent records_about: the values of %s.%s not read: %s", table, field, str(ex)[:200])
+        return []
+
+
 @mcp.tool
 def records_about(names: list[str], until: str, days: int = 7) -> dict:
     """What was recorded about parts of the system before a time: the changes, releases, restarts, maintenance,
@@ -4201,10 +4253,14 @@ def records_about(names: list[str], until: str, days: int = 7) -> dict:
             parts += [s for s in _servers_of_named(parts) if s not in parts][:8]   # (0.10.7) and what they run on
             t1 = G.clock(until)
             span = max(1, min(int(days or 7), 31))
-            listed = ", ".join("'" + p.replace("'", "''") + "'" for p in parts)
+
+            def listed(table: str, key: str) -> str:   # (0.10.8) and as the field writes them: another case, a
+                said = parts + _spellings(table, key, parts)   # host's full name for its short one (web01.corp.example)
+                return ", ".join("'" + p.replace("'", "''") + "'" for p in said)
+
             out: list[dict] = []
             for table, keys, texts in _record_tables():
-                conds = [f'"{G.name(k)}" IN ({listed})' for k in keys]
+                conds = [f'"{G.name(k)}" IN ({listed(table, k)})' for k in keys]
                 conds += [f'"{G.name(t)}" LIKE \'%{p.replace(chr(39), "")}%\'' for t in texts for p in parts
                           if len(p) >= 3 and "%" not in p]
                 if not conds:

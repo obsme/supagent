@@ -149,10 +149,16 @@ def _value_hint(column: str, wanted: list[str], stats: dict, backend: str,
     if not missing:
         return None
     parts = []
+    from supagent.knowledge.values import HOST_FIELD, same_host
+
     for w in missing[:4]:
         same = lower.get(w.lower()) or loose.get(_loose(w))
         if same:
             parts.append(f"'{w}' is written '{same}'")
+            continue
+        hosts = [k for k in known if same_host(w, k)][:3] if HOST_FIELD.search(column or "") else []
+        if hosts:                                      # (0.10.8) web01: web01.corp.example, web01:9100
+            parts.append(f"'{w}' is written " + " or ".join(f"'{h}'" for h in hosts))
             continue
         held = _holders(w, [o for o in others or [] if o[0] != column]) if _elsewhere_on() else []
         if held:

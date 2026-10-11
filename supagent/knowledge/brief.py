@@ -74,6 +74,7 @@ def _graph() -> dict[str, Any]:
     cats = list(editable())
     values: dict[int, dict[str, Any]] = {}
     names: dict[str, list[int]] = {}
+    synonyms: dict[int, list[str]] = {}
     children: dict[int, list[int]] = {}
     from supagent.knowledge.facets import PART_OF, part_of_map
 
@@ -85,6 +86,9 @@ def _graph() -> dict[str, Any]:
             n = " ".join(n.lower().split())
             if len(n) >= 2:
                 names.setdefault(n, []).append(f.id)
+        synonyms[f.id] = [str(x) for x in (f.synonyms or [])]
+    for alias, ids in _host_aliases(values, synonyms).items():   # (0.10.8) a server by its short name too
+        names.setdefault(alias, ids)
     for v in values.values():
         v["parents"] = [p for p in v["parents"] if p in values and p != v["id"]]
         for p in v["parents"]:
@@ -147,6 +151,8 @@ def named(text: str, g: dict[str, Any] | None = None, loose: bool = False) -> li
             ids = g["names"].get(key)
             if not ids and loose:
                 ids = _loosely(key, n, g)
+            if not ids and n == 1:                     # (0.10.8) web01.corp.example, web01:9100 asked, the
+                ids = _by_host(key, g)                 # server named web01 on the map
             if not ids:
                 continue
             if n == 1 and (len(key) < 3 or key in STOP) and not any(g["values"][x]["name"] == words[0] for x in ids):
@@ -156,6 +162,41 @@ def named(text: str, g: dict[str, Any] | None = None, loose: bool = False) -> li
             break
         i += hit or 1
     return found
+
+
+def _host_aliases(values: dict[int, dict[str, Any]], synonyms: dict[int, list[str]]) -> dict[str, list[int]]:
+    """(0.10.8, the team: a server is named by its full name in the data and by its short one in a question) the
+    shorter names of the servers of the map (web01 for web01.corp.example, for web01:9100), each with the
+    servers named so: a name of the map's own is never taken."""
+    from supagent.knowledge import ambiguity, resolve
+    from supagent.knowledge.datalinks import SERVERISH
+    from supagent.knowledge.describe import STOP
+    from supagent.knowledge.values import host_aliases
+
+    common = STOP | resolve.GENERIC | ambiguity.GENERIC   # a word of every question never names a server (graph for
+    out: dict[str, list[int]] = {}                        # graph.corp.example: "show the graph of the errors")
+    for v in values.values():
+        if SERVERISH.search(str(v["cat"] or "")):
+            for n in [v["name"]] + synonyms.get(v["id"], []):
+                for alias in host_aliases(n):
+                    if alias not in common and v["id"] not in out.setdefault(alias, []):
+                        out[alias].append(v["id"])
+    return {a: ids for a, ids in out.items() if ids}
+
+
+def _by_host(key: str, g: dict[str, Any]) -> list[int]:
+    """(0.10.8) The servers of the map a full name or an address names (web01.corp.example, web01:9100 for a
+    server named web01), never another server of the same short name (web01.dmz.example)."""
+    from supagent.knowledge.datalinks import SERVERISH
+    from supagent.knowledge.values import host_aliases, same_host
+
+    out: list[int] = []
+    for alias in host_aliases(key):
+        for x in g["names"].get(alias, []):
+            v = g["values"].get(x) or {}
+            if x not in out and SERVERISH.search(str(v.get("cat") or "")) and same_host(key, v.get("name", "")):
+                out.append(x)
+    return out
 
 
 LOOSE = re.compile(r"[\s_.\-/]+")
