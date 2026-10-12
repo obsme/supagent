@@ -156,7 +156,8 @@ With osagg 0.2.15, which labels position dates D, D-1, D-2... only (no W-x, Y-x 
 every host, then restart; nothing to run (tables v18, no new setting). The agent's rules say D labels (the same weekday
 a week before D-1 is D-6), and a label column learned before is described in D labels at the next learning of its
 database. Charts and alerts of yours that filter on W-x, Y-x or M-x select nothing with osagg 0.2.15: write them with D
-labels. INSTALL.txt, *From 0.10.8 to 0.10.8.1*.
+labels; a catalog glossary whose POSITION_LABEL line names W-1 (imported from osagg's catalog.yaml before 0.2.15) is
+edited by hand to osagg 0.2.15's line. INSTALL.txt, *From 0.10.8 to 0.10.8.1*.
 
 ## Upgrade from 0.10.7 to 0.10.8
 

@@ -150,6 +150,14 @@ wheel with osagg 0.2.14 (nothing to undo).
     Learn now on the database); a description an admin verified is kept as written.
   - Your own charts, dashboards, alerts and saved queries that filter POSITION_LABEL on W-x, Y-x or M-x: write them with
     D labels (W-1 was D-5 after the 14:00 cut-off, D-6 before it and at weekends; W-2: D-10 or D-11).
+  - Your catalog's glossary, if its POSITION_LABEL line names W-1 (a glossary imported from osagg's catalog.yaml before
+    0.2.15 says "W-1, W-2... Y-1" and "IN ('D-1', 'W-1')"): edit that line in Settings -> Data dictionary -> Catalog
+    (the glossary entry). osagg 0.2.15's line: POSITION_LABEL: D (today's position date), D-1, D-2... (working days
+    before today, Monday to Friday), D+1... (after today). D labels only: the same weekday a week earlier is D-5 more
+    (D-1, D-6, D-11). Filter with POSITION_LABEL IN ('D-1', 'D-6'). The agent reads the glossary with its rules: a
+    glossary that still says W-1 sends it to a label that selects nothing. supagent never changes an entry of yours.
+  - Saved charts and dashboards that filter on W-x are described with W-x in the Context pages and the knowledge
+    search until they are edited and read again (the nightly build).
 
 From 0.10.7 to 0.10.8
 =====================

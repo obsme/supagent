@@ -21,6 +21,11 @@ Your own charts, dashboards, alerts and saved queries that filter POSITION_LABEL
 osagg 0.2.15: write them with D labels. W-1 was the same weekday a week before the session date: D-5 after the 14:00
 cut-off, D-6 before it and at weekends; W-2: D-10 or D-11; Y-1 is the D-x of the same date a year earlier.
 
+**Your catalog's glossary**: a POSITION_LABEL line that names W-1 (a glossary imported from osagg's catalog.yaml before
+0.2.15 says "W-1, W-2... Y-1" and filters IN ('D-1', 'W-1')) still sends the agent to a label that selects nothing:
+edit it in Settings -> Data dictionary -> Catalog to osagg 0.2.15's line (INSTALL.txt, *From 0.10.8 to 0.10.8.1*).
+supagent never changes an entry a person wrote or imported.
+
 Checked: the unit tests (the expected texts and one new test: a column learned with the old text, one verified, a
 second learning that changes nothing); the dates of D-1, D-5, D-6 and W-1 under osagg 0.2.14 and 0.2.15 at four
 moments (a weekday before and after the cut-off, a Monday morning, a Saturday): D-6 under 0.2.15 is the date W-1 had
