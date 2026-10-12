@@ -71,12 +71,16 @@ def _ms_to_iso(v: Any, tz: Any = None) -> str | None:
     return t.astimezone(tz).strftime("%Y-%m-%d %H:%M")
 
 
+# the labels a business-date label takes (osagg 0.2.15: D labels only), and how versions before 0.10.8.1 wrote them
+LABELS, OLD_LABELS = " (D, D-1, D-2...: working days back)", " (D, D-1, W-1, Y-1...)"
+
+
 def computed_text(f: Any) -> str:
     """What a column the connector computes is (osagg's business-date label and time)."""
     kind, *args = str(f.virtual).split(":")
     if kind == "shift" and len(args) >= 2:
         return f"computed by the connector: {args[1]} moved onto the D-1 position date of {args[0]}"
-    return f"computed by the connector: the business-day label of {args[0] if args else 'a date'} (D, D-1, W-1, Y-1...)"
+    return f"computed by the connector: the business-day label of {args[0] if args else 'a date'}{LABELS}"
 
 
 def computed_help(text: str) -> str:
@@ -95,10 +99,16 @@ def _field_facts(ftype: Any, st: dict[str, Any]) -> dict[str, Any]:
 
 def describe_computed(source_id: int) -> int:
     """The computed columns of a database whose description the LLM wrote and nobody verified: what the
-    connector says they are instead. Returns how many were corrected."""
+    connector says they are instead. Returns how many were corrected. A label's text as an earlier version wrote
+    it (W-1, Y-1: no such label since osagg 0.2.15) is the current one at once, not at the index's next profile."""
     n = 0
     for f in db.session.query(KObject).filter(KObject.source_id == source_id, KObject.kind == "field",
                                               KObject.gone_at.is_(None)):
+        text = str((f.stats or {}).get("computed") or "")
+        if text.endswith(OLD_LABELS):
+            f.stats = {**(f.stats or {}), "computed": text[:-len(OLD_LABELS)] + LABELS}
+            if (f.backend_help or "").endswith(OLD_LABELS):
+                f.backend_help = f.backend_help[:-len(OLD_LABELS)] + LABELS
         said = computed_help((f.stats or {}).get("computed"))
         if said and not f.verified and f.description_source in (None, "", "llm", "backend") and f.description != said:
             f.description, f.description_source, n = said, "backend", n + 1

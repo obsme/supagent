@@ -67,7 +67,7 @@ def _columns(ds: Any) -> dict[str, Any]:
 
 def time_column(params: dict[str, Any], ds: Any) -> str | None:
     """The calendar the chart is compared on: the dataset's main time column (the records' own time: a chart's x
-    axis may be another time, e.g. a position time that puts D-1 and W-1 on the same day), else the chart's time
+    axis may be another time, e.g. a position time that puts D-1 and D-6 on the same day), else the chart's time
     axis, else its time column, else the first time column."""
     cols = _columns(ds)
     if ds.main_dttm_col and ds.main_dttm_col in cols:

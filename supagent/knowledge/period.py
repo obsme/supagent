@@ -1,6 +1,6 @@
 """Does a query cover the period of the question? A question with a date or a period ("on 23 September",
 "yesterday", "last week", "right now") needs queries that filter the time of what they read: the index's
-time field (the dictionary's) or ts for metrics, never business dates (position dates, D-1, W-1) unless
+time field (the dictionary's) or ts for metrics, never business dates (position dates, D-1, D-6) unless
 the question speaks of them. A question about one whole day ("on 23 September", no hours, no comparison)
 needs the query to cover that day: not a part of it, not another day.
 

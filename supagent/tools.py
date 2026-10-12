@@ -2584,7 +2584,7 @@ class _Comparison:
         self.cond, self.moving, self.untimed = G.timed(self.cond, self.times)
         if self.labels and _earlier_dates(conn, self.labels, dt.timedelta(0)) == "1 = 0":
             raise ToolError(f'where: "{label_column}" = {", ".join(self.labels)}: not a business-date label (D, D-1, '
-                            "D-2, W-1...); a state or another value belongs to its own field")
+                            "D-2...); a state or another value belongs to its own field")
         self.moved = label_column                    # the column whose condition moves with the day
         # a business date is of the day the window ends: asked now about today, today's; asked about last Monday
         # (a window that ended then), that Monday's, and each earlier day's own from there
@@ -3729,7 +3729,7 @@ def compare_logs(table: str, start: str, end: str, where: str = "", days: int = 
                 label_source = getattr(conn, "label_source", None) if label_column else None
                 if labels and _earlier_dates(conn, labels, dt.timedelta(0), anchor) == "1 = 0":
                     raise ToolError(f'where: "{label_column}" = {", ".join(labels)}: not a business-date label (D, '
-                                    "D-1, D-2, W-1...); a state or another value belongs to its own field")
+                                    "D-1, D-2...); a state or another value belongs to its own field")
                 moved = label_column                 # the column whose condition moves with the day
                 if not labels and label_source:      # a business date written as a date: its label, moved too
                     pinned = G.literals(cond, label_source)

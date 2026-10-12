@@ -150,6 +150,14 @@ then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with t
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
 
+## Upgrade from 0.10.8 to 0.10.8.1
+
+With osagg 0.2.15, which labels position dates D, D-1, D-2... only (no W-x, Y-x or M-x any more): install both wheels on
+every host, then restart; nothing to run (tables v18, no new setting). The agent's rules say D labels (the same weekday
+a week before D-1 is D-6), and a label column learned before is described in D labels at the next learning of its
+database. Charts and alerts of yours that filter on W-x, Y-x or M-x select nothing with osagg 0.2.15: write them with D
+labels. INSTALL.txt, *From 0.10.8 to 0.10.8.1*.
+
 ## Upgrade from 0.10.7 to 0.10.8
 
 The wheel on every host, then restart; nothing to run (tables v18, no new setting). A short first question that names

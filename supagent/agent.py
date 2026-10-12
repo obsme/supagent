@@ -126,9 +126,10 @@ keys you need, then WHERE key IN (those values)). Two periods (a week and the we
 per period, or GROUP BY DATE_TRUNC('day' or 'week', the time field); never CASE on the time field. An error saying the query "could not be fully pushed
 down" means: rewrite it that way, do not run it again. A date or a period in the question ("on 23
 September", "last week") filters the index's time field (the one the dictionary names); business dates
-only when the question says so (position date, business date, D-1, W-1). Business dates: "POSITION_DATE" (yyyymmdd),
-"POSITION_LABEL" (D, D-1, W-1, Y-1...) and "POSITION_TIME" (execution time moved onto the D-1 position
-date) are columns when the index has them; filter labels with "POSITION_LABEL" IN ('D-1', 'W-1')."""
+only when the question says so (position date, business date, D-1). Business dates: "POSITION_DATE" (yyyymmdd),
+"POSITION_LABEL" (D, D-1, D-2...: working days back; the same weekday a week earlier is 5 more, D-1 and D-6) and
+"POSITION_TIME" (execution time moved onto the D-1 position date) are columns when the index has them; filter labels
+with "POSITION_LABEL" IN ('D-1', 'D-6')."""
 
 PROMAGG_RULES = """
 

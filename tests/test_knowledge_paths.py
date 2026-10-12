@@ -282,7 +282,7 @@ def test_the_columns_osagg_computes_are_learned_with_what_they_are(ctx, monkeypa
                                                           "learn.request_timeout": 30}.get(key, 30))
     _info, fstats = LI.profile_index(conn, "jobs", meta)
     assert fstats["POSITION_LABEL"] == {"type": "varchar", "computed": "computed by the connector: the business-day "
-                                        "label of POSITION_DATE (D, D-1, W-1, Y-1...)"}
+                                        "label of POSITION_DATE (D, D-1, D-2...: working days back)"}
     assert "D-1 position date of POSITION_DATE" in fstats["POSITION_TIME"]["computed"]
     assert not any("POSITION_LABEL" in str(b) for b in asked)          # never asked to OpenSearch (not stored)
 

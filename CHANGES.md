@@ -1,5 +1,32 @@
 # Changes
 
+## 0.10.8.1 — 2026-10-12
+
+The position labels in D labels only, with osagg 0.2.15. osagg 0.2.15 labels a position date D (today's), D-1, D-2...
+(working days before today, Monday to Friday) or D+1, D+2... (after today): the week and year labels W-x and Y-x are
+gone, and a filter on them (or on M-x) selects nothing. **Install the two together**: 0.10.8 with osagg 0.2.15 filters
+on W-1, which compares D-1 with nothing and says nothing about it; 0.10.8.1 with osagg 0.2.14 asks for D-6 where osagg
+0.2.14 still says W-1. Nothing else changes: no table change (v18), no new setting, no new reading of the documents.
+
+* **The agent's rules**: POSITION_LABEL is D, D-1, D-2... (working days back; the same weekday a week earlier is 5
+  more: D-1 and D-6), filtered as POSITION_LABEL IN ('D-1', 'D-6'); they said D-1, W-1, Y-1 and IN ('D-1', 'W-1').
+* **A label column learned from the connector** is described "(D, D-1, D-2...: working days back)". A column learned
+  by an earlier version, "(D, D-1, W-1, Y-1...)", is said so at the next learning of its database (its stored text,
+  its help and its description), not only when its index is profiled again; no request to the database. A
+  description an admin verified is kept as written.
+* A comparison on a value that is no label is sent back naming D, D-1, D-2... (it named W-1 among the labels).
+* The example catalog's glossary line for POSITION_LABEL is osagg 0.2.15's (it said W-1, W-2... and Y-1).
+
+Your own charts, dashboards, alerts and saved queries that filter POSITION_LABEL on W-x, Y-x or M-x select nothing with
+osagg 0.2.15: write them with D labels. W-1 was the same weekday a week before the session date: D-5 after the 14:00
+cut-off, D-6 before it and at weekends; W-2: D-10 or D-11; Y-1 is the D-x of the same date a year earlier.
+
+Checked: the unit tests (the expected texts and one new test: a column learned with the old text, one verified, a
+second learning that changes nothing); the dates of D-1, D-5, D-6 and W-1 under osagg 0.2.14 and 0.2.15 at four
+moments (a weekday before and after the cut-off, a Monday morning, a Saturday): D-6 under 0.2.15 is the date W-1 had
+under 0.2.14 before the cut-off, and the dates of D-1 are the same. Not measured: no question set was asked again (the
+change is the wording of the labels and the description of their column).
+
 ## 0.10.8 — 2026-10-11
 
 The team's requests of 11 October and the known gaps of 0.10.7. A short first question that names nothing ("what is the

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from test_knowledge import world  # noqa: F401  (the fixture)
 
-LABEL = "computed by the connector: the business-day label of DAY (D, D-1, W-1, Y-1...)"
+LABEL = "computed by the connector: the business-day label of DAY (D, D-1, D-2...: working days back)"
 
 
 def test_a_computed_column_is_described_by_the_connector(world, app):  # noqa: F811
@@ -43,6 +43,40 @@ def test_a_computed_column_is_described_by_the_connector(world, app):  # noqa: F
         assert "backend_help" not in _field_facts("keyword", {"cardinality": 3})
     finally:
         for o in (guessed, checked, blank):
+            db.session.delete(o)
+        db.session.commit()
+
+
+def test_a_label_learned_by_an_earlier_version_is_said_in_d_labels_at_the_next_learning(world, app):  # noqa: F811
+    """osagg 0.2.15 has D labels only: a label column an earlier version learned as "(D, D-1, W-1, Y-1...)" is said
+    in D labels at the next learning, also when its index is not profiled again; what an admin verified stays."""
+    from superset.extensions import db
+
+    from supagent.knowledge.learn_indices import computed_help, describe_computed
+    from supagent.models import KObject, Source
+
+    old = "computed by the connector: the business-day label of DAY (D, D-1, W-1, Y-1...)"
+    src = db.session.query(Source).first()
+    learned = KObject(source_id=src.id, kind="field", parent="jobs", name="DAY_LABEL_OLD", data_type="varchar",
+                      stats={"computed": old, "cardinality": 12}, backend_help=computed_help(old),
+                      description=computed_help(old), description_source="backend", verified=False)
+    checked = KObject(source_id=src.id, kind="field", parent="jobs", name="DAY_LABEL_SEEN", data_type="varchar",
+                      stats={"computed": old}, backend_help=computed_help(old),
+                      description="The business day of the run, as the team writes it.", description_source="curated",
+                      verified=True)
+    db.session.add_all([learned, checked])
+    db.session.commit()
+    try:
+        assert describe_computed(src.id) == 1
+        assert learned.stats == {"computed": LABEL, "cardinality": 12}
+        assert learned.description == learned.backend_help == computed_help(LABEL)
+        assert checked.stats == {"computed": LABEL} and checked.backend_help == computed_help(LABEL)
+        assert checked.description == "The business day of the run, as the team writes it."
+        db.session.commit()
+        assert describe_computed(src.id) == 0                                  # once
+        assert "W-1" not in str(learned.stats) + learned.description + checked.backend_help
+    finally:
+        for o in (learned, checked):
             db.session.delete(o)
         db.session.commit()
 
