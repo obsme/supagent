@@ -41,6 +41,14 @@ def generic(kind: str | None) -> bool:
 def described(note: str | None, kind: str | None) -> str:
     """What a link is, in words: its description, else what the learning read it as."""
     return (note or "").strip() or NATURE.get(kind or "", "is linked to")
+
+
+def worded(note: str) -> str:
+    """The kind of a link described in words ("powered by"): the same words in any case or spacing, the same kind,
+    whoever writes them (a person on the map, the learning reading a page)."""
+    import hashlib
+
+    return f"{LINK}:" + hashlib.sha1(" ".join(str(note or "").strip()[:500].lower().split()).encode()).hexdigest()[:8]
 log = logging.getLogger(__name__)
 LAYOUT_KEY = "system_map"
 HINT_KINDS = ("doc", "guide", "context")
@@ -535,11 +543,30 @@ def _groups(raw: Any) -> list[dict[str, Any]]:
     return out
 
 
+ORDER_SCOPES = 500         # (0.10.9.1) the lists put in order by hand, at most
+ORDER_IDS = 5000           # the values of one list kept in its order, at most
+
+
+def _order(raw: Any) -> dict[str, list[int]]:
+    """(0.10.9.1) {list: [value ids in the order a person put them]}: a category's column ("server") or what is
+    inside a value ("in:<id>")."""
+    out: dict[str, list[int]] = {}
+    for k, ids in (raw if isinstance(raw, dict) else {}).items():
+        k = str(k).strip()[:64]
+        if not k or not isinstance(ids, (list, tuple)) or len(out) >= ORDER_SCOPES:
+            continue
+        seen = list(dict.fromkeys(int(i) for i in ids if str(i).isdigit()))[:ORDER_IDS]
+        if seen:
+            out[k] = seen
+    return out
+
+
 def save_layout(data: dict[str, Any], by: str) -> dict[str, Any]:
-    """An admin's arrangement of the map: {"positions": {id: [x, y]} the boxes placed by hand, "hidden": [ids],
-    "folded": {category: bool}, "columns": {category: [dx, dy]} where a category was moved from its place,
-    "groups": [{"name", "categories"}] the frames drawn around categories}. Display only: nothing here is read
-    by the agent."""
+    """An admin's arrangement of the map: {"positions": {id: [x, y]} the boxes placed by hand (before 0.10.9.1: no
+    longer drawn, a box stays in its list), "hidden": [ids], "folded": {category: bool}, "columns": {category:
+    [dx, dy]} where a category was moved from its place, "groups": [{"name", "categories"}] the frames drawn around
+    categories, (0.10.9.1) "order": {list: [ids]} the values put in order by hand}. Display only: nothing here is
+    read by the agent."""
     import datetime as dt
 
     from supagent.models import Meta
@@ -561,7 +588,7 @@ def save_layout(data: dict[str, Any], by: str) -> dict[str, Any]:
     columns = {str(k).strip().lower()[:24]: pair(v) for k, v in (data.get("columns") or {}).items()
                if pair(v) is not None and pair(v) != [0.0, 0.0]}
     out = {"positions": pos, "hidden": hidden, "folded": folded, "columns": columns,
-           "groups": _groups(data.get("groups")), "updated_by": by,
+           "groups": _groups(data.get("groups")), "order": _order(data.get("order")), "updated_by": by,
            "updated_at": dt.datetime.utcnow().isoformat(timespec="seconds")}
     row = db.session.get(Meta, LAYOUT_KEY)
     if row is None:
@@ -675,8 +702,6 @@ def save_interaction(a: int, b: int, kind: str | None, note: str, by: str, link_
     description: required for a new one) and what it does (`detail`: what to do when following it), from a to b or
     both ways (`both_ways`; `reverse`: from b to a now); several between two parts. What a person writes is never
     written over by the LLM. `kind`: one of INTERACTIONS (the API of 0.9.5), else a link of its own."""
-    import hashlib
-
     from supagent.models import Facet, Link
 
     if kind and kind not in INTERACTIONS and not generic(kind):
@@ -692,7 +717,7 @@ def save_interaction(a: int, b: int, kind: str | None, note: str, by: str, link_
         if not kind:
             if not short:
                 raise ValueError("say what the link is (its description)")
-            kind = f"{LINK}:" + hashlib.sha1(" ".join(short.lower().split()).encode()).hexdigest()[:8]
+            kind = worded(short)
         x = (db.session.query(Link).filter(Link.a_ref == f"facet:{a}", Link.b_ref == f"facet:{b}", Link.kind == kind)
              .first())
     if x is None:
@@ -709,7 +734,7 @@ def save_interaction(a: int, b: int, kind: str | None, note: str, by: str, link_
     if link_id and note is None:
         short = x.note
     if generic(x.kind) and x.id is not None and short and short != x.note:   # its kind follows its description
-        new_kind = f"{LINK}:" + hashlib.sha1(" ".join(short.lower().split()).encode()).hexdigest()[:8]
+        new_kind = worded(short)
         if db.session.query(Link.id).filter(Link.a_ref == x.a_ref, Link.b_ref == x.b_ref, Link.kind == new_kind,
                                             Link.id != x.id).first() is not None:
             raise ValueError("a link with this description joins these parts already")
@@ -811,6 +836,40 @@ def remove_value(fid: int, by: str) -> dict[str, Any]:
     touch()
     db.session.commit()
     return {"id": f.id, "status": f.status}
+
+
+def move_value(fid: int, facet: str, by: str) -> dict[str, Any]:
+    """(0.10.9.1) A value dropped on the map into another category (a subcategory of its own, or back): it becomes a
+    value of that category, with its links, its items and its other names. Never merged away: a value of the same
+    name there is said, and the person decides (in Categories)."""
+    import datetime as dt
+
+    from supagent.knowledge.facets import editable, inside
+    from supagent.knowledge.freshness import touch
+    from supagent.models import Facet
+
+    f = db.session.get(Facet, int(fid))
+    facet = " ".join(str(facet or "").lower().split())
+    if f is None or f.status != "approved":
+        raise ValueError("no such part on the map")
+    cats = editable()
+    if facet not in cats or f.facet not in cats:
+        raise ValueError("a value moves between " + ", ".join(cats))
+    if facet == f.facet:
+        return {"id": f.id, "facet": f.facet, "value": f.value, "moved": False}
+    names = {" ".join(n.lower().split()) for n in [f.value] + [str(x) for x in (f.synonyms or [])]}
+    for other in db.session.query(Facet).filter(Facet.facet == facet, Facet.id != f.id, Facet.status != "rejected"):
+        if names & {" ".join(n.lower().split()) for n in [other.value] + [str(x) for x in (other.synonyms or [])]}:
+            raise ValueError(f'"{other.value}" is a value of {facet} already: merge the two in Categories if they '
+                             "are one")
+    before = f.facet
+    f.facet = facet
+    f.reviewed_by, f.reviewed_at = by, dt.datetime.utcnow()
+    db.session.commit()
+    touch()
+    db.session.commit()
+    return {"id": f.id, "facet": f.facet, "value": f.value, "moved": True, "from": before,
+            "inside": inside().get(facet, "")}
 
 
 def add_category(name: str, inside: str, by: str) -> dict[str, Any]:
@@ -924,15 +983,6 @@ def map_data(admin: bool) -> dict[str, Any]:
 
     waiting = db.session.query(Link.id).filter(Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%"),
                                                Link.status == "proposed").count() if admin else 0
-    missing: list[str] = []
-    if admin:                                   # what an investigation still lacks (knowledge.readiness)
-        try:
-            from supagent.knowledge.readiness import report
-
-            missing = [x for x in report()["to_do"] if "wait in Data dictionary" not in x]
-        except Exception:  # pylint: disable=broad-except   (the map without it)
-            log.warning("supagent map: what is missing for investigations: not read", exc_info=True)
-            db.session.rollback()
     from supagent.knowledge.facets import about, field_rules, inside
 
     said, within = about(), inside()
@@ -942,4 +992,12 @@ def map_data(admin: bool) -> dict[str, Any]:
                            for c in order if counts.get(c) or admin],
             "values": values, "links": links, "layout": layout(),
             "removals": sum(1 for x in links if x["drop"]) if admin else 0, "is_admin": admin,
-            "proposed": proposed, "proposed_interactions": waiting, "missing": missing}
+            "proposed": proposed, "proposed_interactions": waiting}
+
+
+def missing_points() -> list[str]:
+    """(0.10.9.1) What an investigation still lacks (knowledge.readiness), for the map's chip: asked by the page once
+    the map is drawn (/api/map/missing), no longer with the map (it was most of its time on a big deployment)."""
+    from supagent.knowledge.readiness import report
+
+    return [x for x in report()["to_do"] if "wait in Data dictionary" not in x]

@@ -647,8 +647,30 @@
 
   // ---------------------------------------------------------------- memory
   function memoryItem(m, canDelete) {
-    var li = el("li", {}, [el("span", { text: m.text }),
+    var text = el("span", { class: "memory-text", text: m.text });
+    var li = el("li", {}, [text,
       el("span", { class: "muted", text: " \u00b7 " + m.kind + (m.category ? ", " + m.category : "") + (m.source === "chat" ? " \u00b7 learned from a chat" : "") })]);
+    if (canDelete) {           /* (0.10.9.1) edited in place: the text as written, its kind */
+      li.appendChild(el("button", { class: "link", type: "button", text: "Edit", onclick: function () {
+        var box = el("textarea", { class: "memory-edit", rows: Math.min(12, Math.max(2, (m.text || "").split("\n").length + 1)) });
+        box.value = m.text || "";
+        var kind = el("select", {}, ["preference", "rule", "fact"].map(function (k) {
+          return el("option", { value: k, text: k, selected: k === m.kind ? "selected" : null });
+        }));
+        var msg = el("span", { class: "result" });
+        var form = el("div", { class: "memory-form" }, [box, kind,
+          el("button", { type: "button", text: "Save", onclick: function () {
+            S.chat("PUT", "memory/" + m.id, { text: box.value, kind: kind.value }).then(function (r) {
+              if (r.error) { msg.textContent = r.error; msg.className = "result bad"; return; }
+              loadMemory();
+            });
+          } }),
+          el("button", { class: "link", type: "button", text: "Cancel", onclick: function () { loadMemory(); } }), msg]);
+        li.innerHTML = "";
+        li.appendChild(form);
+        box.focus();
+      } }));
+    }
     if (canDelete) {
       li.appendChild(S.sureButton("Forget", function () { S.chat("DELETE", "memory/" + m.id).then(loadMemory); }, {
         ask: "Forget this?", yes: "Forget", detail: m.scope === "team" ? "The team's agent no longer uses it." :

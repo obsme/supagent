@@ -150,6 +150,22 @@ then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with t
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
 
+## Upgrade from 0.10.8.1 to 0.10.9
+
+pip install the 0.10.9 wheel on every host and restart (no table change, v18; osagg 0.2.15 or 0.2.16). The AI is given
+as much as its model can read: a 32k-64k model keeps 0.10.8's sizes, a 128k-256k model gets more knowledge, longer
+tool results and a full LLM context the learning writes for it (Settings -> Chat settings shows the profile). Memories
+are given whole and first, and edited in place; a field or a metric can be deactivated in the Data dictionary. The
+learning reads Ansible repositories (inventories' groups and child groups, roles installed from Galaxy, the roles that
+only configure the hosts), Confluence tables (owner, run by, area), Python services with their Compose file and
+configuration, and proposes names, one value per thing, in your own categories. If you set agent.compact_at,
+search.prompt_chars or memory.prompt_chars for a big model on 13 October, unset them after the upgrade. Measured: the
+open sets 161/162 and 160/162 (main) and 27/29 and 28/29 (observability) right in each of two rounds, 1 and 2 (main)
+and 0 and 1 (observability) wrong without a mark; the held-out sets 94/101 right (totals only); the upgrade from
+0.10.8.1 checked on a copy of a lab's data (tables, settings, the System map, health, the search); all with
+Qwen3.6-35B-A3B (llama.cpp) on the short profile; the long profile and gpt-oss-120b not measured. INSTALL.txt, *From
+0.10.8.1 to 0.10.9*.
+
 ## Upgrade from 0.10.8 to 0.10.8.1
 
 With osagg 0.2.15, which labels position dates D, D-1, D-2... only (no W-x, Y-x or M-x any more): install both wheels on

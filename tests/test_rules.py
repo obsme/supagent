@@ -245,7 +245,8 @@ def desks(world):
                                        "ERROR_CODE": ["INVALID_TRADE", "TIMEOUT"]}),
                           ("shop-orders", {"CHANNEL": ["WEB", "TEST"],
                                            "STATUS": ["PAID", "CANCELLED", "PAYMENT_FAILED"]})):
-        made.append(upsert(world["run"], world["s_jobs"], "index", "", index, {"stats": {"time_field": "COB_DATE"}}))
+        made.append(upsert(world["run"], world["s_jobs"], "index", "", index,     # learned on all its documents
+                           {"stats": {"time_field": "COB_DATE", "docs": 100, "sampled_docs": 100}}))
         for name, values in fields.items():
             made.append(upsert(world["run"], world["s_jobs"], "field", index, name,
                                {"data_type": "keyword", "stats": {"values": values, "cardinality": len(values)}}))
@@ -309,6 +310,17 @@ def test_a_rule_whose_value_cannot_be_in_the_data_is_not_applied_there(desks):
     rulecheck._CONCERNS.clear()
     assert rulecheck.value_possible("pricing", "STATUS", "CANCELLED") is False
     assert rulecheck.value_possible("trades", "STATUS", "cancelled") is True
+    from superset.extensions import db
+
+    from supagent.models import KObject
+
+    ix = db.session.query(KObject).filter_by(kind="index", name="pricing").one()
+    whole = dict(ix.stats)
+    ix.stats = {**whole, "sampled_docs": 10}          # (0.10.9) learned on a sample: CANCELLED may be a rare value
+    db.session.commit()
+    assert rulecheck.value_possible("pricing", "STATUS", "CANCELLED") is None
+    ix.stats = whole
+    db.session.commit()
     assert rulecheck.possible_in({"values": ["A", "B"], "cardinality": ">=200"}, "C") is None     # not all known
     q = "How many pricing requests failed?"
     assert rulecheck.unapplied(q, [_step('SELECT COUNT(*) FROM "pricing" WHERE "STATUS" = \'ERROR\'')]) == []

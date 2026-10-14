@@ -410,3 +410,12 @@ def warnings(with_dismissed: bool = False) -> list[dict[str, Any]]:
         gone = dismissed()
         out = [w for w in out if w["key"] not in gone]
     return out
+
+
+def for_review() -> list[dict[str, Any]]:
+    """(0.10.9.1) The warnings To review shows: computed again once the knowledge changed (pagecache: they took
+    seconds on a big deployment, at every load), the ones set aside since left out."""
+    from supagent.knowledge import pagecache
+
+    gone = dismissed()
+    return [w for w in pagecache.cached("lint", lambda: warnings(with_dismissed=True)) if w["key"] not in gone]

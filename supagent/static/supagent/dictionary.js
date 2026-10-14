@@ -137,7 +137,8 @@
       (data.objects || []).forEach(function (o) {
         var desc = el("td", { class: "desc" });
         desc.innerHTML = (o.description ? esc(o.description.length > 220 ? o.description.slice(0, 220) + "…" : o.description) + " " : '<span class="muted">no description</span> ') +
-                         S.sourceBadge(o.description_source, o.verified) + (o.gone ? ' <span class="badge gone">gone</span>' : "");
+                         S.sourceBadge(o.description_source, o.verified) + (o.gone ? ' <span class="badge gone">gone</span>' : "") +
+                         (o.deactivated ? ' <span class="badge gone">deactivated</span>' : "");
         tb.appendChild(el("tr", { class: "link", tabindex: "0", onclick: function () { detail(o.id); },
                                   onkeydown: function (ev) { if (ev.key === "Enter") detail(o.id); } }, [
           nameCell(o), el("td", { text: KIND[o.kind] || o.kind }),
@@ -190,7 +191,8 @@
       b.appendChild(el("h2", { id: "d-title", class: "nm", text: (o.parent ? o.parent + " › " : "") + o.name }));
       var d = el("p", {});
       d.innerHTML = (o.description ? esc(o.description) : '<span class="muted">No description yet.</span>') + " " + S.sourceBadge(o.description_source, o.verified) +
-                    (o.gone ? ' <span class="badge gone">gone since ' + esc(S.when(o.gone_at)) + "</span>" : "");
+                    (o.gone ? ' <span class="badge gone">gone since ' + esc(S.when(o.gone_at)) + "</span>" : "") +
+                    (o.deactivated ? ' <span class="badge gone">deactivated: the agent and the search do not use it</span>' : "");
       b.appendChild(d);
       b.appendChild(kv(o, [["metric_type", "Metric type"], ["data_type", "Type"], ["unit", "Unit"], ["category", "Category"],
                            ["synonyms", "Also called"], ["backend_help", "HELP text of the source"], ["first_seen", "First seen"],
@@ -264,6 +266,13 @@
         S.dict("POST", "objects/" + o.id, { approve: true }).then(done);
       } }));
     }
+    /* (0.10.9.1) deactivated: the agent and the search never see it nor use it (an index or a metric: with its
+       fields or labels) */
+    kids[kids.length - 1].appendChild(el("button", { type: "button", class: "btn small",
+      text: o.deactivated ? "Activate" : "Deactivate",
+      title: o.deactivated ? "The agent and the search use it again" :
+        "The agent and the search never see it nor use it (an index or a metric: with its fields or labels)",
+      onclick: function () { S.dict("POST", "objects/" + o.id, { active: !!o.deactivated }).then(done); } }));
     kids[kids.length - 1].appendChild(res);
     return el("div", { class: "edit section" }, kids);
   }

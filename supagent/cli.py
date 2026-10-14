@@ -555,6 +555,23 @@ def understand(show: bool, do_propose: bool) -> None:
             click.echo(f"{r['part']} {r['kind']} {r['object_kind']} {r['object']}  [{', '.join(r['sources'])}]")
 
 
+@supagent.command(help="(0.10.9.2) One value per thing: the learning's proposals that name the same thing as another "
+                  "value (written differently) put together, or shown with --dry-run")
+@click.option("--dry-run", is_flag=True, help="Show the groups found, change nothing")
+@click.option("--llm-calls", type=int, default=None, help="LLM calls for the doubtful groups (default: "
+              "learn.merge_llm_calls; 0: none)")
+@click.option("--mode", type=click.Choice(["propose", "auto"]), default=None, help="propose: a person's value's "
+              "proposals wait as the same as it; auto: a name written the same way merged at once")
+@with_appcontext
+def consolidate(dry_run: bool, llm_calls: int | None, mode: str | None) -> None:
+    from supagent.knowledge.consolidate import run
+
+    out = run(llm_calls=llm_calls, mode=mode, dry_run=dry_run)
+    for ex in out.pop("examples", []):
+        click.echo(" = ".join(ex))
+    click.echo(json.dumps(out, default=str))
+
+
 @supagent.command(help="What in the knowledge would confuse the agent or the search (one name for two things, a value "
                   "named by a common word, documents reading the same pages, a term defined twice), each with a "
                   "proposed fix (0.10.2)")

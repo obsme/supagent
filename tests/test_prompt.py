@@ -42,9 +42,13 @@ def test_the_instructions_are_the_same_for_every_simple_question_and_user(live):
     a = _agent()
     with acting_as("admin"):
         first, blocks = a._system("cpu usage of elasticsearch"), a._question_blocks("cpu usage of elasticsearch")
+    with acting_as("admin"):
+        again = a._system("how many jobs failed yesterday")
     with acting_as("alice"):
         second = a._system("how many jobs failed yesterday")
-    assert first == second
+    assert first == again                                     # the same for every question of a user
+    known = "\n\nWhat the team's knowledge says"           # (0.10.9.1) the LLM context: the databases each may query
+    assert first.split(known)[0] == second.split(known)[0]   # the same for every user before it
     header = "Where the data is (found for this question"
     assert header not in first and "durations in minutes" not in first
     assert header in blocks and "durations in minutes" in blocks

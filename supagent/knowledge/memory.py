@@ -54,6 +54,9 @@ def _similar(a: str, b: str) -> bool:
     return len(wa & wb) / max(len(wa), len(wb)) >= 0.8
 
 
+SAVED_CHARS = 20000        # (0.10.9.1) of a memory as saved, at most (was 1000: a memory is kept as written)
+
+
 def add(user_id: int, text: str, scope: str = "user", kind: str = "preference", category: str | None = None,
         source: str = "manual", message_id: int | None = None, approved_by: str | None = None,
         group_id: int | None = None) -> Memory | None:
@@ -77,12 +80,13 @@ def add(user_id: int, text: str, scope: str = "user", kind: str = "preference", 
         if kept is not None or source != "manual":
             return None
         m = same[0]                                     # written again by a person: back, not a copy
-        m.status, m.text, m.approved_by = status, text[:1000], approved_by
+        m.status, m.text, m.approved_by = status, text[:SAVED_CHARS], approved_by
         m.kind = kind if kind in ("preference", "rule", "fact") else m.kind
         db.session.commit()
         return m
     m = Memory(scope=scope, user_id=user_id, kind=kind if kind in ("preference", "rule", "fact") else "preference",
-               text=text[:1000], category=(category or None), status=status, source=source, message_id=message_id,
+               text=text[:SAVED_CHARS], category=(category or None), status=status, source=source,
+               message_id=message_id,
                approved_by=approved_by, group_id=group_id if scope == "group" else None)
     db.session.add(m)
     db.session.commit()
@@ -106,6 +110,53 @@ def is_statement(text: str) -> bool:
     if not t or "?" in t or len(t) > 1500 or QUESTION_START.search(t):
         return False
     return bool(DECLARATIVE.search(t))
+
+
+# (0.10.9.1) a message that asks to remember something: what follows the request is kept as written, before the
+# answer (it applies to this answer already), and no LLM rewrites it
+REMEMBER = re.compile(r"^\s*(?:please\s+|pls\s+|stp\s+|svp\s+|merci\s+de\s+)?(?:remember|memori[sz]e|keep\s+in\s+mind|"
+                      r"don'?t\s+forget|do\s+not\s+forget|note\s+(?:that|this|it)|retiens|souviens[- ]toi|"
+                      r"n'oublie\s+pas|m[ée]morise|garde\s+en\s+m[ée]moire|note\s+bien)\b\s*(?:[,:;-]\s*)?"
+                      r"(?:that\s+|que\s+|qu')?(?P<text>\S.*)$", re.I | re.S)
+# "... and show me X", "..., then give the total": a request in the same message (not only something to remember)
+ALSO_ASKED = re.compile(r"(?:\band\b|\bthen\b|\bpuis\b|\bet\b|,)\s+(?:please\s+|stp\s+)?(?:show|give|list|tell|"
+                        r"compute|calculate|count|find|draw|plot|make|create|send|export|check|run|what|which|how|"
+                        r"montre|donne|liste|calcule|trouve|affiche|dis|cr[ée]e|envoie|v[ée]rifie|quel|combien)\b",
+                        re.I)
+RULE_WORDS = re.compile(r"\b(always|never|must|do not|don't|only|toujours|jamais|doit|doivent|uniquement|seulement)\b",
+                        re.I)
+
+
+def remember_request(message: str) -> str | None:
+    """(0.10.9.1) The words to remember when the message asks to remember them ("Remember that X", "Retiens que X",
+    "Keep in mind: X"), as written; None for any other message (a question about the past: "remember what we did?")."""
+    m = REMEMBER.match(message or "")
+    if m is None:
+        return None
+    text = m.group("text").strip()
+    if not text or "?" in text or QUESTION_START.match(text) and not DECLARATIVE.search(text):
+        return None
+    if ALSO_ASKED.search(text) or any(QUESTION_START.match(x) for x in re.split(r"(?<=[.;!])\s+|\n+", text)[1:]):
+        return None                                    # it asks something too: the answer's own words (the LLM
+    return text                                        # keeps the durable point after it, as before)
+
+
+def remember_now(user_id: int | None, message: str) -> Memory | None:
+    """(0.10.9.1) A message asking to remember something: kept now, as written, as the user's own memory (active at
+    once: this answer is given it already). None when it asks nothing of the kind, or it is remembered already."""
+    text = remember_request(message)
+    if user_id is None or text is None or not settings.get("memory.enabled"):
+        return None
+    kind = "rule" if RULE_WORDS.search(text) else "fact" if DECLARATIVE.search(text) else "preference"
+    m = add(user_id, text, scope="user", kind=kind, source="manual")
+    if m is not None:
+        try:
+            from supagent.knowledge.index import sync
+
+            sync(("memory:",))                         # found by the search too (its words; embedded later)
+        except Exception:  # pylint: disable=broad-except   (the prompt has it anyway)
+            db.session.rollback()
+    return m
 
 
 def worth_learning(question: str) -> bool:
@@ -181,8 +232,9 @@ def asked_back(question: Message) -> tuple[Message, Message] | None:
     return (first, back) if first is not None else None
 
 
-def memories_for(user_id: int | None, limit: int = 15, groups: list[int] | None = None) -> list[Memory]:
-    """The user's personal memories, the team's active ones and those of the user's groups (for the prompt)."""
+def memories_for(user_id: int | None, limit: int | None = None, groups: list[int] | None = None) -> list[Memory]:
+    """The user's personal memories, the team's active ones and those of the user's groups (for the prompt): all of
+    them ((0.10.9.1) a memory is never left out; `limit` per scope only when a caller asks for fewer)."""
     if groups is None:
         from supagent.security import user_groups
 
@@ -209,39 +261,39 @@ def triggered(text: str, asked: str) -> bool:
 
 
 KIND_ORDER = {"rule": 0, "preference": 1, "fact": 2}
-ENTRY_CHARS = 400
+ENTRY_CHARS = 400          # (until 0.10.9) of each memory in the prompt; since 0.10.9.1 a memory is given whole
 
 
 def prompt_block(user_id: int | None, shown: set[str] | None = None, asked: str | None = None) -> str:
-    """The memories given with every question, within memory.prompt_chars: rules, then
-    preferences, then facts (the user's own first, the newest first). Facts left out are still
-    found by the knowledge search when a question is about them (`shown` gets the refs of the
-    ones given, not given twice). (0.10.7) With `asked` (the question and the chat), a memory that applies only
-    when the user says X ("When the user says 'X', filter by F='X'") is not given when they do not say X: told
-    "applies only then", a model still filtered a question that never named X."""
+    """The memories given with every question, first of what is found for it: rules, then preferences, then facts
+    (the user's own first, the newest first). (0.10.9.1) Each one whole and as written (its lines kept), and every one
+    of them: none is left out to make room for the rest, the knowledge found gives way (memory.prompt_chars is their
+    room before it does). `shown` gets the refs of the ones given, not given twice. (0.10.7) With `asked` (the
+    question and the chat), a memory that applies only when the user says X ("When the user says 'X', filter by
+    F='X'") is not given when they do not say X: told "applies only then", a model still filtered a question that
+    never named X."""
     items = memories_for(user_id)
     if not items:
         return ""
     from supagent.knowledge.resolve import gone_names, mentions_gone
 
-    budget = int(settings.get("memory.prompt_chars") or 0) or 10 ** 9
     gone = gone_names()
-    lines = ["\n\nWhat this user and the team asked to remember (follow it unless the question says otherwise; one "
-             "that says when it applies (\"when the user says X\", \"for the desk Y\") applies only then: it is no "
-             "filter for a question that does not say X):"]
-    used = 0
+    lines = ["\n\nWhat this user and the team asked to remember (follow it unless the question says otherwise: a "
+             "unit or a format the question asks for (\"in seconds\", \"as a table\") is the one to answer in, "
+             "whatever a memory prefers; one that says when it applies (\"when the user says X\", \"for the desk "
+             "Y\") applies only then: it is no filter for a question that does not say X):"]
     for m in sorted(items, key=lambda m: KIND_ORDER.get(m.kind, 3)):     # stable: mine, then the team's
-        if mentions_gone(m.text, gone):                # about a metric or index that no longer exists
-            continue
         if asked is not None and not triggered(m.text, asked):
-            continue                                   # (0.10.7) "when the user says X" and X not said
+            continue                                   # (0.10.7) "when the user says X" and X not said: it applies
+        #                                                only then (given always, a model filtered by X anyway)
         who = "team" if m.scope == "team" else "this user's team" if m.scope == "group" else "this user"
-        text = " ".join((m.text or "").split())
-        line = f"- ({who}, {m.kind}) {text[:ENTRY_CHARS]}{'...' if len(text) > ENTRY_CHARS else ''}"
-        if used + len(line) > budget:
-            continue
+        text = "\n  ".join(ln.rstrip() for ln in (m.text or "").strip().splitlines() if ln.strip())   # as written
+        line = f"- ({who}, {m.kind}) {text}"
+        if mentions_gone(m.text, gone):                # (0.10.9.1) about a metric or an index that no longer exists:
+            said = sorted({w for w in re.findall(r"[A-Za-z0-9_:.@\-]+", m.text or "") if w in gone})   # given all
+            line += f" (it names data that no longer exists: {', '.join(said[:5])})"   # the same, said so: a memory
+        #                                                                                is never left out
         lines.append(line)
-        used += len(line)
         if shown is not None:
             shown.add(f"memory:{m.id}")
     return "\n".join(lines) if len(lines) > 1 else ""

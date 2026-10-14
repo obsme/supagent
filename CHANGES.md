@@ -1,5 +1,136 @@
 # Changes
 
+## 0.10.9 — 2026-10-14
+
+The team's requests of 12 and 13 October: the AI given as much as the model can read (a 32k-64k model and a 128k-256k
+one each get their own sizes), an LLM context the learning writes for the model in a full and a light version, the
+memories given whole and first, edited in place, fields and metrics deactivated; the System map's values ordered by
+hand; a document's page removed for good; the learning made mature on the kinds of sources the team keeps (Ansible
+repositories with their inventories' groups and child groups, Confluence pages and their tables, Python services with
+their configuration, scripts, Bitbucket): its proposals are names, one value per thing, filed in the team's own
+categories. No table change (v18); three new settings.
+
+Measured before the release under a rule written before any result (the held-out sets never read: totals only), on the
+frozen build 4073711 with Qwen3.6-35B-A3B (llama.cpp, its server restarted first; the lab's model reads 64k tokens per
+request: the short profile), each open set twice (two rounds): the main open set (162 steps) 161 and 160 of 162 right
+(the rule: 158 in each round), 1 and 2 wrong without a mark; the observability open set (29 steps) 27 and 28 of 29
+right (the rule: 26 in each round), 0 and 1 wrong without a mark; the held-out sets of 0.10.9 (101 steps on a main lab
+and an observability lab) 94 of 101 right (the rule: 91). The unit tests: 1,843 passed. The upgrade from 0.10.8.1 on a
+copy of a lab: tables unchanged (v18), every setting kept, the System map's 289 values and 2,224 links kept, health
+200, the knowledge search answering. The learning: on ten development corpora (six messy multi-subject ones, four from
+real repositories and wikis), no figure lower than 0.10.8.1's (values in the right category, right links, relations
+found). The learning on a corpus written after the build was frozen (a university library's real Ansible repository:
+inventories with their groups and child groups per environment, the applications' variables, playbooks and load
+balancer configurations; and a wiki in English and French), one reading, no LLM: 173 of the 199 values proposed in the
+right category (86.9 %), 263 of 269 proposed links right. Not measured: the long profile (a 128k-256k model; the lab's
+models read 64k tokens) and gpt-oss-120b.
+
+How it was released: the first frozen build (fc2af03) failed the release gate's first round on the main suite (7 of
+the first 112 steps wrong: a net revenue's formula, a business date's field, a unit asked): the memories, now given
+whole and first, took what they needed beyond their room out of the knowledge found for the question. The released
+build gives them their room on top of it (and re-reads a stored LLM profile that has no context window, 0.10.8's);
+it was then measured from the start.
+
+What the AI is given
+* **Two context profiles** (agent.context_profile: auto, short, long). Short is a model of 32k-64k tokens per request:
+  the sizes of 0.10.8, unchanged. Long is a model of 100k tokens or more (128k, 256k): the knowledge given with a
+  question, each Context section, each tool result, the chat's history and the memories grow with the window (128k:
+  four times the short sizes; 256k: six times; never less than short), and the older tool results of an answer are cut
+  from 60 % of the window (24k tokens before, whatever the model). Auto reads the window from the LLM's server (vLLM's
+  max_model_len, llama.cpp's context per slot) and keeps it in the LLM's profile; agent.context_tokens says it when a
+  gateway does not. A size you set yourself (agent.compact_at, search.prompt_chars, memory.prompt_chars) wins over the
+  profile's. Settings -> Chat settings and `superset supagent test-llm --profile` show the profile in use and why.
+* **The LLM context**: after each learning, two pages of the Context (technical), "LLM context (full)" and "LLM context
+  (light)", written from the catalog (the team's rules, glossary, formulas, notes), the data dictionary's main indices
+  and metrics with their meaning (the full one with their fields and values), the links between the databases and the
+  questions the team marked Helpful; no LLM. A model of the long profile is given the full version with every
+  question (agent.llm_context, on); a model of the short profile is given the light one only when you set
+  agent.llm_context on yourself: on the lab's 64k model the light version made the agent answer some follow-ups from it
+  without a query. Each user is given only what their databases hold; the rules are given apart, once. Both pages
+  are yours to edit (the learning then keeps your version) or to refuse. The instructions say it holds no answer: a
+  figure, a list, or what a given record is or has always comes from a query.
+* **Memories**: every memory is given whole (its lines kept), before the other knowledge, and never left out (they were
+  cut to 400 characters and could give way to the search); "remember that X" is kept as written, at once, before the
+  answer (the AI no longer rewords it after); a memory of a field that no longer exists is said so, not dropped. They
+  come on top of the knowledge found for the question: the team's formulas and what a field means never give way to
+  them (a first build took their room from the knowledge and lost answers that need a formula: found by the gate,
+  fixed before the release). memory.prompt_chars is no longer used.
+
+Memories and the Data dictionary
+* **Edit a memory** in place (Memories: Edit; its text, kind and scope), as its author or an admin.
+* **Deactivate a field, a label, a metric or an index** (Data dictionary: Deactivate): the agent and the search no
+  longer see or use it; a query that names it is refused before it runs; deactivating an index or a metric
+  deactivates its fields or labels with it, and Activate brings them back; the learning keeps it deactivated. Shown
+  "deactivated" in the dictionary; the LLM context is written again.
+
+The System map and the documents
+* **Values in order**: in Edit, a value moves up and down its column only and keeps the place you drop it at, for
+  everyone; "+" on a category's name makes a subcategory and values are dropped into it. Values placed anywhere before
+  are back in their lists.
+* **To review and the System map open faster** on a big deployment (measured: To review 3.1 s -> 1.2-2.2 s, the map
+  2.1-2.5 s -> 1.0 s on 1 288 values and 4 297 links).
+* **A page removed from a document** (Documents and sites: Pages: Remove) is never read again, and what came from it
+  (its text, its search pieces, its facts) is deleted at once.
+* **An upgrade reads the documents again once** with the new reading rules (the reader's version is the package's).
+
+The learning
+* **A value is a name**: no bare number or code, no version, no quantity, no date, no address outside an address's
+  category, no placeholder, no ticket, no path, no word for a kind of thing alone (a team or an area may be named with
+  common words in its own category: "Platform team", "data"); no part proposed from one sentence of one page.
+* **One value per thing**: names of one thing written differently (case, separators, a plural, short forms, an
+  environment's or a version's word) are put together (`superset supagent consolidate`, --dry-run to see it);
+  servers' and groups' names are compared as written; a doubt goes to the LLM or to To review.
+* **Filed in your categories**: what a part is comes from the noun next to its name in the pages, what the reading
+  knows of it (an inventory's group, a host, a VIP) and its name's shape; it goes to the category of yours that says
+  it (your groups, VIPs, namespaces, topics, jobs, buckets, providers, software, brokers, areas, teams), then to your
+  one category of services, never to a team it is for.
+* **Ansible as written**: inventories' groups and child groups (ini and YAML, per environment); a role installed from
+  Galaxy is read from its own folder (roles/namespace.name: its tasks decide whether it runs a service); roles that set
+  the hosts up, the system's daemons (autofs, atop, sysstat, yum-cron...), a role applied as another part's user, its
+  systemd units, modules or plugins, and jobs (x-importer, x-lint, x-cleanup) make no part; a host agent (telegraf,
+  node exporter) is kept; scripts and templates are read; firewall lists and a collection's steps are no parts.
+* **Pages and tables**: a services table says where each service runs, its owning team ("Owner", "Team", "Run by",
+  "Operated by") and its area or domain ("Area", "Domain"); a table of hosts gives each host's power supplies, switch
+  ports and owner; systems and their parts ("X is a module of Y", "Y is made of A, B and C"); teams from ownership
+  sentences in English and French; initials ("Identity Hub (IH)"); a server's short name in the pages is that server.
+* **Repositories**: a Compose file whose services all carry one product's name (tick-web, tick-postgresql,
+  tick-nginx) is that product; a repository's one service built from its own root is the repository's application,
+  by its name; a database name computed by the code is no name.
+* **The full picture**: the map's communities, a Context page per community, map-wide questions answered by
+  environment and category.
+
+The agent
+* An open question asked back names the System map's parts; a long list of choices keeps its question last; a bound
+  on a table's time field in epoch milliseconds is the question's period; a crash said with a guessed cause reads the
+  pods' events first; a chart change asked is saved even when the model asks for a preview; a table's "Depends on"
+  column is a dependency; a field's values learned from a sample are said to be a sample.
+
+Settings (new): agent.context_profile (auto), agent.context_tokens (0: as the server says), agent.llm_context (on:
+the full version to a long-profile model; the light one to a short-profile model only when you set it).
+
+Known gaps (0.10.9)
+* **The full LLM context on a 128k-256k model is not measured**: the lab's models read 64k tokens per request. If the
+  agent answers questions about the data without running queries, set agent.llm_context=false.
+* **External services**: a provider, a SaaS or a public site a configuration or a page names by its address
+  (api_url: https://..., "calls carrier-x-api (api.carrier-x.example)") is filed as an application of yours when no
+  page calls it external, partner, provider or vendor; its host may also give a second value (carrier-x beside
+  carrier-x-api). With a category of yours for external services, move them there once (To review); without one,
+  reject them or make one.
+* **A product's processes sharing one image** in a Compose file without one name (a self-hosted vendor stack: web,
+  worker, cron, many consumers) are each proposed, each with the links its shared settings give: approve the product
+  and its main parts, reject the rest.
+* **A sample inventory** (inventory/sample/) is read as a sample: no groups proposed from it, by design.
+* Dokku-style application lists in a group's variables are proposed as applications on that group.
+* **Software named by a role** (passenger, sidekiq_worker, samba, clamav), a key-value store or a coordination service
+  (redis, zookeeper, solr9cloud) can be proposed as an application, or as host software beside your category for
+  datastores or platform services: move it once in To review (measured on a fresh corpus: 13 of 199 values in
+  another category than the person's).
+* **A load balancer's upstream names** (nginx "upstream shop-prod", "media-downloads") are proposed as applications
+  of their own: reject them; the application they serve is already on the map by its own name.
+* **A memory of a preference for one kind of figure** ("give durations in minutes") can be applied to other figures,
+  now that memories are given whole and first: an answer about a memory size may add a note "in minutes" beside
+  the right size. Write such a memory with the figures it is for ("durations of jobs in minutes").
+
 ## 0.10.8.1 — 2026-10-12
 
 The position labels in D labels only, with osagg 0.2.15. osagg 0.2.15 labels a position date D (today's), D-1, D-2...

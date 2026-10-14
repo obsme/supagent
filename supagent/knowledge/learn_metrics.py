@@ -555,7 +555,10 @@ def learn_metrics(run: Run, source: Source, database: Any, deadline: float, prog
                     for k in ("metric_type", "unit", "backend_help"):
                         if facts.get(k) and not getattr(obj, k):
                             setattr(obj, k, facts[k])
-                    obj.last_seen, obj.gone_at = dt.datetime.utcnow(), None
+                    from supagent.knowledge.deactivate import alive
+
+                    obj.last_seen = dt.datetime.utcnow()
+                    alive(obj)                     # (0.10.9.1) a deactivated metric stays deactivated
                     out["not_due"] += 1
                 if time.time() >= deadline and name in due_set:
                     out["complete"] = False            # due, left for the next run

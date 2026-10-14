@@ -568,6 +568,19 @@ def _categories(run_id: int, steps: Steps, seconds: float, limit: int) -> dict[s
         log.warning("supagent learn: run %s: the categories: %s", run_id, str(ex)[:300])
         out["classified"] = {"error": str(ex)[:300]}
         steps.interrupted(str(ex)[:300])
+    if str(settings.get("learn.merge_duplicates") or "propose") != "off":   # (0.10.9.2) one value per thing
+        steps.begin("categories: one value per thing (the same names written differently)")
+        try:
+            from supagent.knowledge.consolidate import run as merge_names
+
+            with llm_task("merge", run_id=run_id):
+                out["merged"] = merge_names()
+        except LearningStopped:
+            raise
+        except Exception as ex:  # pylint: disable=broad-except
+            db.session.rollback()
+            out["merged"] = {"error": str(ex)[:300]}
+        steps.end(**_flat({k: v for k, v in out["merged"].items() if k != "examples"}))
     if settings.get("learn.subject_links"):              # (0.10.6.2) the subjects linked to the parts their texts
         steps.begin("categories: the subjects' parts (the texts about both)")   # are about (naming.subject_links)
         try:

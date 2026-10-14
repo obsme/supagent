@@ -1,14 +1,14 @@
-supagent 0.10.8.1 - the AI agent inside Apache Superset
-=======================================================
+supagent 0.10.9 - the AI agent inside Apache Superset
+=====================================================
 
 What is in this folder
-  supagent-0.10.8.1-py3-none-any.whl  the package for Superset 6.1 (pure Python; nothing else to install)
+  supagent-0.10.9-py3-none-any.whl    the package for Superset 6.1 (pure Python; nothing else to install)
   supagent-guide.html / .pdf          the guide (install, LLM middleware, learning, screens)
   catalog.example.yaml                an example catalog, to adapt
   SHA256SUMS                          checksums
 
-Upgrading? From 0.10.8: pip install this wheel and osagg 0.2.15 on every host, restart; nothing to run: "From
-0.10.8 to 0.10.8.1" below. From 0.10.7: the same, and "From 0.10.7 to 0.10.8" below. From 0.10.6.2, 0.10.6.1 or 0.10.6: the same, and "From 0.10.6.2 to 0.10.7" below (and "From 0.10.6.1 to
+Upgrading? From 0.10.8.1: pip install this wheel on every host (osagg 0.2.15 or 0.2.16), restart; nothing to run:
+"From 0.10.8.1 to 0.10.9" below. From 0.10.8: the same with osagg 0.2.15, and "From 0.10.8 to 0.10.8.1" below. From 0.10.7: the same, and "From 0.10.7 to 0.10.8" below. From 0.10.6.2, 0.10.6.1 or 0.10.6: the same, and "From 0.10.6.2 to 0.10.7" below (and "From 0.10.6.1 to
 0.10.6.2", "From 0.10.6 to 0.10.6.1" for what they brought, in this wheel too). From 0.10.0: pip install this wheel on every host,
 superset supagent init once (no table changes: v18), restart: "From 0.10.0 to 0.10.6" below (0.10.4 and 0.10.5 were not released: "What 0.10.5 brings" and "What 0.10.4 brings" too). From 0.9.6.9,
 0.9.6.8, ... 0.9.6.1 or 0.9.6: pip install this wheel on every host, superset supagent init once (tables v17 to v18:
@@ -134,6 +134,43 @@ role): three packages must be pinned, or Superset itself does not start (none is
    supagent_store). Then:
      superset supagent init          builds it (the first time it finds the extensions)
      superset supagent store status  extensions, versions, size, warnings
+
+From 0.10.8.1 to 0.10.9
+=======================
+
+On every host  $PY -m pip install supagent-0.10.9-py3-none-any.whl (osagg 0.2.15 or 0.2.16 stays), then restart the web
+servers, the Celery workers and beat. Nothing to run: no table changes (v18), superset_config.py does not change.
+Settings -> Chat settings shows "supagent 0.10.9 (tables v18)" and the context profile in use. Back: the 0.10.8.1 wheel
+(nothing to undo; the two LLM context pages stay in the Context, unused).
+  - The first learning after the upgrade reads every document again once with the new reading rules (a few minutes
+    on a big deployment): expect new proposals in To review (teams, areas, the parts of systems, what tables of hosts
+    and services say) and fewer of the old kind (numbers, phrases, one thing written several ways). A value you
+    approved, edited or refused is never changed.
+  - After the restart, profile the LLM once so that supagent learns how much your model reads per request:
+      superset supagent test-llm --profile
+    It says "context profile: long (the model reads 131,072 tokens per request ...)" for a 128k model (Settings ->
+    Chat settings shows the same). A profile kept from 0.10.8 has no window: until it is made again (by this command,
+    or by the next nightly learning) supagent uses the short profile, 0.10.8's sizes. A gateway that does not say
+    the model's window: superset supagent settings --set agent.context_tokens=131072.
+  - If you set agent.compact_at, search.prompt_chars or memory.prompt_chars to give a big model more room (the advice
+    of 13 October: 78000, 8000, 8000), unset them now, or they keep winning over the profile's sizes:
+      superset supagent settings --unset agent.compact_at --unset search.prompt_chars --unset memory.prompt_chars
+  - The LLM context (Context -> technical: "LLM context (full)" and "(light)") is written by the next learning (or at
+    the first question). A long-profile model (128k-256k) is given the full one with every question: this was not
+    measured on such a model (the lab's reads 64k; there the light version made the agent answer some follow-ups from
+    it without a query). On a 128k-256k model, after the upgrade, ask a few of your usual questions about figures;
+    if one is answered without a query (no SQL in its steps), turn it off:
+      superset supagent settings --set agent.llm_context=false
+    A 32k-64k model is given the light one only when you set agent.llm_context=true.
+  - Memories are given whole and first, on top of the knowledge found for the question (a long memory makes the request
+    longer, never the knowledge shorter; memory.prompt_chars is no longer used). Edit a memory in Memories (Edit).
+  - Data dictionary -> Deactivate on a field, a label, a metric or an index: the agent and the search no longer see it.
+  - System map (Edit): values move up and down their column; "+" on a category makes a subcategory.
+  - Measured: the open sets 161/162 and 160/162 (main) and 27/29 and 28/29 (observability) right in each of two
+    rounds, 1 and 2 (main) and 0 and 1 (observability) wrong without a mark; the held-out sets 94/101 right (totals
+    only); the upgrade from 0.10.8.1 checked on a copy of a lab's data (tables, settings, the System map, health, the
+    search); all with Qwen3.6-35B-A3B (llama.cpp) on the short profile; the long profile and gpt-oss-120b not
+    measured.
 
 From 0.10.8 to 0.10.8.1
 =======================

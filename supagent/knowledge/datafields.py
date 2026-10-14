@@ -42,8 +42,9 @@ def _names(f: Any) -> list[str]:
     return [f.value] + [str(x) for x in (f.synonyms or [])]
 
 
-def proposals() -> list[dict[str, Any]]:
-    """The labels and fields to read a category from, with what they hold (the user's databases only)."""
+def proposals(with_dismissed: bool = False) -> list[dict[str, Any]]:
+    """The labels and fields to read a category from, with what they hold (the user's databases only); the ones set
+    aside left out unless `with_dismissed` (then still_open() leaves them out)."""
     from supagent.knowledge.curated import sources_of_user
     from supagent.knowledge.facets import MAX_DATA_VALUES, field_matches, field_rules
     from supagent.knowledge.valueindex import _held, _index, _value_like, compact
@@ -53,7 +54,7 @@ def proposals() -> list[dict[str, Any]]:
     allowed = {s.id for s in sources_of_user()}
     sources = {s.id: s.database_name or f"database {s.database_id}" for s in db.session.query(Source)}
     rules = field_rules()
-    gone = dismissed()
+    gone = set() if with_dismissed else dismissed()
     by_cat: dict[str, list[Any]] = defaultdict(list)
     for f in db.session.query(Facet).filter(Facet.status == "approved"):
         by_cat[f.facet].append(f)
@@ -110,6 +111,26 @@ def proposals() -> list[dict[str, Any]]:
                                + (f", and the next learning proposes its {len(others)} other value"
                                   f"{'s' if len(others) > 1 else ''} as values of {cat}, to approve here" if others else "")})
     return sorted(out, key=lambda p: (-p["held"], p["category"], p["name"]))
+
+
+def still_open(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """(0.10.9.1) Proposals of before (pagecache) without the ones decided since: set aside, or read from (the
+    category's pattern takes the name now; the patterns ignore case, as the proposals' names do)."""
+    from supagent.knowledge.facets import field_matches, field_rules
+
+    gone, rules = dismissed(), field_rules()
+    return [p for p in items if f"{p['category']}:{p['name'].lower()}" not in gone
+            and not any(c == p["category"] and field_matches(rx, p["name"]) for c, rx in rules)]
+
+
+def for_review() -> list[dict[str, Any]]:
+    """(0.10.9.1) The proposals To review shows: kept per set of databases the user may read until the knowledge
+    changes (pagecache: they took seconds on a big deployment, at every load), the ones decided since left out."""
+    from supagent.knowledge import pagecache
+    from supagent.knowledge.curated import sources_of_user
+
+    mine = sorted(s.id for s in sources_of_user())
+    return still_open(pagecache.cached(f"fields:{mine}", lambda: proposals(with_dismissed=True)))
 
 
 def decide(category: str, name: str, read: bool, by: str) -> dict[str, Any]:

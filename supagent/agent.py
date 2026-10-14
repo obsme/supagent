@@ -21,6 +21,7 @@ import time
 from typing import Any, Callable
 
 from supagent import settings
+from supagent.budget import size as room
 from supagent.dates import MONTH
 from supagent.llm import LLM, EmptyAnswer, LLMError, add_usage
 
@@ -751,10 +752,12 @@ class ChartGuard:
         req = args.get("request", args)
         if name not in CHART_TOOLS or not isinstance(req, dict):
             return name, args, None
-        if name == "update_chart" and "generate_preview" not in req and \
-                not PREVIEW_ASK.search(getattr(self.agent, "question", "") or ""):
+        asked = getattr(self.agent, "question", "") or ""
+        if name == "update_chart" and not PREVIEW_ASK.search(asked) and (
+                "generate_preview" not in req or (req.get("generate_preview") and CHANGE_ASK.search(asked))):
             req["generate_preview"] = False            # "make it a pie chart": the saved chart changes (Superset's
-            #                                            default is an unsaved preview the answer then calls "updated")
+            #                                            default is an unsaved preview the answer then calls "updated";
+            #                                            (0.10.9) a preview the model asks for a change asked, too)
         if name == "update_chart" and req.get("dataset_id") is not None:
             return name, args, json.dumps({"success": False, "error": "update_chart cannot change the dataset of a chart "
                                            "(it would keep the old one and its dates). Make a new chart on the new "
@@ -1012,7 +1015,8 @@ CHART_CLAIM = re.compile(r"\b(chart|graph)\b[^.\n]{0,40}\b(has been|was|is)\s+(c
                          r"\bgraphique\b[^.\n]{0,40}\b(a [ée]t[ée]|est)\s+(cr[ée][ée]|enregistr[ée])", re.I)
 # "The chart has been updated to a pie chart", "I changed the chart to a table", "le graphique a été modifié"
 CHART_CHANGE_CLAIM = re.compile(r"\b(chart|graph)\b[^.\n]{0,60}\b(has been|was|is now|now)\s+(updated|changed|converted|"
-                                r"switched|turned|modified|made|renamed|retitled)\b|\bI(?:'ve| have)?\s+(updated|changed|"
+                                r"switched|turned|modified|made|renamed|retitled)\b|\bI(?:'ve| have)?\s+(?:(?:\w+ly|now|just|"
+                                r"also|already)\s+)?(updated|changed|"     # (0.10.9) "I've successfully updated the chart"
                                 r"converted|switched|turned|modified|made|renamed|retitled)\s+(the|your|it|this)\b[^.\n]{0,40}"
                                 r"\b(chart|graph|into|to)\b|"
                                 r"\bgraphique\b[^.\n]{0,60}\b(a [ée]t[ée]|est)\s+(modifi[ée]|transform[ée]|chang[ée]|renomm[ée])|"
@@ -1020,7 +1024,15 @@ CHART_CHANGE_CLAIM = re.compile(r"\b(chart|graph)\b[^.\n]{0,60}\b(has been|was|i
                                 r"\bgraphique\b[^.\n]{0,40}\best (?:maintenant|d[ée]sormais) une?\b",
                                 re.I)
 PREVIEW_ASK = re.compile(r"\b(preview|aper[çc]u|without saving|sans (?:l')?enregistrer|do not save|don't save|not save it|"
-                         r"just show|show me how it would look|ne l'enregistre pas)\b", re.I)
+                         r"just show|show me how it would look|how would it look|what would it look like|"
+                         r"ne l'enregistre pas)\b", re.I)
+# (0.10.9) a change of the chart asked ("Make it a pie chart instead.", "change the colours", "trie-le par montant"):
+# the saved chart changes, even when the model asks update_chart for a preview (Superset then saves nothing and the
+# answer told the user to press Save)
+CHANGE_ASK = re.compile(r"\b(make|change|switch|turn|convert|set|update|rename|retitle|add|remove|delete|use|sort|filter|"
+                        r"modify|edit|replace|transform|show it as|display it as|mets|mettez|changez?|modifiez?|"
+                        r"transformez?|passez?|renommez?|ajoutez?|enl[eè]vez?|supprimez?|triez?|filtrez?|remplacez?|"
+                        r"affichez?-le)\b", re.I)
 
 
 DASHBOARD_CLAIM = re.compile(r"\b(dashboard)\b[^.\n]{0,60}\b(has been|was|is)\s+(created|saved|updated|changed)|"
@@ -1328,6 +1340,78 @@ def premise_denied_coarse(question: str, answer: str, trace: list[dict]) -> tupl
     return at.group(1).replace("h", ":"), coarse[0]
 
 
+# (0.10.10) a crash said, its reason never read: "the pod entered a crash loop due to timeouts" with no query on the
+# Kubernetes events, where each pod's kill and its reason are (OOMKilled, Evicted, a failed probe): a cause guessed
+CRASH_SAID = re.compile(r"\b(?:crash[\s-]?loop\w*|CrashLoopBackOff|restart(?:ed|s)\b|kept restarting|crashed|"
+                        r"(?:was|were|got|been) (?:killed|evicted|terminated))", re.I)
+CRASH_REASON = re.compile(r"\bOOM\w*|out of memory|memory limit|\bevicted\b|exit code \d+|liveness probe|"
+                          r"readiness probe", re.I)
+CRASH_NUDGE = ("(Check before answering: your answer says \"{said}\", but no query read {tables}, where each pod's "
+               "events are with their reason (OOMKilled, Evicted, a failed probe, an exit code){fields}. Read them for "
+               "those pods in ONE query around that time (with a condition on its time field) and give the reason "
+               "they show; never name a cause no result showed. Then write the whole answer for the user as if for "
+               "the first time: they see neither the one above nor this check.)")
+CRASH_CALLS = 2                    # the calls given to that reading: a crash said late, when the others are used
+
+
+def _tables_read(trace: list[dict]) -> set[str]:
+    """The tables (indices, index patterns) the trace's calls read: named in their queries or as their table."""
+    from supagent.knowledge.rulecheck import _queries
+
+    out: set[str] = set()
+    for q in _queries(trace):
+        out.update(x.strip('"`') for x in re.findall(r'(?i)\b(?:FROM|JOIN)\s+("[^"]+"|`[^`]+`|[\w.*-]+)', q or ""))
+    for t in trace:
+        args = t.get("args") or {}
+        for k in ("table", "index", "tables"):
+            v = args.get(k)
+            out.update([v] if isinstance(v, str) else [x for x in v or [] if isinstance(x, str)])
+    return {x.lower() for x in out if x}
+
+
+def _event_tables() -> list[str]:
+    """The data's tables of Kubernetes events (their kind, read from their fields: indexkinds)."""
+    return sorted(_event_kinds())
+
+
+def _event_kinds() -> dict[str, dict[str, Any]]:
+    """{table: its kind (the fields of the object, the reason, the message, the time)} of the events tables."""
+    from superset.extensions import db
+
+    from supagent.models import KObject
+
+    return {o.name: dict((o.stats or {}).get("kind") or {}) for o in db.session.query(KObject).filter(
+        KObject.kind == "index", KObject.gone_at.is_(None)) if ((o.stats or {}).get("kind") or {}).get("kind") == "events"}
+
+
+def _event_fields(table: str) -> str:
+    """", its fields: the object x, the reason y, the time z" for the nudge (what is known of them)."""
+    try:
+        k = _event_kinds().get(table) or {}
+    except Exception:  # pylint: disable=broad-except
+        k = {}
+    said = [f"the {w} \"{k[f]}\"" for w, f in (("object", "object"), ("reason", "reason"), ("message", "message"),
+                                                 ("time", "time")) if k.get(f)]
+    return f"; its fields: {', '.join(said)}" if said else ""
+
+
+def crash_unread(answer: str, trace: list[dict]) -> tuple[str, str] | None:
+    """(what the answer says crashed, the events tables) when it says pods crashed or restarted, gives no reason the
+    events show, and no call read the events; else None."""
+    import fnmatch
+
+    m = CRASH_SAID.search(answer or "")
+    if not m or CRASH_REASON.search(answer or ""):
+        return None
+    events = _event_tables()
+    if not events:
+        return None
+    read = _tables_read(trace)
+    if any(fnmatch.fnmatch(e.lower(), r) or fnmatch.fnmatch(r, e.lower()) for e in events for r in read):
+        return None
+    return m.group(0), ", ".join(events[:3])
+
+
 # (0.10.8) a value pointed at instead of written: "(value from earlier result)", "(see the result above)", "[value]"
 PLACEHOLDER = re.compile(r"\((?:the\s+)?(?:values?|figures?|numbers?|amounts?|counts?|data|rows?)\s+(?:from|in|of|as\s+in)\s+"
                          r"(?:the\s+|an?\s+)?(?:earlier|previous|above|first|prior|last)\s+(?:results?|query|queries|"
@@ -1390,6 +1474,24 @@ GRAIN_NUDGE = ("(Check before answering: your answer gives {time} as the moment,
                "ordered by the value, without DATE_TRUNC), or give the {grain} as a range (\"between 04:00 and 05:00\"). "
                "Write the whole answer for the user as if for the first time: they see neither the one above nor this "
                "check.)")
+OPEN_PARTS_NUDGE = ("(Check before answering: the question names no part of the system, and your question back "
+                    "suggests none of the parts the note gave. Ask again which part is meant, naming some of these as "
+                    "choices: {parts} (and \"all of them\" if a total is wanted); its last line is that question, "
+                    "ending with a question mark. Write it for the user as if for the first time.)")
+
+
+def open_parts_unnamed(unclear: dict | None, answer: str) -> str:
+    """(0.10.9) The parts an open question's note suggested, when the question back names none of them (kinds of data
+    suggested instead: "pricing errors, job failures, HTTP errors"): "" otherwise."""
+    if not unclear or unclear.get("kind") != "open":
+        return ""
+    names = [v for vs in (unclear.get("parts") or {}).values() for v in vs[:8]]
+    low = (answer or "").lower()
+    if not names or any(re.search(rf"(?<![\w-]){re.escape(n.lower())}(?![\w-])", low) for n in names):
+        return ""
+    return ", ".join(names[:12])
+
+
 ASK_FIRST_NUDGE = ("(Check before answering: the question is not clear enough to answer (see the note given with it). "
                    "Answer only with one short question to the user that names the candidates, and stop: its last line "
                    "is that question, ending with a question mark. Write it for the user as if for the first time: they "
@@ -1911,7 +2013,19 @@ BAD_TOOL_CALL = re.compile(r"parse tool call|tool call arguments|invalid tool ca
 # the conversation is longer than the model's context (llama.cpp, vLLM, OpenAI say it their way)
 CONTEXT_FULL = re.compile(r"exceeds? the available context|exceed_context_size|context (?:size|length|window) "
                           r"(?:exceeded|is exceeded)|maximum context length|too many tokens|prompt is too long", re.I)
-SHRUNK = (1500, 500)       # chars kept of the older tool results when the context is full, then again
+SHRUNK = (1500, 500)       # chars kept of the older tool results when the context is full, then again (the short
+#                            profile's: shrunk() gives the model's)
+
+
+def shrunk() -> tuple[int, int]:
+    """(0.10.9.1) SHRUNK for the model's context profile (supagent.budget)."""
+    return room("shrunk_first"), room("shrunk_second")
+
+
+def tool_chars(name: str) -> int:
+    """(0.10.9.1) Characters of a tool's result given to the LLM, for the model's context profile (TOOL_CHARS and
+    MAX_TOOL_CHARS are the short profile's)."""
+    return {"describe_data": room("describe_chars"), "compare_groups": room("compare_chars")}.get(name, room("tool_chars"))
 KEPT_WHOLE = 3             # the latest tool results kept whole the first time
 COMPACT_KEPT = 4           # the latest tool results kept whole when a long conversation is shortened early
 CONTEXT_FULL_NUDGE = ("(The conversation became longer than the model can read: the older results above were "
@@ -2082,6 +2196,13 @@ def asks_back(answer: str) -> bool:
 
 
 OPTION_LINE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+\S")
+LEAD_IN = re.compile(r":[*_\s]*$")             # (0.10.9.2) "The sources are:", "For example, are you looking for:"
+# (0.10.9.2) "Please specify the part and the day.", "Let me know which one.": the request to choose, after the list
+CHOOSE_LINE = re.compile(r"(?i)^[*_\s]*(?:please\b|kindly\b|let me know\b|tell me\b|just\s+(?:say|tell)\b|"
+                         r"(?:could|can|would)\s+you\b|(?:specify|clarify|choose|pick|select|confirm|indicate)\b)")
+
+
+QUESTION_LAST_CHARS = 2500       # (0.10.9) a question back with a long list of choices (its parts described) too
 
 
 def question_last(answer: str) -> str:
@@ -2090,13 +2211,15 @@ def question_last(answer: str) -> str:
     back for the checks too (it was taken for an answer, and a check of a question back failed on it). Anything else
     stays: results, a code block, lines that are not the list's."""
     text = (answer or "").strip()
-    if not text or asks_back(text) or len(text) > 1200 or TABLE_WITH_NUMBERS.search(text) or "```" in text:
+    if not text or asks_back(text) or len(text) > QUESTION_LAST_CHARS or TABLE_WITH_NUMBERS.search(text) or "```" in text:
         return answer
     lines = text.splitlines()
     q = next((i for i, ln in enumerate(lines) if ln.strip().rstrip("*_ )").endswith("?")), None)
     rest = [ln for ln in lines[q + 1:] if ln.strip()] if q is not None else []
-    if not rest or not all(OPTION_LINE.match(ln) or ln[:1] in (" ", "\t") for ln in rest):
-        return answer
+    if not rest or not all(OPTION_LINE.match(ln) or ln[:1] in (" ", "\t") or LEAD_IN.search(ln) or
+                           CHOOSE_LINE.match(ln) for ln in rest):
+        return answer                                     # (0.10.9.2) a list's lead-in and a closing "Please
+    #                                                       specify ..." are the question back's too
     return ("\n".join(lines[:q] + lines[q + 1:]).strip() + "\n\n" + lines[q].strip()).strip()
 
 
@@ -2943,7 +3066,7 @@ RULE_CHARS = 1500        # of each (a longer rule: its parts are also found by t
 
 def rule_line(rule: dict[str, str]) -> str:
     """A catalog rule for the prompt; its title is not repeated when the text begins with it."""
-    body = rule["text"][:RULE_CHARS]
+    body = rule["text"][:room("rule_chars")]
     return body if body.startswith(rule["title"].rstrip("\u2026")) else f"{rule['title']}: {body}"
 
 
@@ -3133,8 +3256,21 @@ class Agent:
             text += "\n\nRules of the team (from the catalog: always follow them):"
             for r in team_rules:
                 text += "\n- " + rule_line(r)
-                if shown is not None and len(r["text"]) <= RULE_CHARS:
+                if shown is not None and len(r["text"]) <= room("rule_chars"):
                     shown.add(f"entry:{r['id']}")
+        try:                                         # (0.10.9.1) the LLM context the learning writes: given always
+            from supagent.knowledge.llm_context import for_prompt
+
+            known = for_prompt()
+        except Exception:  # pylint: disable=broad-except   (the question is answered without it)
+            log.warning("supagent: the LLM context: not given", exc_info=True)
+            known = ""
+        if known:
+            text += ("\n\nWhat the team's knowledge says (the LLM context the learning wrote, given with every "
+                     "question; the team's rules are above). Use it to know the data and the words; describe_data "
+                     "gives the fields. It holds no answer: a figure, a list, or what a given record is or has (whose, "
+                     "which one, where, when) always comes from a query run for this question, never from this text "
+                     "nor from a list of values given before:\n" + known)
         return text
 
     def _rules_reminder(self) -> str:
@@ -3149,7 +3285,7 @@ class Agent:
         if not team_rules:
             return ""
         lines = [rule_line(r) for r in team_rules]
-        if sum(len(x) for x in lines) <= RULES_NEAR_CHARS:
+        if sum(len(x) for x in lines) <= room("rules_near_chars"):
             return ("\n\nThe team's rules, for every query of this answer (they win over the learned answers "
                     "below; apply one unless the question asks otherwise):\n" + "\n".join(f"- {x}" for x in lines))
         return ("\n\nApply the team's rules of the instructions to every query of this answer (they win over the "
@@ -3162,13 +3298,18 @@ class Agent:
         the other blocks give."""
         shown = set() if shown is None else shown
         text = ""
+        self.memory_over = 0
         try:
             from flask import g
 
             from supagent.knowledge.memory import prompt_block
 
-            text += prompt_block(getattr(getattr(g, "user", None), "id", None), shown,
-                                 getattr(self, "said_in_chat", None))
+            remembered = prompt_block(getattr(getattr(g, "user", None), "id", None), shown,
+                                      getattr(self, "said_in_chat", None))
+            text += remembered
+            self.memory_over = max(0, len(remembered) - room("memory_chars"))   # (0.10.9.1) memories first: what
+            #                                                                   they take beyond their room, the
+            #                                                                   knowledge found gives way
         except Exception:  # pylint: disable=broad-except
             pass
         text += self._rules_reminder()
@@ -3223,7 +3364,8 @@ class Agent:
                     ask += "\n" + " ".join(self.chat_values)
                 text += knowledge_block(ask, shown,
                                         with_charts=bool(about & {"status", "read_charts", "charts"}),
-                                        prefer=ROUTE_KINDS.get(moa.route) if moa is not None and moa.active else None)
+                                        prefer=ROUTE_KINDS.get(moa.route) if moa is not None and moa.active else None,
+                                        memory_over=getattr(self, "memory_over", 0))
             except Exception:  # pylint: disable=broad-except
                 log.warning("supagent: knowledge found: not given", exc_info=True)
         if WHO_ASKED.search(question or ""):             # (0.10.7) who did it: where the part writes it, said first
@@ -3418,7 +3560,7 @@ class Agent:
         recent = (history or [])[-HISTORY_MESSAGES:]
         for h in recent:
             if h.get("content"):
-                messages.append({"role": h["role"], "content": str(h["content"])[:HISTORY_CHARS]})
+                messages.append({"role": h["role"], "content": str(h["content"])[:room("history_chars")]})
         lang = question_language(question)
         hint = f" {ANSWER_IN[lang]}" if lang else ""
         # (0.10.7) what the user said: the question, as understood, and the chat's messages (a memory that applies
@@ -3553,7 +3695,7 @@ class Agent:
         messages: list[dict] = [{"role": "system", "content": GENERAL_SYSTEM}]
         for h in (history or [])[-HISTORY_MESSAGES:]:
             if h.get("content"):
-                messages.append({"role": h["role"], "content": str(h["content"])[:HISTORY_CHARS]})
+                messages.append({"role": h["role"], "content": str(h["content"])[:room("history_chars")]})
         lang = question_language(question)
         messages.append({"role": "user", "content": question + (f"\n({ANSWER_IN[lang]})" if lang else "")})
         return messages
@@ -3645,10 +3787,10 @@ class Agent:
         unreadable = full = 0
         forced = force_tool = ledger_asked = unclear_asked = grain_asked = definition_asked = stage_asked = False
         cut_asked = zero_asked = units_asked = written_run = shows_asked = map_asked = placeholder_asked = False
-        premise_asked = recut_asked = False
+        premise_asked = recut_asked = crash_asked = False
         suspect_asked = records_asked = period_kept = map_asked = which_asked = buckets_asked = False
         verdict_asked = cause_records_asked = reach_asked = fields_asked = where_asked = own_asked = False
-        blamed_asked = waiter_asked = False
+        blamed_asked = waiter_asked = parts_asked = False
         repeated_asked = recurring_asked = trigger_asked = False
         claimed_asked = False                          # (0.10.7) the chat's period said with no query run with it
         self._period_sent_at = None
@@ -3684,7 +3826,7 @@ class Agent:
                 named_asked = tie_asked = numbers_asked = limit_asked = ledger_asked = stage_asked = future_asked = True
                 suspect_asked = records_asked = period_kept = map_asked = which_asked = buckets_asked = True
                 verdict_asked = cause_records_asked = reach_asked = fields_asked = where_asked = own_asked = True
-                blamed_asked = waiter_asked = True
+                blamed_asked = waiter_asked = parts_asked = True
                 repeated_asked = recurring_asked = trigger_asked = True
                 source_asked = keep_asked = repeat_asked = claimed_asked = True
                 grain_asked = definition_asked = count_asked = forced = action_asked = True
@@ -3712,7 +3854,7 @@ class Agent:
                 return fallback + self._marks(fallback, trace), trace
             except LLMError as ex:
                 if CONTEXT_FULL.search(str(ex)) and full < len(SHRUNK) and trace:
-                    n = shortened(messages, SHRUNK[full], KEPT_WHOLE if full == 0 else 1)
+                    n = shortened(messages, shrunk()[full], KEPT_WHOLE if full == 0 else 1)
                     full += 1
                     log.info("supagent: the context was full: %d older tool results shortened", n)
                     if full == len(SHRUNK) or not n:
@@ -3772,7 +3914,7 @@ class Agent:
                     self._last_written = answer         # out before the one a check asked for is written
                 if cut_asked and not recut_asked and cut_short(answer, getattr(self.llm, "last_finish", None)):
                     recut_asked = True                 # (0.10.8) cut again: a full context leaves the answer no room
-                    n = shortened(messages[:-1], SHRUNK[-1], 1)   # ("| Sep 27" ended it twice): the older results
+                    n = shortened(messages[:-1], shrunk()[-1], 1)   # ("| Sep 27" ended it twice): the older results
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1   # cut short, the answer asked once more
                     log.info("supagent: answer cut again: %d older tool results shortened, asked once more", n)
                     messages.append({"role": "user", "content": CUT_NUDGE if self._queried(trace) or
@@ -3794,6 +3936,17 @@ class Agent:
                     messages.append({"role": "user", "content": PREMISE_NUDGE.format(time=denied[0], grain=denied[1])})
                     if not forced and settings.get("agent.force_tool"):
                         forced = force_tool = True     # the next step reads it by minutes
+                    continue
+                crashed = None if crash_asked or asks_back(answer) else crash_unread(answer, trace)
+                if crashed:                            # (0.10.10) once: a crash loop said, its reason guessed
+                    crash_asked = True
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (a crash said, the events never read: %s)", crashed[0])
+                    messages.append({"role": "user", "content": CRASH_NUDGE.format(
+                        said=crashed[0], tables=crashed[1], fields=_event_fields(crashed[1].split(", ")[0]))})
+                    cap, steps = max(cap, used + CRASH_CALLS), max(steps, i + 1 + CRASH_CALLS + 1)   # the reading
+                    if not forced and settings.get("agent.force_tool"):            # has its calls, however late
+                        forced = force_tool = True     # the next step reads them
                     continue
                 held = None if placeholder_asked else PLACEHOLDER.search(answer or "")
                 if held:                               # (0.10.8) once: "| 17:00 | failed | (value from earlier result) |"
@@ -3869,11 +4022,18 @@ class Agent:
                 if notes_asked and notes_on and claimed is None and (again := note_claim(answer, trace)):
                     log.info("supagent: a note %s without %s again: the answer says it was not done", *again)
                     return NOTE_NOT_DONE[again[1]], trace     # said twice, not done: not shown as done
-                if getattr(self, "unclear", None) and not unclear_asked and not asks_back(answer):
+                if getattr(self, "unclear", None) and not unclear_asked and not asks_back(question_last(answer)):
                     unclear_asked = True               # once: "the options book" answered for one of five
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
                     log.info("supagent: answer sent back (ask back first: %s)", self.unclear.get("said"))
                     messages.append({"role": "user", "content": ASK_FIRST_NUDGE})
+                    continue
+                parts = open_parts_unnamed(getattr(self, "unclear", None), answer)
+                if parts and not parts_asked:          # (0.10.9) an open question asked back with kinds of data:
+                    parts_asked = True                 # the System map's parts suggested by name, once
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (open question: no part of the map named)")
+                    messages.append({"role": "user", "content": OPEN_PARTS_NUDGE.format(parts=parts)})
                     continue
                 nudge = None if nudged or about_notes or getattr(self, "unclear", None) else unsupported_answer(answer, trace, question)
                 # a follow-up restating the previous answer: all its numbers in that answer (not anywhere in a long
@@ -4499,7 +4659,7 @@ class Agent:
                     part_note = per_part_note(question, args, content)   # (0.10.8) which part most: rows per part
                     if part_note:
                         notes.append(part_note)
-                limit = TOOL_CHARS.get(name, MAX_TOOL_CHARS)
+                limit = tool_chars(name)
                 room = max(limit // 2, limit - sum(len(n) for n in notes))
                 if len(content) > room:
                     content = content[:room] + "\n...[truncated]"
@@ -5064,6 +5224,9 @@ class Agent:
             if not getattr(self, "open_question", False):    # an investigation looks values up: none is news
                 reasons.append(value_refusal(name, args))      # a field compared with a value it does not have
             reasons.append(self._names_only(name, args))       # (0.10.7) which metrics: their names
+            from supagent.knowledge.deactivate import refusal as deactivated_refusal
+
+            reasons.append(deactivated_refusal(name, args))    # (0.10.9.1) what the team deactivated
             reasons.append(self._fanout(name, args))           # a join that repeats the rows it sums
             reasons.append(self._rows_changed(name, args))     # a follow-up on other rows than the answer before
             if name in ("generate_chart", "update_chart"):
@@ -5333,13 +5496,13 @@ class Agent:
         level, with the work plan given again; models read long contexts worse well before their limit. How many
         levels are done."""
         try:
-            at = int(settings.get("agent.compact_at") or 0)
+            at = room("compact_at")                    # (0.10.9.1) by the context profile, unless set
         except Exception:  # pylint: disable=broad-except
             return done
         used = int((getattr(self.llm, "last_usage", None) or {}).get("prompt_tokens") or 0)
         if not at or done >= len(SHRUNK) or used < at * (1 + 0.5 * done):
             return done
-        n = shortened(messages, SHRUNK[done], COMPACT_KEPT)
+        n = shortened(messages, shrunk()[done], COMPACT_KEPT)
         if not n:
             return done                                # (nothing old enough to cut yet: the next turn)
         log.info("supagent: %d older tool results shortened at %d prompt tokens", n, used)

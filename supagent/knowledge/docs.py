@@ -83,7 +83,8 @@ CODE_FILES = (".py", ".pyi", ".java", ".kt", ".kts", ".scala", ".groovy", ".grad
               ".fs", ".vb", ".rb", ".php", ".pl", ".pm", ".r", ".jl", ".swift", ".m", ".mm", ".lua", ".dart", ".ex",
               ".exs", ".erl", ".clj", ".hs", ".ml", ".sh", ".bash", ".zsh", ".ksh", ".ps1", ".psm1", ".bat", ".cmd",
               ".tf", ".tfvars", ".hcl", ".proto", ".graphql", ".gql", ".css", ".scss", ".less", ".toml", ".j2",
-              ".jinja", ".tpl", ".tmpl", ".dockerfile", ".cfg", ".ini", ".conf", ".properties", ".xml", ".sql",
+              ".jinja", ".jinja2", ".erb", ".epp", ".gotmpl", ".tftpl", ".tpl", ".tmpl", ".dockerfile", ".cfg", ".ini",
+              ".conf", ".properties", ".xml", ".sql",
               ".yaml", ".yml", ".json", ".service", ".timer", ".socket", ".env.example")
 CODE_NAMES = {"dockerfile", "containerfile", "makefile", "jenkinsfile", "vagrantfile", "procfile", "gemfile",
               "rakefile", "build", "workspace", "cmakelists.txt", "caddyfile", "corefile", "monitrc", "crontab"}
@@ -91,11 +92,14 @@ CODE_NAMES = {"dockerfile", "containerfile", "makefile", "jenkinsfile", "vagrant
 # etc_apache2_sites-available_blog): its configuration, read with the code; never one whose name speaks of a secret
 ROLE_FILE = re.compile(r"(^|/)roles/[^/]+/(files|templates)/(?![^/]*(secret|passw|token|key|cert|crt|pem|vault|"
                        r"credential|id_rsa|id_ed25519|htpasswd|shadow))(etc|usr|var|opt|srv)_[^/.]*(\.[^/.]+)*$", re.I)
-SKIP_DIRS = {"node_modules", "vendor", "dist", "build", "target", "out", "bin", "obj", ".git", "__pycache__",
+SKIP_DIRS = {"node_modules", "vendor", "dist", "build", "target", "out", "obj", ".git", "__pycache__",
              ".venv", "venv", "site-packages", "bower_components", ".idea", ".vscode", "coverage", ".gradle", ".mvn",
              ".terraform", ".next", ".nuxt"}
 SKIP_FILE = re.compile(r"(\.min\.(js|css)|\.map|\.lock|(^|/)(package-lock\.json|npm-shrinkwrap\.json|"
                        r"pnpm-lock\.yaml|go\.sum))$", re.I)
+# (0.10.10) the folders of a repository's scripts: their files without an extension are scripts (bin/, scripts/, sbin/)
+SCRIPT_DIRS = {"bin", "sbin", "scripts", "script", "tools", "cron.d", "cron"}
+SECRET_NAME = re.compile(r"secret|passw|token|key|cert|crt|pem|vault|credential|id_rsa|id_ed25519|htpasswd|shadow", re.I)
 # (0.10) Ansible's files without an extension: the inventories (hosts, inventory, hosts.example...) and the variables
 # of groups and hosts (group_vars/<group>, host_vars/<host>, or a folder of them)
 ANSIBLE_FILE = re.compile(r"(^|/)((hosts|inventory)([._-][\w.-]*)?|(group|host)_vars/[^/.]+(/[^/.]+)?|"
@@ -278,6 +282,11 @@ class _Text(HTMLParser):
         self._skip = 0
         self._in_title = False
         self._anchor: tuple[str, int] | None = None      # (0.10.7) the full address of the link being read
+        self._rows = 0                                  # (0.10.9) inside a table's row: the row stays one line
+        self._cell_at: int | None = None                # where the cell being read starts (its text so far)
+
+    def _in_cell_text(self) -> bool:
+        return self._cell_at is not None and bool("".join(self.parts[self._cell_at:]).strip(" |"))
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in ("script", "style", "noscript", "svg", "nav", "footer"):
@@ -290,14 +299,25 @@ class _Text(HTMLParser):
                 self.links.append(href)
                 if href.startswith(("http://", "https://")) and len(href) <= LINK_SAID_CHARS and not self._skip:
                     self._anchor = (href, len(self.parts))
-        if tag in BLOCK_TAGS:
+        if tag == "tr":
+            self._rows += 1
+            self.parts.append("\n")
+        elif self._rows and tag in BLOCK_TAGS and tag != "table":
+            # (0.10.9) a cell's paragraphs, line breaks and list items (Confluence wraps a cell's text in <p>): its
+            # values on the row's line, a new one after a comma (the cells' readers split values at commas)
+            if tag in ("li", "br", "p", "div") and self._in_cell_text():
+                self.parts.append(", ")
+            else:
+                self.parts.append(" ")
+        elif tag in BLOCK_TAGS:
             self.parts.append("\n")
             if tag in HEADINGS and not self._skip:    # a heading stays one (0.9.6): the pieces are cut at sections
                 self.parts.append("#" * int(tag[1]) + " ")
             elif tag == "li" and not self._skip:      # (0.10.4) an item of a list stays one: no sentence runs on
                 self.parts.append("- ")               # from one item into the next
-        elif tag in ("td", "th"):
+        if tag in ("td", "th"):
             self.parts.append(" | ")                  # the cells of a row stay apart
+            self._cell_at = len(self.parts)
 
     def handle_endtag(self, tag: str) -> None:
         if tag in ("script", "style", "noscript", "svg", "nav", "footer") and self._skip:
@@ -309,13 +329,22 @@ class _Text(HTMLParser):
             self._anchor = None                        # in what is searched and read
             if href not in "".join(self.parts[at:]):
                 self.parts.append(f" ({href})")
-        if tag in BLOCK_TAGS:
+        if tag in ("td", "th"):
+            self._cell_at = None
+        if tag == "tr":
+            self._rows = max(0, self._rows - 1)
+            self.parts.append("\n")
+        elif self._rows and tag in BLOCK_TAGS and tag != "table":
+            self.parts.append(" ")
+        elif tag in BLOCK_TAGS:
             self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
         if self._in_title:
             self.title += data
         elif not self._skip:
+            if self._rows and ("\n" in data or "\r" in data):
+                data = " ".join(data.split()) if data.strip() else " "   # (0.10.9) a row's source on several lines
             self.parts.append(data)
 
 
@@ -424,7 +453,7 @@ class _Storage(_Text):
 
 
 def _lines(parts: list[str]) -> str:
-    lines = [" ".join(line.split()) for line in "".join(parts).split("\n")]
+    lines = [" ".join(line.split()).replace(" , ", ", ") for line in "".join(parts).split("\n")]
     lines = [line[2:] if line.startswith("| ") else line for line in lines]
     return "\n".join(line for line in lines if line and line != "|")
 
@@ -534,7 +563,8 @@ def _auth(doc: Doc) -> dict[str, Any]:
     return doc.auth if isinstance(doc.auth, dict) else {}
 
 
-OPTIONS = ("verify_tls", "ca_bundle", "files")   # kept in doc.auth with the sign-in (no secret among them)
+OPTIONS = ("verify_tls", "ca_bundle", "files", "excluded")   # kept in doc.auth with the sign-in (no secret among them)
+EXCLUDED_KEPT = 5000           # (0.10.9.1) pages removed from a document by a person, kept at most
 
 
 def tls_of(doc: Doc) -> Any:
@@ -555,6 +585,103 @@ def files_of(doc: Doc) -> str:
     """What a repository gives: "docs" (its documentation and text files) or "code" (all its code too)."""
     f = str(_auth(doc).get("files") or "").strip().lower()
     return f if f in FILES else "docs"
+
+
+def page_key(p: dict[str, Any]) -> str:
+    """(0.10.9.1) What names a page of a document for good: its wiki id, its path in a repository, else its address."""
+    if p.get("id"):
+        return f"id:{p['id']}"
+    if p.get("path"):
+        return f"path:{p['path']}"
+    return f"url:{p.get('url') or ''}"
+
+
+def excluded_pages(doc: Doc) -> list[dict[str, Any]]:
+    """(0.10.9.1) The pages a person removed from the document: [{"key", "url", "title", "by", "at"}]."""
+    return [e for e in _auth(doc).get("excluded") or [] if isinstance(e, dict) and e.get("key")]
+
+
+def _excluded_elsewhere(doc: Doc) -> set[str]:
+    """The addresses of the pages removed from the other documents: a page removed from the one that read it is not
+    read by another one either (the pages a wiki's spaces share go to the document with the lowest id)."""
+    out: set[str] = set()
+    for other in db.session.query(Doc).filter(Doc.kind == "url"):
+        if other.id != doc.id:
+            out.update(str(e.get("url")) for e in excluded_pages(other) if e.get("url"))
+    return out
+
+
+def _without_excluded(doc: Doc, found: list) -> tuple[list, int]:
+    """(0.10.9.1) The pages read, without the ones a person removed (this document's: by id, path or address; the
+    other documents': by address); each said in the reading's log. Their links were followed: only the page goes."""
+    mine = {e["key"] for e in excluded_pages(doc)} | {f"url:{e['url']}" for e in excluded_pages(doc) if e.get("url")}
+    elsewhere = _excluded_elsewhere(doc) if doc.kind == "url" else set()
+    if not mine and not elsewhere:
+        return found, 0
+    kept, gone = [], 0
+    for f in found:
+        url, title, meta = f[0], f[1], (f[3] if len(f) > 3 and isinstance(f[3], dict) else {})
+        keys = {page_key({**meta, "url": url}), f"url:{url}"}
+        if keys & mine or (url and url in elsewhere):
+            gone += 1
+            _not_read(url, title, "removed by a person from the document's pages (Read again in its list brings it back)")
+            continue
+        kept.append(f)
+    return kept, gone
+
+
+def exclude_page(doc: Doc, by: str, url: str = "", page_id: str = "", path: str = "") -> dict[str, Any]:
+    """(0.10.9.1) A page removed from a document by a person: never read again (excluded_pages), its text taken out of
+    the document's text now (the search's pieces follow), and what the understanding read from it deleted (its unit
+    and its facts). What the map was proposed from it is withdrawn by the next learning, and a link approved from it
+    only proposed for removal (never removed without a person)."""
+    from supagent.models import KFact, KUnit
+
+    pages = [p for p in doc.pages or [] if isinstance(p, dict)]
+
+    def same(p: dict[str, Any]) -> bool:
+        return bool((page_id and str(p.get("id") or "") == str(page_id)) or (path and p.get("path") == path)
+                    or (url and not page_id and not path and p.get("url") == url))
+
+    hit = next((p for p in pages if same(p)), None)
+    if hit is None:
+        raise ValueError("no such page in this document")
+    key = page_key(hit)
+    kept_ex = [e for e in excluded_pages(doc) if e["key"] != key]
+    kept_ex.append({"key": key, "url": str(hit.get("url") or "")[:2000], "title": str(hit.get("title") or "")[:300],
+                    "by": by, "at": dt.datetime.utcnow().isoformat(timespec="seconds")})
+    doc.auth = {**_auth(doc), "excluded": kept_ex[-EXCLUDED_KEPT:]}
+    rest = [p for p in pages if p is not hit]
+    content = doc.content or ""
+    if all(isinstance(p.get("at"), int) and isinstance(p.get("chars"), int) for p in pages):
+        texts, placed, at = [], [], 0
+        for p in rest:                                 # the document's text without it, each page's place again
+            block = content[p["at"]:p["at"] + p["chars"]]
+            if placed:
+                at += 2
+            placed.append({**p, "at": at})
+            texts.append(block)
+            at += len(block)
+        doc.content, doc.pages = "\n\n".join(texts), placed
+    else:                                              # (a reading before 0.10.7 said no place: its text goes at the next)
+        doc.pages = rest
+    doc.content_hash = hashlib.sha256((doc.content or "").encode()).hexdigest()[:40]
+    ukeys = {str(hit.get("path") or hit.get("id") or hit.get("url") or "")[:512]} - {""}
+    units = [i for (i,) in db.session.query(KUnit.id).filter(KUnit.doc_id == doc.id, KUnit.ukey.in_(ukeys or {"-"}))]
+    facts = db.session.query(KFact).filter(KFact.unit_id.in_(units or [-1])).delete(synchronize_session=False)
+    db.session.query(KUnit).filter(KUnit.id.in_(units or [-1])).delete(synchronize_session=False)
+    return {"removed": key, "title": hit.get("title") or "", "pages": len(doc.pages or []), "units": len(units),
+            "facts": facts}
+
+
+def include_page(doc: Doc, key: str) -> bool:
+    """(0.10.9.1) A removed page given back: read again at the document's next reading."""
+    before = excluded_pages(doc)
+    after = [e for e in before if e["key"] != key]
+    if len(after) == len(before):
+        return False
+    doc.auth = {**_auth(doc), "excluded": after}
+    return True
 
 
 def mask_secrets(text: str) -> tuple[str, int]:
@@ -1248,7 +1375,11 @@ def wanted_file(path: str, files: str = "docs") -> bool:
     if is_text_file(path):
         return True
     name = sample_base(parts[-1])
-    return files == "code" and (name.endswith(CODE_FILES) or name in CODE_NAMES or bool(ROLE_FILE.search(path)))
+    script = "." not in name and len(parts) >= 2 and parts[-2] in SCRIPT_DIRS and not name.startswith(("license",
+                                                                                                    "copying")) and \
+        not SECRET_NAME.search(name)
+    return files == "code" and (name.endswith(CODE_FILES) or name in CODE_NAMES or bool(ROLE_FILE.search(path)) or
+                                script)   # (0.10.10) bin/backup, scripts/rotate: a script without an extension
 
 
 def doc_rank(path: str) -> tuple[int, int, str]:
@@ -1632,6 +1763,8 @@ def refresh(doc: Doc) -> dict[str, Any]:
         read = {"web": _read_web, "confluence": _read_confluence, "bitbucket": _read_bitbucket}[reader]
         found, title, skipped = read(doc, sign)
         got["read"] = len(found)
+        found, removed = _without_excluded(doc, found)   # (0.10.9.1) the pages a person removed: not kept
+        skipped += removed
         found = [(u, ti, mask_secrets(tx)[0], *more) for u, ti, tx, *more in found]   # every page's secrets (0.10)
         found, shared = _read_by_another(doc, reader, found)
         content, pages = _join(found)

@@ -177,7 +177,8 @@ def test_document_proposals_name_and_file_their_parts(ctx, monkeypatch):
             {"from": f"{PFX}-orders", "kind": "calls", "to": f"the {PFX} internal payment processing",
              "obj_kind": "part"},
             {"from": f"{PFX}-orders", "kind": "calls", "to": f"{PFX}pay.payments.svc.cluster.local", "obj_kind": "part"}]
-    graph = {"relations": [{"sources": ["doc"], "quote": "q", "where": "Page", **r} for r in rels], "aliases": [],
+    graph = {"relations": [{"sources": ["doc"], "quote": "q", "where": "Page", "unit_ids": [1, 2], **r} for r in rels],
+             "aliases": [],                         # (0.10.9.2: two pages say each of them, as many do)
              "data_links": [], "denied": []}
     monkeypatch.setattr(U, "export", lambda *a, **k: graph)
     try:
@@ -301,8 +302,8 @@ def test_a_group_named_like_its_environment_is_the_environment(ctx):
             ("sw1", "in_group", "web (zq62pay stg)"), ("web (zq62pay stg)", "in_group", "zq62pay stg")} <= t, t
     assert not any("prod (zq62pay prod)" in (s, o) or "zq62pay (zq62pay stg)" in (s, o) for s, _v, o in t)
     assert not any(s == o for s, _v, o in t)
-    assert [_app_of(x) for x in ("orders-ansible", "ansible-orders", "parcel-ops", "infra-ansible", "kolla-ansible")] \
-        == ["orders", "orders", "parcel", "infra", "kolla"]
+    assert [_app_of(x) for x in ("orders-ansible", "ansible-orders", "parcel-ops", "infra-ansible", "kolla-ansible",
+                                 "ansible-infra", "deploy-config")] == ["orders", "orders", "parcel", "", "kolla", "", ""]
 
 
 ENVREPO = {
@@ -363,3 +364,38 @@ def test_inventories_per_environment_end_to_end(env):  # noqa: F811
         db.session.query(Meta).filter(Meta.key == STATE_KEY).delete(synchronize_session=False)
         db.session.commit()
         settings.get("categories.custom")
+
+
+def test_the_ais_parts_go_to_the_deployments_own_categories(ctx, monkeypatch):
+    """(0.10.10) A part the AI names goes to the deployment's own category for what its description says it is (a
+    cron job), and a subject that only names a kind of part the deployment has a category for is not proposed."""
+    from superset.extensions import db
+
+    from supagent import settings
+    from supagent.knowledge.facets import apply
+    from supagent.models import Facet
+
+    real = settings.get
+    monkeypatch.setattr(settings, "get", lambda key: ["cron job", "virtual ip", "team"] if key == "categories.custom"
+                        else real(key))
+    _clean(db)
+    batch = [{"ref": "doc:906203", "hash": "h3", "text": "zq62"}]
+    args = {"items": [], "new_values": [
+        {"facet": "application", "value": f"{PFX}-fare-export", "description": "the nightly cron job exporting fares"},
+        {"facet": "application", "value": f"{PFX}-orders", "description": "the orders application"},
+        {"facet": "application", "value": f"{PFX}-refunds", "description": "refunds, for the payments team"},
+        {"facet": "subject", "value": "cron jobs"}, {"facet": "subject", "value": "vips"}]}
+    try:
+        n = apply(args, batch, {})
+        made = {(f.facet, f.value) for f in db.session.query(Facet).filter(Facet.value.ilike(PFX + "%"))}
+        assert made == {("cron job", f"{PFX}-fare-export"), ("application", f"{PFX}-orders"),
+                        ("application", f"{PFX}-refunds")}, made     # (a team it is for: not what it is)
+        kinds = db.session.query(Facet).filter(Facet.facet == "subject", Facet.value.in_(["cron jobs", "vips"]),
+                                               Facet.source == "llm").count()
+        assert kinds == 0 and n.get("not proposed", 0) >= 2
+    finally:
+        db.session.rollback()
+        db.session.query(Facet).filter(Facet.facet == "subject", Facet.value.in_(["cron jobs", "vips"]),
+                                       Facet.source == "llm").delete(synchronize_session=False)
+        db.session.commit()
+        _clean(db)

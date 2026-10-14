@@ -80,3 +80,24 @@ def test_an_answer_cut_in_a_table_or_a_code_block(ctx):
     assert cut_short(head + "\n\n```sql\nSELECT MAX(value) FROM zq")
     assert not cut_short(head + "\n\n| Time | Value |\n|------|-------|\n| 14:00 | 0 |")
     assert not cut_short(head + "\n\n```sql\nSELECT 1\n```\n\nThat is all.")
+
+
+def test_a_question_back_with_a_lead_in_and_a_closing_request_ends_with_its_question():
+    """(0.10.9.2) "How many requests failed?" asked back with the question first, then "For example, are you looking
+    for:", the readings, and "Please specify the component and the time range." last: a question back the user and the
+    checks did not see as one (its last line was no question)."""
+    text = ("Which service's failed requests would you like me to count, and for what time period?\n\n"
+            "For example, are you looking for:\n*   **Orders** (failed vs. placed)?\n*   **Billing API** requests?\n"
+            "*   **All services** combined?\n\n"
+            "Please specify the component and the time range (e.g., today, yesterday, last 24 hours).")
+    out = question_last(text)
+    assert asks_back(out) and out.endswith("and for what time period?")
+    assert "For example, are you looking for:" in out and "Please specify the component" in out
+    para = ("Several kinds of errors are kept. To give you the right number, could you say which kind and for which "
+            "period (today, yesterday)?\n\nThe sources are:\n*   **Application errors**: failures of the applications."
+            "\n*   **Job errors**: errors of the batch jobs.\n*   **All of them**: one total.")
+    out = question_last(para)
+    assert asks_back(out) and out.endswith("for which period (today, yesterday)?")
+    done = ("Which kind do you mean?\n\nThe sources are:\n* Application errors\n* Job errors\n\n"
+            "Application errors: 12 yesterday.")
+    assert question_last(done) == done                    # a result after the list: no question back

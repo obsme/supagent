@@ -171,7 +171,15 @@ def value_possible(table: str, field: str, value: str) -> bool | None:
 
     o = db.session.query(KObject).filter(KObject.kind.in_(("field", "label")), KObject.parent == table,
                                          KObject.name == field, KObject.gone_at.is_(None)).first()
-    return possible_in((o.stats or {}) if o is not None else {}, value)
+    stats = dict((o.stats or {}) if o is not None else {})
+    if o is not None and o.kind == "field" and not stats.get("partial"):
+        from supagent.knowledge.values import learned_whole
+
+        ix = db.session.query(KObject).filter(KObject.source_id == o.source_id, KObject.kind == "index",
+                                              KObject.name == table, KObject.gone_at.is_(None)).first()
+        if not learned_whole((ix.stats or {}) if ix is not None else {}):
+            stats["partial"] = True        # (0.10.9) its values from a sample: a missing one may be rare, not absent
+    return possible_in(stats, value)
 
 
 def possible_in(stats: dict[str, Any], value: str) -> bool | None:

@@ -26,6 +26,7 @@ import json
 import logging
 import re
 import time
+from collections import Counter
 from typing import Any, Callable, Iterator
 
 from superset import db
@@ -33,6 +34,10 @@ from superset import db
 log = logging.getLogger(__name__)
 
 FACETS = ("aspect", "subject", "application", "component")
+# (0.10.10) what an AI's description may say a part is, to file it in the deployment's own category (never a team, a
+# domain or an environment it is "for")
+PART_KINDS = {"job", "store", "cache", "messaging", "broker", "object", "external", "dashboard", "alert", "dns",
+              "certificate"}
 BUILTIN = ("subject", "application", "component")
 NAME_OK = re.compile(r"^[a-z][a-z0-9_ ]{1,23}$")
 
@@ -398,6 +403,24 @@ def seed() -> dict[str, int]:
             have[(f.facet, " ".join(f.value.lower().split()))] = f
             for syn in f.synonyms or []:              # a name merged into a value is that value (0.9.5): the next
                 have.setdefault((f.facet, " ".join(str(syn).lower().split())), f)   # run must not bring it back
+        # (0.10.9.1) a value a person put in a subcategory (a category drawn inside this one) is the one the data
+        # names: found there, not proposed again in the category above it
+        within = inside()
+
+        def above(k: str) -> list[str]:
+            out: list[str] = []
+            k = within.get(k, "")
+            while k and k not in out:
+                out.append(k)
+                k = within.get(k, "")
+            return out
+
+        lower = [k for k in within if set(above(k)) & set(cats)]
+        for f in db.session.query(Facet).filter(Facet.facet.in_(lower or ["-"])):
+            for a in above(f.facet):
+                if a in cats:
+                    for name in [f.value] + [str(x) for x in (f.synonyms or [])]:
+                        have.setdefault((a, " ".join(name.lower().split())), f)
         seen: dict[int, tuple[Any, list[str]]] = {}
         for (cat, low), slot in found_values.items():
             n["values_read"] += 1
@@ -525,7 +548,8 @@ def items() -> Iterator[dict[str, Any]]:
         yield {"ref": f"doc:{d.id}", "kind": "document", "title": d.title or d.url or "", "text": d.content or ""}
     for n in db.session.query(Note).filter(Note.scope == "team"):          # a personal note stays its author's
         yield {"ref": f"note:{n.id}", "kind": "team note", "title": n.title or "", "text": n.text or ""}
-    for p in db.session.query(ContextPage).filter(ContextPage.kind.is_distinct_from("rejected")):
+    for p in db.session.query(ContextPage).filter(ContextPage.kind.is_distinct_from("rejected"),
+                                                       ContextPage.slug.notin_(_llm_slugs())):
         yield {"ref": f"context:{p.id}", "kind": f"context ({p.section})", "title": p.title, "text": p.content or ""}
     for r in db.session.query(Recipe).filter(Recipe.status.in_(USED)):
         yield {"ref": f"recipe:{r.id}", "kind": "learned answer", "title": (r.question or "")[:120],
@@ -742,6 +766,22 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
             hit = next((x for x in rows if any(str(s).lower() == low for s in (x.synonyms or []))), None)
         return None if hit is None or hit.id == not_id else hit
 
+    alike_index: dict[str, list[Any]] = {}
+
+    def alike(facet: str, value: str) -> Any:
+        """(0.10.9.2) A known value of this category (an application's or a component's: of either) written the
+        same way (case, separators, camelCase, a plural, a short form written out: consolidate.keys): that one, no
+        new proposal (a rejected one: rejected)."""
+        from supagent.knowledge.consolidate import _family, keys as name_keys
+
+        if not alike_index:
+            alike_index[""] = []
+            for x in db.session.query(Facet).filter(Facet.facet.in_(list(editable()))):
+                for nm in [x.value] + [str(s) for s in (x.synonyms or [])]:
+                    alike_index.setdefault(f"{_family(x.facet)}|{name_keys(nm, x.facet)['written']}", []).append(x)
+        hits = alike_index.get(f"{_family(facet)}|{name_keys(value, facet)['written']}") or []
+        return min(hits, key=lambda x: ({"approved": 0, "proposed": 1}.get(x.status, 2), x.id)) if hits else None
+
     def elsewhere(facet: str, value: str) -> Any:
         """The approved value of another category that has this name: the same part of the system, which the team
         filed elsewhere (a "component" X when X is a service of theirs): the item is about that one. (0.10.6) A
@@ -759,6 +799,7 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
         return None if facet == "subject" and SERVERISH.search(hit.facet or "") else hit
 
     cats = list(editable())
+    cat_about = about()
 
     def place(facet: str, value: str, description: str | None = None) -> tuple[str | None, str, list[str]]:
         """(0.10.6.2) A new value the AI names: its category (a monitoring tool, an infrastructure service or a
@@ -768,6 +809,18 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
         if to is None:
             n["not proposed"] = n.get("not proposed", 0) + 1
             return None, "a library", []
+        from supagent.knowledge.placing import PHRASE_OF, best_category, choose, phrases
+
+        own_cats = [c for c in cats if c not in ("subject", "aspect", "application", "component")]
+        if facet == "subject":                            # (0.10.10) "cron jobs", "vips": a kind of part the
+            low = " ".join(str(value).lower().split())    # deployment has a category for is that category, no topic
+            kind = PHRASE_OF.get(low) or PHRASE_OF.get(re.sub(r"(?:es|s)$", "", low))
+            if kind and best_category(kind, own_cats, cat_about):
+                n["not proposed"] = n.get("not proposed", 0) + 1
+                return None, "a kind of part with its category", []
+        elif to in ("application", "component"):          # (0.10.10) the deployment's own category for what the AI
+            said = Counter({c: k for c, k in phrases(description or "").items() if c in PART_KINDS})   # says it is
+            to = choose(to, None, value, said, own_cats, cat_about) or to   # (a kind of part: never a team's...)
         name, others, why = checked(to, value)
         if name is None:
             n["not proposed"] = n.get("not proposed", 0) + 1
@@ -780,7 +833,7 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
         if nv.get("facet") in llm_cats and str(nv.get("value") or "").strip():
             desc = str(nv.get("description") or "")[:500] or None
             f = db.session.query(Facet).filter(Facet.facet == nv["facet"], Facet.value.ilike(
-                " ".join(str(nv["value"]).split()))).first()
+                " ".join(str(nv["value"]).split()))).first() or alike(nv["facet"], str(nv["value"]))
             if f is None:
                 if elsewhere(nv["facet"], nv["value"]):
                     continue                          # known under another category: nothing new to propose
@@ -840,7 +893,7 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
                 wanted.append((o["category"], str(o["value"])))
         for facet, value in wanted:
             f = (db.session.query(Facet).filter(Facet.facet == facet, Facet.value.ilike(value.strip())).first()
-                 or elsewhere(facet, value))
+                 or alike(facet, value) or elsewhere(facet, value))
             if f is None:                             # (0.10.6.2) a new one: where it belongs, as a name
                 to, name, others = place(facet, value)
                 if to is None:
@@ -1032,9 +1085,10 @@ def part_of_map(statuses: tuple[str, ...] = ("approved",)) -> dict[int, list[int
 
 
 def suggest_link(a: int, b: int, kind: str, source: str, evidence: str | None = None,
-                 confidence: float | None = None) -> bool:
+                 confidence: float | None = None, note: str | None = None) -> bool:
     """A link between two values proposed (to approve in To review): False when one of any status exists already
-    (approved, proposed, or rejected: a link an admin refused is not proposed again)."""
+    (approved, proposed, or rejected: a link an admin refused is not proposed again). `note`: what the link is, in
+    words, for a link of its own words (sysmap.worded)."""
     from supagent.models import Link
 
     if a == b:
@@ -1043,7 +1097,7 @@ def suggest_link(a: int, b: int, kind: str, source: str, evidence: str | None = 
                                         Link.kind == kind).first() is not None:
         return False
     db.session.add(Link(a_ref=f"facet:{a}", b_ref=f"facet:{b}", kind=kind, status="proposed", source=source,
-                        confidence=confidence, evidence=(evidence or "")[:2000] or None))
+                        confidence=confidence, evidence=(evidence or "")[:2000] or None, note=note or None))
     db.session.flush()
     return True
 
@@ -1488,3 +1542,10 @@ def review_counts() -> dict[str, int]:
     except Exception:  # pylint: disable=broad-except
         db.session.rollback()
         return {"values": 0, "tags": 0, "links": 0, "retire": 0}
+
+
+def _llm_slugs() -> tuple[str, ...]:
+    """(0.10.9.1) The LLM context's two pages: written from the rest of the knowledge, never read as a source of it."""
+    from supagent.knowledge.context import LLM_CONTEXT_SLUGS
+
+    return LLM_CONTEXT_SLUGS

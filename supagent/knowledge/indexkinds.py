@@ -96,7 +96,8 @@ def detect(names: set[str]) -> dict[str, Any] | None:
     if _pick(n, "involvedObject.kind") and _pick(n, "reason"):
         return {"kind": "events", "layout": "Kubernetes events", "object": _pick(n, "involvedObject.name"),
                 "reason": "reason", "type": _pick(n, "type"), "message": _pick(n, "message", "note"),
-                "node": _pick(n, "source.host")}
+                "node": _pick(n, "source.host"), "time": _pick(n, "lastTimestamp", "firstTimestamp", "eventTime",
+                                                                 "@timestamp", "metadata.creationTimestamp")}
     if _pick(n, "alertname", "labels.alertname") and _pick(n, "startsAt", "status", "starts_at"):
         return {"kind": "alerts", "layout": "Alertmanager", "name": _pick(n, "alertname", "labels.alertname"),
                 "status": _pick(n, "status"), "start": _pick(n, "startsAt", "starts_at"), "end": _pick(n, "endsAt", "ends_at"),

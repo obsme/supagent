@@ -81,7 +81,8 @@ def items() -> Iterator[dict[str, Any]]:
     for e in db.session.query(Entry).filter(Entry.deleted_at.is_(None), Entry.enabled.is_(True),
                                             Entry.classification == "guide"):
         yield {"ref": f"entry:{e.id}", "title": e.title, "text": e.content or ""}
-    for p in db.session.query(ContextPage).filter(ContextPage.kind.is_distinct_from("rejected")):
+    for p in db.session.query(ContextPage).filter(ContextPage.kind.is_distinct_from("rejected"),
+                                                       ContextPage.slug.notin_(_llm_slugs())):
         yield {"ref": f"context:{p.id}", "title": p.title, "text": p.content or ""}
     for n in db.session.query(Note).filter(Note.scope == "team"):
         yield {"ref": f"note:{n.id}", "title": n.title or "", "text": n.text or ""}
@@ -423,7 +424,8 @@ def explain(llm: Any, seconds: float = 300.0, limit: int = 200, again: bool = Fa
     facets = {f.id: f for f in db.session.query(Facet).filter(
         Facet.id.in_({int(r.split(":", 1)[1]) for x in todo for r in (x.a_ref, x.b_ref) if r.split(":", 1)[1].isdigit()}))}
     pages = [(p.title or "", p.content or "")
-             for p in db.session.query(ContextPage).filter(ContextPage.kind.is_distinct_from("rejected"))]
+             for p in db.session.query(ContextPage).filter(ContextPage.kind.is_distinct_from("rejected"),
+                                                       ContextPage.slug.notin_(_llm_slugs()))]
     _graph()                                          # (the map's names are read once)
     for start in range(0, len(todo), EXPLAIN_BATCH):
         if time.time() - t0 > seconds:
@@ -507,3 +509,10 @@ def _explanations(msg: dict[str, Any]) -> list[dict[str, Any]]:
             return []
     found = args.get("explanations") if isinstance(args, dict) else None
     return [x for x in found if isinstance(x, dict)] if isinstance(found, list) else []
+
+
+def _llm_slugs() -> tuple[str, ...]:
+    """(0.10.9.1) The LLM context's two pages: written from the rest of the knowledge, never read as a source of it."""
+    from supagent.knowledge.context import LLM_CONTEXT_SLUGS
+
+    return LLM_CONTEXT_SLUGS

@@ -357,7 +357,10 @@ def learn_indices(run: Run, source: Source, database: Any, deadline: float, prog
                     upsert(run, source, "index", "", obj_name, {"stats": _said({**_family_info(obj_name, families, index)},
                                                                                said.get(obj_name))})
                 else:
-                    old.last_seen, old.gone_at = dt.datetime.utcnow(), None
+                    from supagent.knowledge.deactivate import alive
+
+                    old.last_seen = dt.datetime.utcnow()
+                    alive(old)                     # (0.10.9.1) a deactivated index stays deactivated
                     st = _part_times(conn, _said(dict(old.stats or {}), said.get(obj_name)), None)
                     if st != (old.stats or {}):
                         old.stats = st

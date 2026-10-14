@@ -411,6 +411,13 @@ def run_answer(message_id: int, taking_over: bool = False) -> bool:
     agent = None
     trace: list[dict] = []
     started = time.time()
+    remembered = None
+    try:
+        from supagent.knowledge.memory import remember_now
+
+        remembered = remember_now(user_id, question)    # (0.10.9.1) "remember that X": kept as written before the
+    except Exception:  # pylint: disable=broad-except   # answer, which is given it already
+        db.session.rollback()
     try:
         with acting_as(username):
             agent = make_agent(username, on_step=on_step, rich_results=True, should_stop=should_stop)
@@ -469,8 +476,10 @@ def run_answer(message_id: int, taking_over: bool = False) -> bool:
 
                 asked = db.session.query(Message).filter(Message.conversation_id == conv.id, Message.role == "user",
                                                          Message.id < message_id).order_by(Message.id.desc()).first()
-                if worth_learning(question) or (asked is not None and asked_back(asked) is not None):
-                    learn_from_message(message_id)    # "always...", "remember...", or what a word meant
+                if remembered is None and (worth_learning(question) or
+                                           (asked is not None and asked_back(asked) is not None)):
+                    learn_from_message(message_id)    # "always...", or what a word meant ("remember that X": kept as
+                    #                                   written before the answer, never written again by an LLM)
             except Exception:  # pylint: disable=broad-except
                 db.session.rollback()
     except Cancelled:

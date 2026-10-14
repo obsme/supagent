@@ -79,7 +79,9 @@ def upsert(run: Run | None, source: Source, kind: str, parent: str, name: str, f
         if source.last_learned_at is not None:     # the first run of a source finds everything new
             record(run, obj, "new", {k: facts.get(k) for k in ("metric_type", "data_type", "unit") if facts.get(k)})
     else:
-        if obj.gone_at is not None:
+        from supagent.knowledge.deactivate import is_deactivated
+
+        if obj.gone_at is not None and not is_deactivated(obj):
             record(run, obj, "back", {"gone_since": obj.gone_at.isoformat()})
         for key in ("metric_type", "data_type", "unit"):
             if facts.get(key) and getattr(obj, key) and getattr(obj, key) != facts[key]:
@@ -97,7 +99,9 @@ def upsert(run: Run | None, source: Source, kind: str, parent: str, name: str, f
         obj.description = facts["backend_help"]
         obj.description_source = "backend"
     obj.last_seen = now
-    obj.gone_at = None
+    from supagent.knowledge.deactivate import alive
+
+    alive(obj)                                       # (0.10.9.1) a deactivated object stays deactivated
     obj.fingerprint = fingerprint({k: facts.get(k) for k in ("data_type", "metric_type", "unit", "backend_help")})
     return obj
 

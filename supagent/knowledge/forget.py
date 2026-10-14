@@ -78,7 +78,11 @@ def forget(databases: list[str] | None = None, everything: bool = False, apply: 
             gone.delete(synchronize_session=False)
             for o in objs:
                 if o.id in keep:                       # people's work stays; the learned facts go
-                    o.stats, o.fingerprint, o.gone_at = None, None, None
+                    from supagent.knowledge.deactivate import is_deactivated
+
+                    o.stats, o.fingerprint = None, None
+                    if not is_deactivated(o):          # (0.10.9.1) the team's deactivation is kept
+                        o.gone_at = None
                     if o.description_source == "llm" and not o.verified:
                         o.description, o.description_source = None, None
             src.last_learned_at, src.stats = None, None

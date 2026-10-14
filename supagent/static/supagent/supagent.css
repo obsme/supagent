@@ -923,3 +923,13 @@ tr.doc-pages > td { background: var(--line-2); }
 table.grid.compact { min-width: 480px; }
 table.grid.compact th, table.grid.compact td { padding: 4px 8px; }
 .result.warn { color: var(--warn, var(--bad)); margin: 4px 0; }
+/* (0.10.9.1) a value's box dragged up or down its column; a subcategory's box to drop values on; "+" on a category */
+.map-node.dragging { cursor: grabbing; }
+.map-node.dragging > rect:first-child { stroke: var(--accent); stroke-width: 2.2; }
+.map-sub, .map-addsub { cursor: pointer; }
+.map-addsub:focus { outline: none; }
+
+/* (0.10.9.1) a memory as written: its lines kept; edited in place */
+.memory-text { white-space: pre-wrap; }
+.memory-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; width: 100%; }
+.memory-form textarea { flex: 1 1 100%; min-height: 3em; font: inherit; }

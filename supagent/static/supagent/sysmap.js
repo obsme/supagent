@@ -35,7 +35,7 @@
              cols: {}, groups: [], cats: readCats(), parts: [], full: false, pick: null,
              owners: {}, openGroups: {}, more: {}, busy: false, tookMs: 0,
              tree: readKept(TREE_KEY, {}), groupBy: readKept(GROUPBY_KEY, {}), inside: {}, tparent: {}, tkids: {},
-             holds: {}, autoOpen: {}, tcands: {} };
+             holds: {}, autoOpen: {}, tcands: {}, missing: [], missingSeq: 0, order: {}, dropEl: null };
   var CATS_KEY = "supagent.map.categories";      // the categories this viewer chose (this browser only)
   function readKept(key, empty) {
     try {
@@ -119,7 +119,7 @@
      and every 20 seconds while it is looked at (quietly: drawn again only when something changed, never while an
      admin edits it). While it is read the page says so; what a reading brought (a new part, a new "part of") is
      outlined for a moment and said next to the title. */
-  function signature(d) { return JSON.stringify([d.values, d.links, d.categories, d.proposed, d.proposed_interactions, d.removals, d.missing, d.layout && [d.layout.positions, d.layout.hidden, d.layout.folded, d.layout.columns, d.layout.groups]]); }
+  function signature(d) { return JSON.stringify([d.values, d.links, d.categories, d.proposed, d.proposed_interactions, d.removals, d.layout && [d.layout.hidden, d.layout.folded, d.layout.columns, d.layout.groups, d.layout.order]]); }
   function setState(text, cls) {
     var box = $("map-state");
     if (!box) return;
@@ -231,7 +231,8 @@
       d.categories.forEach(function (c) { if (c.inside && named[c.inside]) st.inside[c.name] = c.inside; });
       computeTree();
       var lay = d.layout || {};
-      st.positions = lay.positions || {};
+      st.positions = lay.positions || {};                     // (before 0.10.9.1: boxes placed anywhere; not drawn)
+      st.order = lay.order || {};                             // (0.10.9.1) the lists put in order by hand
       st.hidden = lay.hidden || [];
       st.folded = lay.folded || {};
       st.cols = lay.columns || {};
@@ -241,6 +242,7 @@
       syncPick();
       draw();
       if (!st.fitted) { fit(true); st.fitted = true; }
+      if (d.is_admin) loadMissing();
       st.freshAt = -1;
       st.freshCats = what ? what.cats : [];
       if (!quiet && (st.fresh || st.freshCats.length)) {      // just made elsewhere on the page: brought in view
@@ -250,6 +252,15 @@
       }
       say(what);
     }, function (e) { done(); throw e; });
+  }
+  /* (0.10.9.1) what investigations still lack (the chip): asked once the map is drawn, it was most of its time */
+  function loadMissing() {
+    var seq = ++st.missingSeq;
+    S.dict("GET", "map/missing").then(function (r) {
+      if (seq !== st.missingSeq || !st.data) return;
+      st.missing = (r && r.missing) || [];
+      legend(colors());
+    }, function () {});
   }
   function editing() {                                        // an admin moves boxes, draws an interaction or types
     var a = document.activeElement;
@@ -435,6 +446,17 @@
       });
     }
     var heads = [], guides = [];
+    var y = 0;
+    /* (0.10.9.1) in Edit, a subcategory with no value outside the ones drawn inside others: a box to drop values on */
+    var subsEmpty = function (c, byCat, x) {
+      if (!st.edit || !st.data.is_admin || st.parts.length) return;
+      st.data.categories.forEach(function (k) {
+        if (k.name === c || byCat[k.name] || colOf(k.name) !== c || isOff(k.name)) return;
+        var sid = "sub:" + c + ":" + k.name;
+        nodes[sid] = { id: sid, subEmpty: k.name, sub: k.name, cat: c, x: x, y: y, w: BOX_W, h: 46 };
+        y += 46 + GAP;
+      });
+    };
     var under = function (id) { return tree.down[id] || []; };  // the parts drawn inside a part
     var hideUnder = function (id, alias, seen) {              // everything inside a part: drawn as `alias`
       seen = seen || {};
@@ -447,13 +469,16 @@
     };
     order.forEach(function (c, ci) {
       var off = st.cols[c] || [0, 0];                         // where an admin moved the category
-      var x = PAD + ci * (BOX_W + COL_GAP) + (+off[0] || 0), top = PAD + (+off[1] || 0), y = top + HEAD_H;
+      var x = PAD + ci * (BOX_W + COL_GAP) + (+off[0] || 0), top = PAD + (+off[1] || 0);
+      y = top + HEAD_H;
       var info = st.data.categories.filter(function (k) { return k.name === c; })[0] || {};
       heads.push({ cat: c, x: x, y: top, n: own[c] || 0, inner: inner[c] || 0, folded: !!folded[c], shift: shift[c],
                    about: info.about || "", fields: info.fields || "",
                    color: C.series[st.data.categories.map(function (k) { return k.name; }).indexOf(c) % 8] });
       if (!cols[c].length) {                                  // no value yet: said in its column
         nodes["none:" + c] = { id: "none:" + c, none: c, cat: c, x: x, y: y, w: BOX_W, h: 58 };
+        y += 58 + GAP;
+        subsEmpty(c, {}, x);
         return;
       }
       if (folded[c]) {
@@ -467,6 +492,7 @@
         members.forEach(function (i) { nodes[i] = { alias: "cat:" + c }; });
         return;
       }
+      var listOf = c;                                         // (0.10.9.1) the list being placed (its order's key)
       var place = function (v, depth, seen) {
         seen = seen || {};
         seen[v.id] = true;
@@ -480,20 +506,27 @@
         var tree = kids.length ? { open: open, label: kidsLabel(kids) } : null;
         var h = 16 + title.length * 17 + (about.length ? 4 + about.length * LINE : 0) + (v.hint && !v.description ? LINE : 0) + 22 +
           (tree ? LINE + 2 : 0);
-        var p = depth ? null : st.positions[v.id];            // a box inside another stays in it (not moved by hand)
-        var node = { id: v.id, v: v, cat: c, depth: depth, x: p ? p[0] + shift[c] : bx, y: p ? p[1] : y, w: w, h: h, title: title,
-                     about: about, items: items, hintFrom: v.hint && !v.description ? v.hint.from : null, moved: !!p, tree: tree };
+        // (0.10.9.1) every box in its list: moved up or down in it by hand (st.order), never placed out of it
+        var node = { id: v.id, v: v, cat: c, depth: depth, x: bx, y: y, w: w, h: h, title: title, list: listOf,
+                     about: about, items: items, hintFrom: v.hint && !v.description ? v.hint.from : null, tree: tree };
         nodes[v.id] = node;
         y += h + GAP;
         if (!kids.length) return node;
         if (!open) { hideUnder(v.id, v.id); return node; }
         var list = kids.map(function (k) { return st.byId[k]; }).sort(inOrder);
+        var mine = listOf;
         var placed = paged(list, "in:" + v.id, depth + 1, seen);
+        listOf = mine;
         if (placed.length) guides.push({ x: bx + 9, y1: node.y + node.h, kids: placed });
         return node;
       };
       // the first PAGE, the others behind one box; returns the boxes placed (the one of the others last)
       var paged = function (list, scope, depth, seen) {
+        // (0.10.9.1) a column's own list, what is inside a value, a subcategory's: in the order a person gave them
+        // (a group of the column keeps the column's order)
+        var sub = /^grp:/.test(scope) ? (scope.indexOf("grp:" + c + ":in:") === 0 ? scope.slice(("grp:" + c + ":in:").length) : c) : scope;
+        list = ordered(list, sub);
+        listOf = sub;
         var shown = st.more[scope] || list.length <= PAGE + 5 ? list : list.slice(0, PAGE), out = [];
         shown.forEach(function (v) { out.push(place(v, depth, seen)); });
         if (shown.length < list.length) {
@@ -546,9 +579,14 @@
       catsIn.forEach(function (k) {
         var list = byCat[k].sort(inOrder), noun = catLabel(k, list.length).toLowerCase();
         if (list.length > 1 && !/s$/.test(noun)) noun += "s";
-        box("grp:" + c + ":in:" + k, S.num(list.length) + " " + noun + " inside no " + catLabel(st.inside[k] || c, 1).toLowerCase() +
-            " shown", list, some(list));
+        // (0.10.9.1) the subcategory's own box: its name and how many (drawn inside no value of the one above it);
+        // a value dropped on it goes into k
+        var sec = box("grp:" + c + ":in:" + k, catLabel(k, 2) + " · " + S.num(list.length), list, some(list));
+        sec.sub = k;
+        sec.tip = S.num(list.length) + " " + noun + " inside no " + catLabel(st.inside[k] || c, 1).toLowerCase() + " shown" +
+          (st.edit ? ": drag a value on it to put it in " + catLabel(k, 2).toLowerCase() : "");
       });
+      subsEmpty(c, byCat, x);
     });
     /* the groups an admin made (display only): a frame around the columns of their categories that are shown */
     var frames = [];
@@ -567,7 +605,14 @@
       frames.push({ name: g.name, index: gi, x: x0 - GROUP_PAD, y: y0 - GROUP_HEAD, w: x1 - x0 + 2 * GROUP_PAD,
                     h: y1 - y0 + GROUP_HEAD + GROUP_PAD });
     });
-    return { nodes: nodes, heads: heads, folded: folded, frames: frames, shift: shift, guides: guides, up: tree.up };
+    var extent = {};                                          // (0.10.9.1) a column from its name to its last box
+    heads.forEach(function (h) { extent[h.cat] = { top: h.y, bottom: h.y + HEAD_H }; });
+    Object.keys(nodes).forEach(function (k) {
+      var n = nodes[k];
+      if (n.alias || !extent[n.cat]) return;
+      extent[n.cat].bottom = Math.max(extent[n.cat].bottom, n.y + n.h);
+    });
+    return { nodes: nodes, heads: heads, folded: folded, frames: frames, shift: shift, guides: guides, up: tree.up, extent: extent };
   }
   /* (0.9.6.5) a category's column: the category it is inside, all the way up */
   function colOf(c) {
@@ -576,6 +621,20 @@
     return c;
   }
   function isOpen(id) { return !!st.tree[id] || !!st.autoOpen[id]; }
+  /* (0.10.9.1) a list in the order a person gave it (st.order[key]); the values never put in order after, as before */
+  function ordered(list, key) {
+    var o = st.order[key];
+    if (!o || !o.length) return list;
+    var at = {};
+    o.forEach(function (id, i) { at[id] = i; });
+    return list.map(function (v, i) { return { v: v, i: i }; }).sort(function (a, b) {
+      var x = at[a.v.id], y = at[b.v.id];
+      if (x !== undefined && y !== undefined) return x - y;
+      if (x !== undefined) return -1;
+      if (y !== undefined) return 1;
+      return a.i - b.i;
+    }).map(function (e) { return e.v; });
+  }
   function inOrder(a, b) {                                    // by category (their order on the map), then name
     var cats = st.data.categories.map(function (k) { return k.name; });
     return cats.indexOf(a.facet) - cats.indexOf(b.facet) || a.value.localeCompare(b.value);
@@ -820,7 +879,7 @@
     Object.keys(L.nodes).forEach(function (k) {
       var n = L.nodes[k];
       if (n.alias) return;
-      gNodes.appendChild(n.none ? noneView(n, C) : nodeView(n, C));
+      gNodes.appendChild(n.none ? noneView(n, C) : n.subEmpty ? subView(n, C) : nodeView(n, C));
     });
     box.appendChild(root);
     st.svg = root;
@@ -842,7 +901,19 @@
     if (h.n) g.appendChild(svg("path", { d: h.folded ? "M2,13 L8,18 L2,23 z" : "M0,15 L10,15 L5,21 z", fill: C.ink2, class: "map-chevron" }));
     var t = svg("text", { x: h.n ? 16 : 0, y: 24, fill: C.ink2, "font-family": C.font, "font-size": "13", "font-weight": "600",
                           "letter-spacing": ".04em" });
-    t.textContent = label.toUpperCase() + "  ·  " + S.num(h.n) + (h.inner ? "  ·  " + S.num(h.inner) + " INSIDE" : "");
+    // (0.10.9.1) clear of its icons (one more in Edit): the counts left out first (the legend says them), then the
+    // name cut
+    var name = label.toUpperCase(), count = "  ·  " + S.num(h.n) + (h.inner ? "  ·  " + S.num(h.inner) + " INSIDE" : "");
+    measure.font = "600 13px " + C.font;
+    var wide = function (x) { return measure.measureText(x).width + x.length * 0.52; };   // with its letter-spacing
+    var room = BOX_W - (h.n ? 16 : 0) - (st.edit && st.data.is_admin ? 98 : 74);
+    var said = name + count;
+    if (wide(said) > room) {
+      said = name;
+      while (wide(said + "…") > room && said.length > 3) said = said.slice(0, -1);
+      if (said !== name) said = said.replace(/\s+$/, "") + "…";
+    }
+    t.textContent = said;
     g.appendChild(t);
     if (h.about) {                                            // what the category is, in a line under its name
       measure.font = "11px " + C.font;
@@ -885,6 +956,18 @@
     hide.addEventListener("click", hideIt);
     hide.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") hideIt(ev); });
     g.appendChild(hide);
+    if (st.edit && st.data.is_admin) {                       // (0.10.9.1) "+": a subcategory of this one, at once
+      var add = svg("g", { class: "map-addsub", transform: "translate(" + (BOX_W - 90) + ",8)", tabindex: "0", role: "button",
+                           "aria-label": "A subcategory of " + label.toLowerCase() });
+      add.appendChild(svg("rect", { x: -3, y: -3, width: 22, height: 22, rx: 5, fill: C.panel, "fill-opacity": "0", "pointer-events": "all" }));
+      add.appendChild(svg("path", { d: "M8,2 L8,14 M2,8 L14,8", stroke: C.accent, "stroke-width": "2", "stroke-linecap": "round", fill: "none" }));
+      add.appendChild(svg("title", {}, [document.createTextNode("A subcategory of " + label.toLowerCase() + " (values are dragged into it)")]));
+      var addIt = function (ev) { ev.stopPropagation(); ev.preventDefault(); newSubcategory(h.cat); };
+      add.addEventListener("pointerdown", function (ev) { ev.stopPropagation(); });
+      add.addEventListener("click", addIt);
+      add.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") addIt(ev); });
+      g.appendChild(add);
+    }
     var toggle = function () {
       if (!h.n) return;
       st.open[h.cat] = h.folded;                              // folded: open it; open: fold it
@@ -934,6 +1017,25 @@
     g.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(); } });
     return g;
   }
+  /* (0.10.9.1) in Edit, a subcategory with no value of its own here: a value dragged on it goes into it */
+  function subView(n, C) {
+    var label = catLabel(n.subEmpty, 2);
+    var g = svg("g", { class: "map-none map-sub", transform: "translate(" + n.x + "," + n.y + ")", "data-id": n.id, "data-cat": n.cat,
+                       tabindex: "0", role: "button", "aria-label": label + ": a subcategory; drag a value here to put it in it" });
+    g.appendChild(svg("rect", { width: n.w, height: n.h, rx: 8, fill: "none", stroke: C.axis, "stroke-width": "1.2",
+                                "stroke-dasharray": "5 4", "pointer-events": "all" }));
+    var t = svg("text", { x: 14, y: 19, fill: C.ink2, "font-family": C.font, "font-size": "12.5", "font-weight": "600" });
+    t.textContent = label;
+    g.appendChild(t);
+    var a = svg("text", { x: 14, y: 36, fill: C.muted, "font-family": C.font, "font-size": "11.5" });
+    a.textContent = "Drag a value here to put it in " + label.toLowerCase();
+    g.appendChild(a);
+    var open = function () { categoryPanel(n.subEmpty); };
+    g.addEventListener("pointerdown", function (ev) { ev.stopPropagation(); });
+    g.addEventListener("click", function (ev) { ev.stopPropagation(); open(); });
+    g.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(); } });
+    return g;
+  }
   function nodeView(n, C) {
     var catIdx = st.data.categories.map(function (k) { return k.name; }).indexOf(n.fold || (n.v && n.v.facet) || n.cat);
     var color = C.series[(catIdx < 0 ? 0 : catIdx) % 8];
@@ -960,7 +1062,7 @@
         var t = svg("text", { x: 14, y: y + 2, fill: C.ink2, "font-family": C.font, "font-size": "12" });
         t.textContent = line; g.appendChild(t); y += LINE;
       });
-      g.appendChild(svg("title", {}, [document.createTextNode(n.group ? (n.open ? "Close the group" : "Open the group: its " +
+      g.appendChild(svg("title", {}, [document.createTextNode(n.tip ? n.tip : n.group ? (n.open ? "Close the group" : "Open the group: its " +
         (n.members || []).length + " parts") : n.more ? "Show them all" : "Open: every one (a click here, or on the category's name)")]));
     } else {
       if (n.about.length) y += 4;
@@ -1135,6 +1237,33 @@
       } }), res])]));
     name.focus();
   }
+  /* (0.10.9.1) "+" on a category's name: a subcategory of it, named and made at once (Enter); its box appears in the
+     column, to drag values into */
+  function newSubcategory(parent) {
+    unselect();
+    var box = $("map-side");
+    box.innerHTML = "";
+    box.hidden = false;
+    box.appendChild(el("button", { type: "button", class: "close", "aria-label": "Close", text: "×", onclick: unselect }));
+    box.appendChild(el("div", { class: "muted", text: "Subcategory" }));
+    box.appendChild(el("h3", { text: "A subcategory of " + catLabel(parent, 2).toLowerCase() }));
+    var res = el("span", { class: "result", role: "status" });
+    var name = el("input", { type: "text", maxlength: "24", placeholder: "Its name", "aria-label": "Name of the subcategory" });
+    var make = function () {
+      if (!name.value.trim()) { res.textContent = "write its name"; res.className = "result bad"; return; }
+      change({ add_category: { name: name.value, inside: parent } }, res, function (r) {
+        res.textContent = "added: " + r.name + ". Drag values on its box in the " + catLabel(parent, 2).toLowerCase() + " column.";
+        name.value = "";
+        name.focus();
+      });
+    };
+    name.addEventListener("keydown", function (ev) { if (ev.key === "Enter") { ev.preventDefault(); make(); } });
+    box.appendChild(el("div", { class: "map-edit" }, [name, el("div", { class: "actions" }, [
+      el("button", { type: "button", class: "btn small primary", text: "Add the subcategory", onclick: make }), res])]));
+    box.appendChild(el("p", { class: "muted small-note", text: "Its values are drawn in this column: inside the " +
+      catLabel(parent, 1).toLowerCase() + " they belong to, the others in its own box." }));
+    name.focus();
+  }
   /* (0.10.6) A link drawn from the top of the map (the user's request: like "+ Category"): two parts found by typing,
      its kind from a list (belongs to, runs on, connects to, relies on, reads from, sends data to, monitors, triggers, is
      related to) or one's own words, its few words (they start as the kind's, to edit), what to do when following it,
@@ -1268,9 +1397,9 @@
       title: "Links whose removal is proposed: they stay drawn (dashed) until an AI Admin decides",
       text: S.num(st.data.removals) + " link" + (st.data.removals > 1 ? "s" : "") + " proposed for removal",
       onclick: function () { D.show("review"); } }));
-    if ((st.data.missing || []).length) box.appendChild(el("button", { type: "button", class: "chip", id: "map-missing",
+    if (st.missing.length) box.appendChild(el("button", { type: "button", class: "chip", id: "map-missing",
       title: "What an investigation follows and does not find yet: parts not in the data, parts with no interaction, joins, usual values",
-      text: S.num(st.data.missing.length) + " point" + (st.data.missing.length > 1 ? "s" : "") + " to complete for investigations",
+      text: S.num(st.missing.length) + " point" + (st.missing.length > 1 ? "s" : "") + " to complete for investigations",
       onclick: missing }));
     if (st.hidden.length && st.data.is_admin) box.appendChild(el("button", { type: "button", class: "chip",
       text: "Show the " + st.hidden.length + " hidden", onclick: function () { st.hidden = []; saveLayout(); draw(); } }));
@@ -1402,7 +1531,7 @@
     box.appendChild(el("h3", { text: "To complete" }));
     box.appendChild(el("p", { class: "muted", text: "An investigation follows the parts of this map, where each is in the data, how the tables join and which field holds a usual value. What it does not find yet:" }));
     var ul = el("ul", { class: "map-links" });
-    st.data.missing.forEach(function (x) { ul.appendChild(el("li", {}, [el("span", { text: x })])); });
+    st.missing.forEach(function (x) { ul.appendChild(el("li", {}, [el("span", { text: x })])); });
     box.appendChild(ul);
     box.appendChild(el("p", { class: "muted small-note", text: "The same list, and what the agent is given for a question: superset supagent check-system --question \"...\"" }));
   }
@@ -1694,39 +1823,115 @@
       apply();
     });
   }
+  /* (0.10.9.1) In Edit, a value's box moves up and down its column only (never out of it): dropped in its list, it
+     takes that place (kept for everyone, st.order); dropped on a subcategory's box (or back on its category's name),
+     it goes into that category. Anywhere else it goes back where it was. */
   function dragBox(g, n) {
     var start = null;
     g.addEventListener("pointerdown", function (ev) {
       ev.stopPropagation();
-      start = { x: ev.clientX, y: ev.clientY, nx: n.x, ny: n.y };
+      var ext = (st.layout.extent || {})[n.cat];
+      if (!ext) return;
+      // up to its category's name only when it can go back there (a subcategory's value), else to its list's top
+      var top = n.v && n.v.facet !== n.cat ? ext.top : ext.top + HEAD_H - GAP;
+      start = { y: ev.clientY, ny: n.y, top: top, bottom: Math.max(top, ext.bottom - n.h) };
       g.setPointerCapture(ev.pointerId);
     });
     g.addEventListener("pointermove", function (ev) {
       if (!start) return;
-      var dx = (ev.clientX - start.x) / st.view.k, dy = (ev.clientY - start.y) / st.view.k;
-      if (Math.abs(dx) + Math.abs(dy) < 3 && !g._dragged) return;
+      var dy = (ev.clientY - start.y) / st.view.k;
+      if (Math.abs(dy) < 3 && !g._dragged) return;
+      if (!g._dragged && g.parentNode && g.parentNode.lastChild !== g) {   // drawn over the others while it moves
+        g.parentNode.appendChild(g);
+        try { g.setPointerCapture(ev.pointerId); } catch (e) { /* kept by the browser */ }
+      }
       g._dragged = true;
-      n.x = Math.round(start.nx + dx); n.y = Math.round(start.ny + dy);
+      g.classList.add("dragging");
+      n.y = Math.round(Math.max(start.top, Math.min(start.bottom, start.ny + dy)));    // up and down only
       g.setAttribute("transform", "translate(" + n.x + "," + n.y + ")");
+      dropMark(dropAt(n));
     });
     g.addEventListener("pointerup", function () {
       if (start && g._dragged) {
-        // kept as on the map with every category shown (a viewer who shows fewer sees the columns closer)
-        st.positions[n.id] = [n.x - ((st.layout.shift || {})[n.cat] || 0), n.y];
-        saveLayout();
-        var keep = st.sel;
-        draw();
-        if (keep) select(keep, true);
+        var at = dropAt(n);
+        dropMark(null);
+        g.classList.remove("dragging");
+        if (at && at.facet) moveValue(n, at.facet);
+        else if (at && at.list) putInOrder(n, at);
+        else { n.y = start.ny; g.setAttribute("transform", "translate(" + n.x + "," + n.y + ")"); }
       }
       start = null;
     });
+  }
+  /* where a dragged box would go: {facet} into a (sub)category, {list, before} a place in its list, or null */
+  function dropAt(n) {
+    var L = st.layout, mid = n.y + Math.min(n.h / 2, 20);       // its upper part leads (a tall box too)
+    if (!L || !n.v) return null;
+    var head = (L.heads || []).filter(function (h) { return h.cat === n.cat; })[0];
+    if (head && mid < head.y + HEAD_H && n.v.facet !== n.cat) return { facet: n.cat, el: null, head: head };
+    var target = null;
+    Object.keys(L.nodes).forEach(function (k) {
+      var o = L.nodes[k];
+      if (!target && o.sub && o.cat === n.cat && o.sub !== n.v.facet && mid >= o.y && mid <= o.y + o.h) target = o;
+    });
+    if (target) return { facet: target.sub, node: target };
+    var sibs = Object.keys(L.nodes).map(function (k) { return L.nodes[k]; }).filter(function (o) {
+      return o.v && o.list === n.list && o.cat === n.cat && o.id !== n.id && !o.alias && o.depth === n.depth;
+    }).sort(function (a, b) { return a.y - b.y; });
+    if (!sibs.length) return null;                            // alone in its list: no other place
+    var last = sibs[sibs.length - 1], before = null;
+    sibs.some(function (o) { if (mid <= o.y + o.h / 2) { before = o; return true; } return false; });
+    return { list: n.list, before: before ? before.id : null, after: before ? null : last.id,
+             y: before ? before.y - GAP / 2 : last.y + last.h + GAP / 2, x: n.x, w: n.w };
+  }
+  function dropMark(at) {                                    // the place a box would take, or the box it would go in
+    if (st.dropEl) { st.dropEl.remove(); st.dropEl = null; }
+    if (!at || !st.vp) return;
+    var C = colors();
+    if (at.list) {
+      st.dropEl = svg("line", { x1: at.x, x2: at.x + at.w, y1: at.y, y2: at.y, stroke: C.accent, "stroke-width": "3",
+                                "stroke-linecap": "round", class: "map-drop-line" });
+    } else {
+      var o = at.node || { x: at.head.x, y: at.head.y, w: BOX_W, h: HEAD_H - 2 };
+      st.dropEl = svg("rect", { x: o.x - 3, y: o.y - 3, width: o.w + 6, height: o.h + 6, rx: 9, fill: "none", stroke: C.accent,
+                                "stroke-width": "2.4", class: "map-drop-box" });
+    }
+    st.vp.appendChild(st.dropEl);
+  }
+  /* (0.10.9.1) the dragged value takes its new place in its list: the list's whole order kept (its values not shown
+     now keep theirs), the moved one before the value it was dropped above */
+  function putInOrder(n, at) {
+    var shown = Object.keys(st.layout.nodes).map(function (k) { return st.layout.nodes[k]; }).filter(function (o) {
+      return o.v && o.list === n.list && o.cat === n.cat && !o.alias && o.depth === n.depth;
+    }).sort(function (a, b) { return a.y - b.y; }).map(function (o) { return o.id; });
+    var full = (st.order[n.list] || []).slice();
+    shown.forEach(function (id) { if (full.indexOf(id) < 0) full.push(id); });
+    full = full.filter(function (id) { return id !== n.id; });
+    var i = at.before !== null ? full.indexOf(at.before) : full.indexOf(at.after) + 1;
+    full.splice(i < 0 ? full.length : i, 0, n.id);
+    st.order[n.list] = full;
+    saveLayout();
+    draw();
+  }
+  function moveValue(n, facet) {                             // (0.10.9.1) dropped into a (sub)category
+    setState("Moving " + n.v.value + " into " + catLabel(facet, 2).toLowerCase() + "…", "busy");
+    S.dict("POST", "map", { move_value: { id: n.id, facet: facet } }).then(function (r) {
+      if (!r || r.error) { setState((r && r.error) || "not moved", "warn"); draw(); return; }
+      if (D.saved) D.saved();
+      if (st.byId[n.id]) st.byId[n.id].facet = facet;         // drawn there at once, the map read again below
+      draw();
+      var nested = (st.byId[n.id].parents || []).some(function (p) { return st.byId[p] && colOf(st.byId[p].facet) === n.cat; });
+      setState(n.v.value + " is in " + catLabel(facet, 2).toLowerCase() + " now" +
+               (nested ? " (drawn inside the part it belongs to)" : ""), "changed");
+      load(true);
+    }, function () { setState("not moved", "warn"); draw(); });
   }
   /* In Edit, the name of a category is dragged: its boxes follow (the ones an admin placed too), the lines are
      drawn again at the end. A click without a move still folds or opens the category. */
   function dragColumn(g, h) {
     var start = null, moving = [];
     g.addEventListener("pointerdown", function (ev) {
-      if (ev.target.closest && ev.target.closest(".map-hide, .map-info")) return;
+      if (ev.target.closest && ev.target.closest(".map-hide, .map-info, .map-addsub, .map-funnel")) return;
       start = { x: ev.clientX, y: ev.clientY, dx: 0, dy: 0 };
       moving = Array.prototype.filter.call(st.svg.querySelectorAll(".map-head, .map-node, .map-none"), function (x) {
         return x.getAttribute("data-cat") === h.cat; }).map(function (x) {
@@ -1747,10 +1952,6 @@
       if (start && g._dragged) {
         var off = st.cols[h.cat] || [0, 0];
         st.cols[h.cat] = [Math.round((+off[0] || 0) + start.dx), Math.round((+off[1] || 0) + start.dy)];
-        st.data.values.forEach(function (v) {                  // the boxes placed by hand keep their place in it
-          var p = st.positions[v.id];
-          if (v.facet === h.cat && p) st.positions[v.id] = [p[0] + start.dx, p[1] + start.dy];
-        });
         saveLayout();
         draw();
       }
@@ -1761,7 +1962,7 @@
     clearTimeout(st.saveTimer);
     st.saveTimer = setTimeout(function () {
       S.dict("POST", "map", { layout: { positions: st.positions, hidden: st.hidden, folded: st.folded,
-                                         columns: st.cols, groups: st.groups } });
+                                         columns: st.cols, groups: st.groups, order: st.order } });
     }, 600);
   }
   /* The map on the whole screen: the browser's full screen when it allows it, else the whole window. */

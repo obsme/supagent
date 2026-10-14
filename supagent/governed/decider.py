@@ -839,10 +839,18 @@ def table_info(c: Candidate, ref: str) -> TableInfo:
             .order_by(KObject.name).all())
     matched = {f.lower() for f in c.fields}
     rows.sort(key=lambda o: (o.name.lower() not in matched, o.name.lower() != t.time_field.lower(), o.name))
+    sampled = False
+    if c.kind == "index":                  # (0.10.9) an index learned on a sample: its fields' values are a sample
+        from supagent.knowledge.values import learned_whole
+
+        ix = db.session.query(KObject).filter(KObject.source_id == src.id, KObject.kind == "index",
+                                              KObject.name == c.table, KObject.gone_at.is_(None)).first()
+        sampled = not learned_whole((ix.stats or {}) if ix is not None else {})
     for o in rows:
         st = o.stats or {}
         col: dict[str, Any] = {"type": o.data_type or "", "unit": o.unit or "",
                                "values": list(st.get("values") or [])[:40], "cardinality": st.get("cardinality"),
+                               "partial": bool(st.get("partial")) or sampled,
                                "about": (o.description or o.backend_help or "")[:300],
                                "ai": bool(o.description) and o.description_source == "llm" and not o.verified}
         if st.get("min") is not None and st.get("max") is not None:

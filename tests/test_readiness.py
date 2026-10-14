@@ -80,11 +80,13 @@ def test_what_a_question_is_given_and_the_names_nothing_knows(gaps, app):
 
 
 def test_the_map_page_lists_what_is_missing_to_admins_only(gaps, app):
+    """(0.10.9.1) asked by the page once the map is drawn (/api/map/missing), no longer with the map"""
     with _client(app, "admin") as c:
-        missing = c.get("/supagent/dictionary/api/map").get_json()["missing"]
+        assert "missing" not in c.get("/supagent/dictionary/api/map").get_json()
+        missing = c.get("/supagent/dictionary/api/map/missing").get_json()["missing"]
     assert any("Refunds" in x for x in missing) and not any("wait in Data dictionary" in x for x in missing)
     with _client(app, "alice") as c:
-        assert c.get("/supagent/dictionary/api/map").get_json()["missing"] == []
+        assert c.get("/supagent/dictionary/api/map/missing").get_json()["missing"] == []
 
 
 def test_nothing_drawn_yet(world, app):  # noqa: F811

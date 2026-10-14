@@ -188,6 +188,12 @@ def profile_said(prof: dict | None) -> list[str]:
     if prof.get("context"):
         out.append(f"context: {int(prof['context']):,} tokens" + (" (small for long investigations: 32k or more "
                                                                      "advised)" if int(prof["context"]) < 32768 else ""))
+    try:                                                   # (0.10.9.1) what the agent fills of it
+        from supagent.budget import described
+
+        out.append("context profile: " + described())
+    except Exception:  # pylint: disable=broad-except   (outside an app: no settings)
+        pass
     return out
 
 
@@ -684,7 +690,20 @@ class LLM:
             return {}, str(ex)[:300]
 
     def _context_size(self) -> int | None:
-        """The model's context, when the server says it (vLLM: max_model_len in /models; llama.cpp: /props)."""
+        """The model's context per request, when the server says it (vLLM: max_model_len in /models; llama.cpp: each
+        slot's n_ctx in /slots, else /props). (0.10.9.1) A llama.cpp server of several slots may split its context
+        between them: what one request may read is a slot's, which sets the agent's context profile."""
+        try:
+            root = re.sub(r"/v1/?$", "", self.base)
+            slots = self.session.get(root + "/slots", headers={**(self.cfg.extra_headers or {}),
+                                                              **auth_headers(self.cfg)},
+                                     verify=self.cfg.verify(), timeout=20).json()
+            per_slot = [int(x["n_ctx"]) for x in slots if isinstance(x, dict) and x.get("n_ctx")] \
+                if isinstance(slots, list) else []
+            if per_slot:
+                return min(per_slot)
+        except Exception:  # pylint: disable=broad-except   (not llama.cpp, or its slots endpoint is off)
+            pass
         try:
             for m in self._request("GET", "/models").json().get("data") or []:
                 if m.get("id") == self.model:
@@ -788,12 +807,14 @@ class LLM:
 
 def ensure_profile() -> dict | None:
     """(0.10.7) The LLM profiled when none is known for its address and model, or it is PROFILE_DAYS old (the
-    nightly learning calls it): what a new or upgraded server does is found before the users' questions meet it."""
+    nightly learning calls it): what a new or upgraded server does is found before the users' questions meet it.
+    (0.10.9.1) A profile made before the context window was read (0.10.8) is made again: the context profile needs
+    it."""
     try:
         client = LLM()
         prof = stored_profile()
         fresh = prof and prof.get("source") == "probe" and prof.get("base") == client.base and \
-            prof.get("model") == client.model and prof.get("at") and \
+            prof.get("model") == client.model and prof.get("at") and "context" in prof and \
             datetime.datetime.utcnow() - datetime.datetime.fromisoformat(str(prof["at"])) < \
             datetime.timedelta(days=PROFILE_DAYS)
         return prof if fresh else client.probe()

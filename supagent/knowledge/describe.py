@@ -152,7 +152,8 @@ def _days(f: KObject | None) -> bool:
     return day_stats(f.stats or {}) and osagg_reads_days()
 
 
-def _field_line(f: KObject) -> str:
+def _field_line(f: KObject, sampled: bool = False) -> str:
+    """sampled: (0.10.9) its index was learned on a sample of its documents: its values are the ones seen there."""
     st = f.stats or {}
     line = f'  - "{f.name}" ({f.data_type or "?"}{", " + f.unit if f.unit else ""})'
     if f.description:
@@ -161,7 +162,8 @@ def _field_line(f: KObject) -> str:
         line += f" [also: {', '.join(map(str, f.synonyms))}]"
     if st.get("values"):
         vals = st["values"]
-        line += f" values: {', '.join(map(str, vals[:30]))}" + (f" ... ({len(vals)})" if len(vals) > 30 else "")
+        line += (" values seen in a sample (others may exist): " if sampled or st.get("partial") else " values: ") + \
+            ", ".join(map(str, vals[:30])) + (f" ... ({len(vals)})" if len(vals) > 30 else "")
     elif st.get("cardinality") is not None:
         line += f" {_num(st['cardinality'])} distinct values"
     if st.get("min") is not None and "values" not in st and _days(f):
@@ -259,7 +261,10 @@ def _indices(src: Source, database: Any, ws: set[str], only: str | None,
         if tf and not any(f.name == tf for f in keep):
             keep += [f for f in fs if f.name == tf]
         out.append("  fields:" if keep else "  fields: (none matches the topic; call describe_data without topic)")
-        out += [_field_line(f) for f in keep]
+        from supagent.knowledge.values import learned_whole
+
+        sampled = not learned_whole(st)
+        out += [_field_line(f, sampled) for f in keep]
         rest = sorted(f.name for f in fs if f not in keep)
         if rest:
             out.append("  other fields: " + ", ".join(f'"{n}"' for n in rest)[:1500])

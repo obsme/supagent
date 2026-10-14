@@ -383,3 +383,23 @@ def test_the_map_tool_is_offered_for_a_question_of_dependencies():
         assert "system_links" in offered(q), q
     for q in ("How many orders failed between 10:00 and 12:00?", "What was the CPU of web-1 yesterday?"):
         assert "system_links" not in offered(q), q
+
+
+def test_the_knowledge_found_never_gives_way_to_the_memories(app, clean):
+    """(0.10.9.1) Memories are given whole and first, on top of the knowledge found: the team's formulas and what a
+    field means are never cut to make room for them."""
+    alice = _client(app, "alice")
+    alice.post(API, json={"text": "Desk ZQXDESK is closed: count its trades apart.", "meeting_on": "2026-09-30"})
+    with app.app_context():
+        from superset.extensions import db
+
+        from supagent.knowledge.index import sync
+        from supagent.knowledge.search import knowledge_block
+        from supagent.security import acting_as
+
+        sync(("note:",))
+        with acting_as("bob"):
+            alone = knowledge_block("How many trades did desk ZQXDESK book?")
+            with_memories = knowledge_block("How many trades did desk ZQXDESK book?", memory_over=100000)
+        assert alone and with_memories == alone
+        db.session.remove()

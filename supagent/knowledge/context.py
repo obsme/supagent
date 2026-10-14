@@ -55,6 +55,7 @@ FIELD_CHARS = 240          # of a field's description on that list
 FORMULA_CHARS = 800        # of a formula on a data source's page
 SUMMARY_TOKENS = 3000      # of an LLM summary page; cut by that limit, it is asked to go on (CONTINUATIONS times)
 CONTINUATIONS = 2
+LLM_CONTEXT_SLUGS = ("llm-context", "llm-context-light")   # (0.10.9.1) the LLM context's two versions
 REJECTED = "rejected"      # the kind of a new page a person refused: not shown nor searched; proposed again (to
 #                            review) only when its evidence changes
 
@@ -139,12 +140,19 @@ def _fields_of(source_id: int, items: list[tuple[str, str]]) -> list[dict[str, A
     out: list[dict[str, Any]] = []
     if not limit:
         return out
+    from supagent.knowledge.values import learned_whole
+
     for kind, name in items:
         rows = (db.session.query(KObject).filter(KObject.source_id == source_id, KObject.parent == name,
                                                  KObject.kind == ("label" if kind == "metric" else "field"),
                                                  KObject.gone_at.is_(None)).all())
         if not rows:
             continue
+        sampled = False                    # (0.10.9) an index learned on a sample: its fields' values are a sample
+        if kind != "metric":
+            ix = db.session.query(KObject).filter(KObject.source_id == source_id, KObject.kind == "index",
+                                                  KObject.name == name, KObject.gone_at.is_(None)).first()
+            sampled = not learned_whole((ix.stats or {}) if ix is not None else {})
 
         def rank(o: KObject) -> tuple:
             st = o.stats or {}
@@ -160,7 +168,8 @@ def _fields_of(source_id: int, items: list[tuple[str, str]]) -> list[dict[str, A
             few = vals and len(vals) <= 12 and (not isinstance(card, (int, float)) or card <= 12)
             shown.append({"name": o.name, "type": o.data_type or o.metric_type or "",
                           "about": clip(o.description or o.backend_help or "", FIELD_CHARS),
-                          "values": [str(v) for v in vals[:12]] if few else []})
+                          "values": [str(v) for v in vals[:12]] if few else [],
+                          "sampled": sampled or bool(st.get("partial"))})
         out.append({"kind": kind, "name": name, "child": "label" if kind == "metric" else "field",
                     "total": len(rows), "shown": shown})
     return out
@@ -294,7 +303,9 @@ def fact_pages(ev: dict[str, Any]) -> list[dict[str, Any]]:
             for x in f["shown"]:
                 lines.append(f"- `{x['name']}`" + (f" ({x['type']})" if x["type"] else "")
                              + (f": {_sentence(x['about'])}" if x["about"] else "")
-                             + (f"{' ' if x['about'] else ': '}Values: {', '.join(x['values'])}." if x["values"] else ""))
+                             + (f"{' ' if x['about'] else ': '}"
+                                + ("Values seen in a sample (others may exist): " if x.get("sampled") else "Values: ")
+                                + f"{', '.join(x['values'])}." if x["values"] else ""))
             if len(f["shown"]) < f["total"]:
                 lines.append(f"- ... and {f['total'] - len(f['shown']):,} more in the Data dictionary")
         formulas = [e for e in ev["entries"] if e["database_id"] == dbid and e["classification"] == "formula"]
@@ -619,7 +630,8 @@ def save_page(page: dict[str, Any], kind: str, input_hash: str, llm_calls: int =
         return "unchanged" if p.kind != REJECTED else "rejected"
     if p is not None and input_hash and input_hash == (p.compared or {}).get("rejected_hash"):
         return "rejected"                                  # a person refused this very version
-    if p is not None and p.content and (settings.get("context.review") or p.kind == REJECTED):
+    if p is not None and p.content and (settings.get("context.review") or p.kind == REJECTED) and \
+            page["slug"] not in LLM_CONTEXT_SLUGS:       # (0.10.9.1) the LLM context follows the learning at once
         return _propose(p, page, kind, input_hash)
     if p is None:
         p = ContextPage(section=page["section"], slug=page["slug"], version=0)
@@ -698,6 +710,8 @@ def proposals() -> list[dict[str, Any]]:
     out = []
     for p in db.session.query(ContextPage).order_by(ContextPage.section, ContextPage.title):
         refused = p.kind == REJECTED
+        if p.slug in LLM_CONTEXT_SLUGS:                  # (0.10.9.1) written from the rest at every learning: its
+            continue                                     # page shows it, a person may edit it, nothing to validate
         if p.proposed_content or p.proposed_drop or (not refused and not p.reviewed_by and
                                                      (p.author or "agent") == "agent"):
             c = p.compared or {}
@@ -779,7 +793,18 @@ def build_context(reason: str = "manual", llm: bool = True, force: bool = False)
                 except Exception:  # pylint: disable=broad-except   (the other pages are written)
                     db.session.rollback()
                     log.warning("supagent context: the pages of the documents' facts", exc_info=True)
-            for page in fact_pages(ev) + boards + understood:
+            systems: list[dict[str, Any]] = []
+            if settings.get("context.system_pages"):     # (0.10.10) the communities of the map: a page each
+                try:
+                    from supagent.knowledge.communities import pages as system_pages
+
+                    systems = system_pages()
+                except Exception:  # pylint: disable=broad-except   (the other pages are written)
+                    db.session.rollback()
+                    log.warning("supagent context: the systems' pages", exc_info=True)
+            from supagent.knowledge.llm_context import pages as llm_pages   # (0.10.9.1) the LLM context, its
+            #                                                                 full and its light version
+            for page in fact_pages(ev) + boards + understood + systems + llm_pages(ev):
                 check()
                 keep.add((page["section"], page["slug"]))
                 done[save_page(page, "facts", _hash([page["title"], page["content"], page["database_ids"]]))] += 1

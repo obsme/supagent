@@ -100,3 +100,32 @@ def test_the_catalog_refuses_a_second_entry_of_the_same_title_or_content(clean):
                    entry_id=other.id)                                          # renamed onto another one
     save_entry({"title": "No UAT", "classification": "rule", "content": "Exclude UAT unless the question asks."},
                by="admin", entry_id=e.id)                                      # its own title: fine
+
+
+def test_a_memory_is_edited_by_its_author_or_an_editor_and_kept_as_written(clean, app):
+    """(0.10.9.1) Edit on the memories: one's own by its author, a team's by an editor or an admin; the text kept as
+    written, its lines included."""
+    from superset.extensions import db, security_manager as sm
+
+    from supagent.knowledge.memory import add
+    from supagent.models import Memory
+
+    alice = sm.find_user(username="alice").id
+    mine = add(alice, "Durations in minutes")
+    team = add(sm.find_user(username="admin").id, "Exclude the test pool", scope="team", approved_by="admin")
+    mine_id, team_id = mine.id, team.id
+    text = "Durations in minutes,\n  rounded to one decimal"
+    with app.app_context(), app.test_client() as c:
+        login(c, "alice")
+        resp = c.put(f"/supagent/api/memory/{mine_id}", json={"text": text, "kind": "rule"})
+        r = resp.get_json()
+        assert resp.status_code == 200 and "memory" in r, (resp.status_code, r)
+        assert r["memory"]["text"] == text and r["memory"]["kind"] == "rule"
+        assert c.put(f"/supagent/api/memory/{team_id}", json={"text": "no"}).status_code == 404   # not hers
+        assert c.put(f"/supagent/api/memory/{mine_id}", json={"text": "  "}).status_code == 400
+    with app.app_context(), app.test_client() as c:
+        login(c, "admin")
+        assert c.put(f"/supagent/api/memory/{team_id}", json={"text": "Exclude the test pool and UAT"}).status_code == 200
+    db.session.expire_all()
+    assert db.session.get(Memory, mine_id).text == text
+    assert db.session.get(Memory, team_id).text == "Exclude the test pool and UAT"

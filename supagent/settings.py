@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,21 @@ SPECS: list[Spec] = [
     Spec("agent.compact_at", 24000, "int", "Prompt tokens of an answer's conversation from which the older tool "
          "results are cut to their first lines (then again at half as much more), the work plan given again: models "
          "read long contexts worse well before their limit (0: only when the context is full)"),
+    Spec("agent.context_profile", "auto", "choice", "(0.10.9.1) How much of the model's context the agent fills: "
+         "short (a model of 32k-64k tokens per request: the knowledge given with a question, the tool results, the "
+         "earlier messages and the Context in their short sizes; older results cut from 24,000 prompt tokens), long (a "
+         "model of 128k or 256k: sizes grown with its window, the Context's sections given whole, older results cut "
+         "from 60 % of the window), auto (long when the LLM's server says 100,000 tokens per request or more, or "
+         "agent.context_tokens does). A size set here (agent.compact_at, search.prompt_chars, memory.prompt_chars) "
+         "wins over the profile's", choices=("auto", "short", "long")),
+    Spec("agent.llm_context", True, "bool", "(0.10.9.1) Give the LLM context the learning writes (the Context's "
+         "pages \"LLM context (full)\" and \"(light)\": the catalog's rules, glossary, formulas and facts, the main "
+         "data with its meaning and fields, the links between the databases, the questions answered well before) with "
+         "every question: the full version to a model of the long context profile; only what the user's databases "
+         "hold. (0.10.9.3) A model of the short profile (32k-64k tokens) is given the light version only when this "
+         "is set on here: on such a model it made the agent answer some follow-ups from it without a query"),
+    Spec("agent.context_tokens", 0, "int", "(0.10.9.1) Tokens the model reads per request, when its server does not "
+         "say it (a gateway): sets the context profile (auto) and the long profile's sizes (0: as the server says)"),
     Spec("agent.answer_seconds", 1500, "int", "After this long, an answer still calling tools is told to answer "
          "now (two calls left, then its answer from what it found and its work plan's notes): on a slow or busy LLM "
          "server an investigation ends with an answer, not a time-out. 0: no limit (the calls only)"),
@@ -246,6 +262,9 @@ SPECS: list[Spec] = [
          "next night)"),
     Spec("charts.max_llm_calls", 40, "int", "LLM calls a night at most to write what the charts show (written again "
          "only for a chart that changed)"),
+    Spec("context.system_pages", True, "bool", "(0.10.10) A Context page for each system of the System map (a value made "
+         "of parts, with where they run, their data, what they use and what uses them, their owner), for each domain, "
+         "team and environment holding them: written from the approved map without the LLM, again when it changes"),
     Spec("context.max_llm_calls", 12, "int", "LLM calls of a Context build at most (its summary pages: only the ones "
          "whose sources changed are written again; the facts pages need no LLM)"),
     Spec("context.fields_shown", 30, "int", "The fields (or labels) listed on a data source's Context page for each of "
@@ -301,6 +320,17 @@ SPECS: list[Spec] = [
          "server with its component, a tenant with its servers: 0.9.6); off: proposed in To review like an index's"),
     Spec("categories.data_link_days", 21, "int", "A link read from the data that the data has not shown for this many "
          "days is proposed for removal (never removed alone)"),
+    Spec("learn.merge_duplicates", "propose", "choice", "(0.10.9.2) One value per thing: the learning's proposals "
+         "that name the same thing (Payment Service, payment_service, payment-svc, billing-prd...) are put together "
+         "into one at each learning; a proposal of a value a person has waits as \"the same as\" it (propose: To "
+         "review merges them in one click; auto: a name written the same way is merged at once; off: as before)",
+         choices=("propose", "auto", "off")),
+    Spec("learn.merge_llm_calls", 20, "int", "(0.10.9.2) Calls to the LLM per learning to decide the doubtful "
+         "groups of names (an acronym, most words shared, a version apart); 0: only the names written the same way "
+         "are put together"),
+    Spec("learn.new_part_min_units", 2, "int", "(0.10.9.2) A part the documents name and no value names yet is "
+         "proposed when the code, a configuration, a diagram or the data says it, or when this many pages or files "
+         "say it: a name one page says once stays in the search, no value to review (1: every name, as before)"),
     Spec("categories.learned_max_chars", 30, "int", "(0.10.6.2) A value the learning proposes (an application, a "
          "component, a subject, a value of a category of yours filled by hand) has a name of this many characters at "
          "most: a longer one is a sentence or a description, not proposed (a host's full name: its first label, the "
@@ -561,21 +591,59 @@ def _coerce(spec: Spec, value: Any) -> Any:
     return value
 
 
+_MEMO = "_supagent_settings"     # (0.10.9.1) flask.g: the stored settings read once for a page's request
+
+
+@contextmanager
+def memo() -> Iterator[None]:
+    """(0.10.9.1) Within it, the stored settings are read from the database once (one query for all their rows, kept
+    as plain values): a page of the Data dictionary reads dozens of them, a setting left at its default (no row) was
+    a query each time."""
+    from flask import g
+
+    from supagent.models import Setting
+    from superset import db
+
+    mine = getattr(g, _MEMO, None) is None
+    if mine:
+        try:
+            setattr(g, _MEMO, {r.key: (r.value, r.secret) for r in db.session.query(Setting)})
+        except Exception:  # pylint: disable=broad-except  (tables not created yet: read one by one)
+            db.session.rollback()
+            mine = False
+    try:
+        yield
+    finally:
+        if mine:
+            g.pop(_MEMO, None)
+
+
+def _memo() -> dict[str, tuple[Any, Any]] | None:
+    from flask import g, has_app_context
+
+    return getattr(g, _MEMO, None) if has_app_context() else None
+
+
 def get(key: str) -> Any:
     spec = BY_KEY[key]
     from supagent.models import Setting
     from superset import db
 
-    try:
-        row = db.session.get(Setting, key)
-    except Exception:  # pylint: disable=broad-except  (tables not created yet)
-        db.session.rollback()
-        row = None
-    if row is not None:
-        if spec.secret and row.secret:
-            return row.secret
-        if not spec.secret and row.value is not None:
-            return _coerce(spec, row.value)
+    rows = _memo()
+    if rows is not None:
+        value, secret = rows.get(key) or (None, None)
+    else:
+        try:
+            row = db.session.get(Setting, key)
+        except Exception:  # pylint: disable=broad-except  (tables not created yet)
+            db.session.rollback()
+            row = None
+        value = row.value if row is not None else None
+        secret = row.secret if row is not None and spec.secret else None
+    if spec.secret and secret:
+        return secret
+    if not spec.secret and value is not None:
+        return _coerce(spec, value)
     from flask import current_app
 
     conf = current_app.config.get(_env_name(key)) if current_app else None
@@ -585,6 +653,34 @@ def get(key: str) -> Any:
     if env is not None:
         return _coerce(spec, env)
     return spec.default
+
+
+def explicit(key: str) -> Any:
+    """(0.10.9.1) The value a person set for a setting (stored, or in superset_config.py or the environment), else
+    None: what a profile's own default may replace."""
+    spec = BY_KEY[key]
+    from supagent.models import Setting
+    from superset import db
+
+    rows = _memo()
+    if rows is not None:
+        value = (rows.get(key) or (None, None))[0]
+    else:
+        try:
+            row = db.session.get(Setting, key)
+        except Exception:  # pylint: disable=broad-except  (tables not created yet)
+            db.session.rollback()
+            row = None
+        value = row.value if row is not None else None
+    if not spec.secret and value is not None:
+        return _coerce(spec, value)
+    from flask import current_app
+
+    conf = current_app.config.get(_env_name(key)) if current_app else None
+    if conf is not None:
+        return _coerce(spec, conf)
+    env = os.environ.get(_env_name(key))
+    return _coerce(spec, env) if env is not None else None
 
 
 def set_value(key: str, value: Any, by: str = "") -> None:
@@ -602,8 +698,12 @@ def set_value(key: str, value: Any, by: str = "") -> None:
     else:
         row.value = None if value is None else _coerce(spec, value)
     row.updated_by = by
+    stored = (row.value, row.secret)
     db.session.merge(row)
     db.session.commit()
+    rows = _memo()
+    if rows is not None:                       # a page's request that also writes one: read as written
+        rows[key] = stored
 
 
 def describe() -> list[dict]:

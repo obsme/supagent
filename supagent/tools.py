@@ -3937,9 +3937,14 @@ def _own_lines(p: dict[str, Any], key: str, run: Any, where_now: str, table: str
         p["names"], p["wordings"], p["read"] = names, wordings, sum(wordings.values())
 
 
-def _fitted_logs(res: dict[str, Any], chars: int = GROUP_CHARS) -> dict[str, Any]:
+def _fitted_logs(res: dict[str, Any], chars: int | None = None) -> dict[str, Any]:
     """A comparison of logs within the room of a tool result: fewer wordings and examples first, then the patterns
     of every day, then the least of the others."""
+    if chars is None:
+        from supagent.budget import size as room
+
+        chars = room("group_chars")   # (0.10.9.1) by the context profile (GROUP_CHARS: the short one's)
+
     def size() -> int:
         return len(json.dumps(res, default=str))
 
@@ -3972,10 +3977,15 @@ def _long_past(conn: Any, end: dt.datetime) -> str | None:
             "today, call again with end = now")
 
 
-def _fitted(res: dict[str, Any], chars: int = GROUP_CHARS) -> dict[str, Any]:
+def _fitted(res: dict[str, Any], chars: int | None = None) -> dict[str, Any]:
     """A comparison's result within the room of a tool result: what repeats the conclusion goes first (the other
     fields a measure is also seen on, the fourth measure's figures, the oldest related records), then what the
     conclusion already says in words."""
+    if chars is None:
+        from supagent.budget import size as room
+
+        chars = room("group_chars")   # (0.10.9.1) by the context profile (GROUP_CHARS: the short one's)
+
     def size() -> int:
         return len(json.dumps(res, default=str))
 

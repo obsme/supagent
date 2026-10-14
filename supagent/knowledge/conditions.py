@@ -491,10 +491,32 @@ def _told(c: Condition) -> set[tuple]:
     return {(c.column.lower(), negative, str(v)) for v in c.values}
 
 
+def call_time_fields(tool: str, args: dict) -> set[str]:
+    """(0.10.9) The time fields of the tables a call reads (the dictionary's): a bound on one is the question's period,
+    which the period check asks for, never a condition nobody asked for, whatever its form (epoch milliseconds
+    included: the period check asked for startTimeMillis and this check refused its bounds, in turn, until the calls
+    ran out)."""
+    try:
+        from supagent.knowledge.excluded import query_texts
+        from supagent.knowledge.period import _time_fields
+        from supagent.knowledge.rulecheck import _tables
+
+        tables: set[str] = set()
+        for q in query_texts(args):
+            tables |= set(_tables(q or ""))
+        return set(_time_fields(tables).values()) if tables else set()
+    except Exception:  # pylint: disable=broad-except   (no dictionary: the usual time columns only)
+        from superset import db
+
+        db.session.rollback()
+        return set()
+
+
 def refusal(support: Support | None, tool: str, args: dict) -> str | None:
     if support is None:
         return None
-    found = [c for c in unsaid(call_conditions(tool, args), support) if not _told(c) <= support.told]
+    found = [c for c in unsaid(call_conditions(tool, args), support, call_time_fields(tool, args))
+             if not _told(c) <= support.told]
     if not found:                                       # each one is sent back once: kept, the answer says it
         return None
     support.told.update(k for c in found for k in _told(c))
@@ -516,7 +538,8 @@ def note(support: Support | None, trace: list[dict]) -> str:
     found: list[Condition] = []
     for t in trace:
         if t.get("status") == "done":
-            found += unsaid(call_conditions(t.get("called") or t["tool"], t.get("args") or {}), support)
+            tool, args = t.get("called") or t["tool"], t.get("args") or {}
+            found += unsaid(call_conditions(tool, args), support, call_time_fields(tool, args))
     if not found:
         return ""
     said = "; ".join(dict.fromkeys(c.said() for c in found))

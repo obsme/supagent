@@ -30,10 +30,12 @@ MIN_FACTS = 2              # a part named once only gets no page of its own
 MAX_LINES = 40             # statements of one kind on a page
 VERBS_OUT = {"calls": "calls", "sends_to": "sends data to", "reads_from": "reads from", "uses": "uses",
              "runs_on": "runs on", "owned_by": "is owned by", "collects": "collects the logs of", "scrapes": "scrapes",
-             "monitors": "monitors", "in_group": "is in the server group"}
+             "monitors": "monitors", "in_group": "is in the server group", "powered_by": "is powered by",
+             "connects_to": "connects to"}
 VERBS_IN = {"calls": "calls it", "sends_to": "sends it data", "reads_from": "reads from it", "uses": "uses it",
             "runs_on": "runs on it", "owned_by": "owns it", "collects": "collects its logs", "scrapes": "scrapes it",
-            "monitors": "monitors it", "in_group": "is one of its servers"}
+            "monitors": "monitors it", "in_group": "is one of its servers", "powered_by": "powers it",
+            "connects_to": "is connected to it"}
 GROUP = "group:"           # an inventory's group of servers: a page of its own, never a part's of the same name
 DATA_VERBS = {"logs_to": "logs to", "emits": "emits", "writes": "writes", "watched_by": "is watched by"}
 HOW = {"code": "code", "config": "configuration", "inferred": "inferred", "diagram": "diagram", "doc": "document",

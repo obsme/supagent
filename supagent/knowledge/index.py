@@ -246,6 +246,9 @@ def _object_pieces(only: set[int] | None = None) -> Iterator[dict[str, Any]]:
         if said.get("goes_down"):
             lines.append("a level, not a count (its values go up and down)")
         kid_word = "labels" if o.kind == "metric" else "fields"
+        from supagent.knowledge.values import learned_whole
+
+        whole = learned_whole(st)
         described = []
         for k in sorted(kids, key=lambda x: x.name)[:120]:
             item = k.name
@@ -257,6 +260,8 @@ def _object_pieces(only: set[int] | None = None) -> Iterator[dict[str, Any]]:
             vals = kst.get("values") or []
             if vals and len(vals) <= 20 and not kst.get("partial"):     # every value, not a sample
                 item += ": " + ", ".join(sorted(map(str, vals))[:8])
+                if o.kind == "index" and not whole:   # (0.10.9) an index learned on a sample: the values seen there
+                    item += " (seen in a sample; others may exist)"
             described.append(item)
         if described:
             lines.append(f"{kid_word}: " + "; ".join(described))
@@ -367,6 +372,7 @@ def _titled(name: str, where: str, category: str = "") -> str:
 
 
 CATALOG_COPIES = ("glossary", "rules-and-facts")       # Context pages that gather catalog entries and memories
+LLM_CONTEXT_PAGES = ("llm-context", "llm-context-light")   # (0.10.9.1) given whole with every question: not searched
 
 
 def _context_pieces() -> Iterator[dict[str, Any]]:
@@ -374,8 +380,9 @@ def _context_pieces() -> Iterator[dict[str, Any]]:
     from supagent.models import ContextPage
 
     for p in db.session.query(ContextPage):
-        if p.kind == "facts" and p.slug in CATALOG_COPIES:
-            continue                                    # the catalog's own pieces are searched
+        if p.kind == "facts" and p.slug in CATALOG_COPIES or p.slug in LLM_CONTEXT_PAGES:
+            continue                                    # the catalog's own pieces are searched; (0.10.9.1) the LLM
+        #                                                 context is given whole, its pieces are the others'
         if p.kind == "rejected":
             continue                                    # a new page a person refused: not searched
         ai = p.kind == "summary" and (p.author or "agent") == "agent"
@@ -907,6 +914,10 @@ def _index_once() -> dict[str, Any]:
                 from supagent.knowledge.proposals import propose
 
                 out["proposed"] = propose()
+                if str(settings.get("learn.merge_duplicates") or "propose") != "off":   # (0.10.9.2) its names written
+                    from supagent.knowledge.consolidate import run as merge_names    # differently: one value (no
+                                                                                     # LLM here: the learning asks it)
+                    out["merged"] = {k: v for k, v in merge_names(llm_calls=0).items() if k != "examples"}
     except Exception as ex:  # pylint: disable=broad-except   (the search's pieces go on)
         db.session.rollback()
         log.warning("supagent: the documents' facts: %s", ex)

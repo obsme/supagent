@@ -140,3 +140,19 @@ def test_routes_a_request_as_a_thing_and_other_languages(ctx):
             ("Ratings", "sends_to", "MongoDB"), ("Pod", "sends_to", "db"), ("Backend", "calls", "db"),
             ("Kibana", "reads_from", "Elasticsearch")} <= t
     assert not any(o == "frontend" for _s, _v, o in t)
+
+
+def test_pages_about_things_files_to_fetch_and_lists_of_sites_are_no_endpoints(ctx):
+    """(0.10.10) A registry of formats with each format's page (description_url=), a data file fetched by its address
+    (genomes.txt), and a file listing many sites of the internet to choose from (data sources, sign-in providers):
+    no service of the system calls them. An address under an endpoint's key stays a call."""
+    xml = ('<datatype extension="dcm" description_url="https://formats.example-imaging.org/dicom"/>\n'
+           '<datatype extension="cif" help_url="https://docs.crystals.example.net/cif"/>\n'
+           '<file url="http://genomes.example-institute.org/genomes/genomes.txt" />\n')
+    assert _code("config/formats_conf.xml", xml, "portal", ("portal",)) == set()
+    sources = "".join(f"- id: src{i}\n  url: https://data.site{i}.example{i}.org/\n" for i in range(9))
+    assert _code("config/file_sources.yml", sources + "- id: own\n  api_url: https://orders-api.internal-a.com/v1\n"
+                 "  backup_url: https://billing-api.internal-a.com/v1\n", "portal", ("portal",)) == \
+        {("portal", "calls", "internal-a")}             # a site named twice (the system's own): still called
+    few = "".join(f"- id: src{i}\n  url: https://data.site{i}.example{i}.org/\n" for i in range(3))
+    assert len(_code("config/file_sources.yml", few, "portal", ("portal",))) == 3   # a few sites: what it calls

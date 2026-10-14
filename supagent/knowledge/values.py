@@ -46,29 +46,44 @@ def unknown(sql: str) -> list[dict[str, Any]]:
                                                                    KObject.name.in_(list(tables)),
                                                                    KObject.gone_at.is_(None))}
     out: list[dict[str, Any]] = []
+    key = lambda x: re.sub(r"[\s_.-]+", "", str(x or "").lower())                # noqa: E731
     for c in conds:
         same = [o for o in fields if o.name.lower() == c.column.lower()]
-        if not same or any(not isinstance((o.stats or {}).get("values"), list) for o in same):
-            continue                                       # a field with no list may hold it
-        if any(len((o.stats or {}).get("values") or []) > VOCABULARY for o in same):
-            continue                                       # hosts, ids, targets: new ones come every day
-        if not all(_whole(indices.get(o.parent)) for o in same):
-            continue                                       # learned on a sample: a rare value may be missing
+        if not same:
+            continue
+        # a field with no list may hold it; hosts, ids, targets (new ones come every day); learned on a sample (a
+        # rare value may be missing): not checked against the field's values ...
+        checkable = all(isinstance((o.stats or {}).get("values"), list) for o in same) and \
+            not any(len((o.stats or {}).get("values") or []) > VOCABULARY for o in same) and \
+            all(_whole(indices.get(o.parent)) for o in same)
         held = {str(v).lower() for o in same for v in (o.stats or {}).get("values") or []}
         f = same[0]
+        columns = {key(o.name): o.name for o in fields if o.parent == f.parent and o.name.lower() != f.name.lower()}
         for v in c.values:
             low = str(v).lower()
             if not low or low in held:
                 continue
+            column = columns.get(key(v))                  # (0.10.9) ... but a value that is another field's own name
+            if not checkable and not column:              # ("STATUS" = 'RELAUNCHED' when RELAUNCHED is a field of
+                continue                                  # the table: its flag) is checked on a sample too
             elsewhere = [o.name for o in fields if o.parent == f.parent and o.name.lower() != f.name.lower() and
-                         (o.name.lower() == low or low in {str(x).lower() for x in (o.stats or {}).get("values") or []})]
+                         (o.name.lower() == low or (checkable and low in {str(x).lower() for x in
+                                                                          (o.stats or {}).get("values") or []}))]
+            if column and column not in elsewhere:
+                elsewhere.insert(0, column)
             out.append({"table": f.parent, "field": f.name, "value": v, "op": c.op,
                         "values": [str(x) for x in (f.stats or {}).get("values") or []], "elsewhere": elsewhere})
     return out
 
 
 def _whole(index: Any) -> bool:
-    st = (index.stats or {}) if index is not None else {}
+    return learned_whole((index.stats or {}) if index is not None else {})
+
+
+def learned_whole(index_stats: dict[str, Any] | None) -> bool:
+    """(0.10.9) Was this index learned on all its documents? Else its fields' values are the ones a sample held: a rare
+    value (an error state of an incident's hours) may be missing from them, and no reader may take them as every value."""
+    st = index_stats or {}
     docs, seen = st.get("docs"), st.get("sampled_docs")
     return bool(docs) and seen is not None and seen >= docs
 
@@ -92,8 +107,9 @@ def refusal(tool: str, args: dict) -> str | None:
             where += (f" {u['value']} is a field of {u['table']} of its own (\"{other}\")." if other.lower() == str(u['value']).lower()
                       else f" '{u['value']}' is a value of \"{other}\" in {u['table']}.")
         effect = "leaves out nothing" if u["op"] in ("<>", "!=", "NOT IN", "NOT =") else "counts nothing"
-        return (f"tool error (not run: value): \"{u['field']}\" of {u['table']} has no value '{u['value']}' (its values: "
-                f"{shown}), so this condition {effect}.{where} Use one of its values or the field that holds it. If "
+        known = f" (its values: {shown})" if vals else ""
+        return (f"tool error (not run: value): \"{u['field']}\" of {u['table']} has no value '{u['value']}'{known}, so this "
+                f"condition {effect}.{where} Use one of its values or the field that holds it. If "
                 f"'{u['value']}' is meant (a value added since the data dictionary learned it), send this same call "
                 f"again unchanged.")
     return None

@@ -296,14 +296,24 @@ def test_what_exists_now_is_read_once_per_item(ctx):
 
 
 def test_the_map_answers_when_its_to_do_list_cannot_be_read(ctx, monkeypatch):
-    from supagent.knowledge import readiness, sysmap
+    """(0.10.9.1) the map does not read it (the page asks /api/map/missing once the map is drawn), and that request
+    answers an empty list when it cannot be read"""
+    from flask import current_app
+
+    from conftest import login
+    from supagent.knowledge import pagecache, readiness, sysmap
 
     def broken(*_a, **_k):
         raise RuntimeError("not readable")
 
     monkeypatch.setattr(readiness, "report", broken)
     out = sysmap.map_data(True)
-    assert out["missing"] == [] and "values" in out
+    assert "missing" not in out and "values" in out
+    pagecache.clear()
+    c = current_app.test_client()
+    login(c, "admin")
+    r = c.get("/supagent/dictionary/api/map/missing")
+    assert r.status_code == 200 and r.get_json() == {"missing": []}
 
 
 def test_the_job_reads_them_in_the_background(ctx, texts, monkeypatch):

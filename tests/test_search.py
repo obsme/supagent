@@ -145,11 +145,10 @@ def test_memory_signals_approval_and_prompt(clean_knowledge):
 
 
 def test_memories_given_with_every_question_have_a_budget(clean_knowledge):
-    """Statements are learned at once for their author: the block stays within memory.prompt_chars,
-    rules and preferences before facts (facts left out are still found by the search)."""
+    """Statements are learned at once for their author. (0.10.9.1) Every memory is given, whole: rules and preferences
+    before facts; what they take beyond memory.prompt_chars, the knowledge found gives way (none is left out)."""
     from superset.extensions import security_manager as sm
 
-    from supagent import settings
     from supagent.knowledge.memory import add, prompt_block
 
     alice = sm.find_user(username="alice").id
@@ -159,14 +158,8 @@ def test_memories_given_with_every_question_have_a_budget(clean_knowledge):
     add(alice, "I prefer tables sorted by the largest value", kind="preference")
     block = prompt_block(alice)
     lines = block.strip().splitlines()[1:]
-    assert sum(len(x) for x in lines) <= settings.get("memory.prompt_chars") == 2000
     assert "durations in minutes" in lines[0] and "sorted by the largest" in lines[1]    # rules, preferences first
-    assert 2 < len(lines) < 14                                                          # some facts, not all
-    settings.set_value("memory.prompt_chars", 0)                                        # 0: no budget
-    try:
-        assert len(prompt_block(alice).strip().splitlines()) == 15
-    finally:
-        settings.set_value("memory.prompt_chars", 2000)
+    assert len(lines) == 14 and sum(len(x) for x in lines) > 2000                        # all of them, whole
 
 
 def test_documents_are_read_safely(clean_knowledge, monkeypatch):
@@ -233,8 +226,8 @@ def test_memory_and_documents_api(app):
 
 
 def test_learned_answers_and_memories_about_vanished_data_are_not_given(clean_knowledge):
-    """A metric the learning saw disappear: the learned answers and memories that name it are not
-    given to the agent any more (they would send it to data that is not there)."""
+    """A metric the learning saw disappear: the learned answers that name it are not given to the agent any more
+    (they would send it to data that is not there); (0.10.9.1) a memory is, said to name data that is gone."""
     import datetime as dt
 
     from superset.extensions import db, security_manager as sm
@@ -264,8 +257,9 @@ def test_learned_answers_and_memories_about_vanished_data_are_not_given(clean_kn
     resolve._CACHE.clear()
     with acting_as("admin"):
         assert [r["query"] for r in recipes_for("cpu load of the servers")] == ['SELECT COUNT(*) FROM "jobs"']
-    block = prompt_block(alice)
-    assert "node_cpu_seconds_total" not in block and "CPU in percent" in block
+    block = prompt_block(alice)          # (0.10.9.1) a memory is never left out: given, the data it names said gone
+    assert "node_cpu_seconds_total is the CPU of the grid servers (it names data that no longer exists: " \
+           "node_cpu_seconds_total)" in block and "CPU in percent" in block
     assert resolve.mentions_gone("see node_cpu_seconds_total") and not resolve.mentions_gone("see node_cpu")
 
 

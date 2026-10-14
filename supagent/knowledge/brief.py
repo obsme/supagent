@@ -151,6 +151,8 @@ def named(text: str, g: dict[str, Any] | None = None, loose: bool = False) -> li
             ids = g["names"].get(key)
             if not ids and loose:
                 ids = _loosely(key, n, g)
+            if not ids and loose and n == 2 and all(w.isalpha() for w in words):
+                ids = g["names"].get(" ".join(reversed(key.split())))   # (0.10.10) "the quokka team": team quokka
             if not ids and n == 1:                     # (0.10.8) web01.corp.example, web01:9100 asked, the
                 ids = _by_host(key, g)                 # server named web01 on the map
             if not ids:

@@ -38,6 +38,7 @@ def test_a_data_source_page_is_complete(shared):
     status = db.session.query(KObject).filter(KObject.kind == "field", KObject.parent == "jobs",
                                               KObject.name == "STATUS").one()
     jobs.description, jobs.description_source = LONG, "llm"
+    jobs.stats = {**(jobs.stats or {}), "sampled_docs": (jobs.stats or {}).get("docs")}     # learned on all of them
     status.description, status.description_source = "How the run ended.", "llm"
     db.session.commit()
     pages = {p["slug"]: p["content"] for p in fact_pages(collect())}
@@ -49,6 +50,10 @@ def test_a_data_source_page_is_complete(shared):
     fields = page.split("## The fields of index `jobs`", 1)[1]
     assert fields.index("`STATUS` (keyword): How the run ended.") < fields.index("`NODE`")   # described first
     assert "Values: FAILED, SUCCESS." in fields
+    jobs.stats = {**jobs.stats, "sampled_docs": 100}                 # (0.10.9) learned on a sample of its documents
+    db.session.commit()
+    sampled = {p["slug"]: p["content"] for p in fact_pages(collect())}["data-sources-jobs"]
+    assert "Values seen in a sample (others may exist): FAILED, SUCCESS." in sampled
     metrics = pages["data-sources-metrics"]
     assert "## The labels of metric `node_cpu_seconds_total`" in metrics and "`mode`" in metrics
 

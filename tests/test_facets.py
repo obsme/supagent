@@ -60,7 +60,7 @@ def classify_reply(messages):
             items.append({"ref": ref, "aspect": "functional", "subjects": ["Payments"], "confidence": "high",
                           "links": [{"to": "batch-jobs", "kind": "explains"}]})
         elif ref.startswith("family:") and "node" in ref:
-            items.append({"ref": ref, "aspect": "technical", "components": ["servers"], "confidence": "medium"})
+            items.append({"ref": ref, "aspect": "technical", "components": ["node fleet"], "confidence": "medium"})
     return {"role": "assistant", "content": "", "tool_calls": [{"id": "c", "type": "function", "function": {
         "name": "classify_items", "arguments": json.dumps({"items": items, "new_values": [
             {"facet": "subject", "value": "Batch processing", "description": "the nightly jobs"}]})}}]}
@@ -117,10 +117,10 @@ def test_metrics_are_classified_by_family(world):
     F.seed()
     F.classify(Replies([]), seconds=60)
     cpu = db.session.query(KObject).filter(KObject.name == "node_cpu_seconds_total").first()
-    assert "component: servers" not in (F.facets_of([f"object:{cpu.id}"]).get(f"object:{cpu.id}") or [])
+    assert "component: node fleet" not in (F.facets_of([f"object:{cpu.id}"]).get(f"object:{cpu.id}") or [])
     from supagent.models import Facet
 
-    f = db.session.query(Facet).filter(Facet.value == "servers").one()
+    f = db.session.query(Facet).filter(Facet.value == "node fleet").one()
     f.status = "approved"                                                           # an admin approves the value
     db.session.commit()
     F._CACHE.update(at=0.0)
@@ -130,7 +130,7 @@ def test_metrics_are_classified_by_family(world):
         t.status = "approved"
     db.session.commit()
     F._CACHE.update(at=0.0)
-    assert "component: servers" in F.facets_of([f"object:{cpu.id}"])[f"object:{cpu.id}"]
+    assert "component: node fleet" in F.facets_of([f"object:{cpu.id}"])[f"object:{cpu.id}"]
 
 
 def test_only_what_needs_an_admin_waits(world, sure_used_at_once):
@@ -223,7 +223,8 @@ def test_the_learning_says_what_new_and_known_values_are_part_of(world):
     args = {"items": [], "new_values": [
         {"facet": "component", "value": "jvm", "description": "the Java virtual machines",
          "part_of": ["LEDGER", "PAYMENTS", "posting engine", "Risk Grid", "nothing known"]},
-        {"facet": "subject", "value": "Settlements", "same_as": "Settlement"}],
+        {"facet": "subject", "value": "Settlement flows", "same_as": "Settlement"},
+        {"facet": "subject", "value": "settlements"}],          # (0.10.9.2) the known one written another way
         "known_value_parents": [{"value": "posting engine", "part_of": ["LEDGER"]},
                                 {"value": "unknown thing", "part_of": ["LEDGER"]}]}
     F.apply(args, batch, {})
@@ -232,8 +233,9 @@ def test_the_learning_says_what_new_and_known_values_are_part_of(world):
     jvm = db.session.query(Facet).filter(Facet.value == "jvm").one()
     assert jvm.status == "proposed" and set(parts_of(jvm, ("proposed",))) == {known[v].id for v in
                                                                              ("LEDGER", "PAYMENTS", "posting engine", "risk grid")}
-    dup = db.session.query(Facet).filter(Facet.value == "Settlements").one()
+    dup = db.session.query(Facet).filter(Facet.value == "Settlement flows").one()
     assert dup.suggested == {"same_as": known["Settlement"].id}
+    assert db.session.query(Facet).filter(Facet.value.ilike("settlements")).count() == 0   # no value to review
     engine = db.session.get(Facet, known["posting engine"].id)
     assert parts_of(engine) == [] and parts_of(engine, ("proposed",)) == [known["LEDGER"].id]   # an admin decides
     from supagent.knowledge.facets import approve_parts

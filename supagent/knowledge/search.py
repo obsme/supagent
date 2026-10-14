@@ -484,7 +484,7 @@ def live_values_note(piece: dict[str, Any], shown: str) -> str:
 
 
 def knowledge_block(question: str, shown: set[str] | None = None, with_charts: bool = False,
-                    prefer: dict[str, int] | None = None) -> str:
+                    prefer: dict[str, int] | None = None, memory_over: int = 0) -> str:
     """The knowledge relevant to a question, for the agent's prompt (short). `shown`: what the
     other blocks give already (refs, titles of the metrics and indices): not given twice, nor a
     metric or an index of the same name in another database, so that the room goes to the
@@ -546,7 +546,11 @@ def knowledge_block(question: str, shown: set[str] | None = None, with_charts: b
     except Exception:  # pylint: disable=broad-except
         db.session.rollback()
         cats = {}
-    budget = int(settings.get("search.prompt_chars"))
+    from supagent.budget import size as room
+
+    budget = room("search_chars")                      # (0.10.9.1) by the context profile; the memories (given
+    #   whole, first) come on top of it: the knowledge found (the team's formulas, what a field means) never gives
+    #   way to them (memory_over: kept for the callers)
     lines = ["\n\nBackground that looks relevant to this question (from the data dictionary, the catalog, the "
              "team's learned answers and memory, the documents). It is a summary, not an answer: call "
              "describe_data for the fields and their meaning, and run the query for any number; search_knowledge "
@@ -572,7 +576,9 @@ def knowledge_block(question: str, shown: set[str] | None = None, with_charts: b
                 body, usage = f["text"] or "", ""     # labels' descriptions were long (a count summed from the
             elif usage:                               # per-second rate): the room taken from those descriptions,
                 body = LABEL_ABOUT.sub(r"\1", body)    # the labels and their values kept
-        size = max(180, 450 - len(usage))
+        size = max(180, (room("context_chars") if f["kind"] == "context" else room("piece_chars")) - len(usage))
+        #                                              (0.10.9.1) the learned Context: the part of a section about
+        #                                              the question (short), the whole section (long profile)
         text = " ".join(excerpt(body, question, size, lines=f["kind"] == "map").split())
         about = [t.split(": ", 1)[1] for t in cats.get(f["ref"], []) if not t.startswith("aspect")][:3]
         line = (f"- [{f['kind']}] {f['title']}" + (f" ({', '.join(about)})" if about else "") + f": {text[:size]}"

@@ -165,8 +165,10 @@ def test_ansible_files_without_an_extension_are_read(ctx):
     for path in ("hosts", "inventory", "inventories/prod/hosts", "hosts.example", "inventory-staging",
                  "group_vars/all", "group_vars/webservers", "host_vars/db-1", "group_vars/all/vault"):
         assert wanted_file(path, "docs"), path
-    for path in ("roles/x/files/secret", "bin/run", ".env"):
+    for path in ("roles/x/files/secret", "bin/secret-token", ".env", "roles/x/files/server_ca"):
         assert not wanted_file(path, "code"), path
+    for path in ("bin/run", "scripts/backup", "bin/clean-deps.sh", "templates/app.conf.erb"):   # (0.10.10) scripts
+        assert wanted_file(path, "code"), path
 
 
 def test_the_secrets_of_configuration_are_masked_however_short(ctx):

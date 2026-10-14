@@ -384,9 +384,9 @@ def test_a_chart_change_is_saved_and_an_unsaved_preview_is_never_called_a_change
     args = {"request": {"identifier": 7, "config": {"chart_type": "pie"}}}
     _n, sent, _r = guard.before("update_chart", args)
     assert "generate_preview" not in sent["request"]                      # Superset's default: a preview
-    a.question = "Make it a pie chart."
+    a.question = "Is this chart up to date?"
     _n, sent, _r = guard.before("update_chart", {"request": {"identifier": 7, "config": {}, "generate_preview": True}})
-    assert sent["request"]["generate_preview"] is True                    # said by the model: kept
+    assert sent["request"]["generate_preview"] is True                    # said by the model, no change asked: kept
     preview = json.dumps({"chart": {"id": 7, "viz_type": "echarts_timeseries_bar", "form_data_key": "k",
                                     "is_unsaved_state": True}})
     out = guard.after("update_chart", {"request": {"identifier": 7}}, preview)

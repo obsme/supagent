@@ -45,6 +45,12 @@ def test_a_value_the_field_does_not_have_is_sent_back(world):
         idx.stats = {**old, "sampled_docs": 10}                                                 # learned on a sample
         db.session.commit()
         assert unknown('SELECT COUNT(*) FROM "jobs" WHERE "STATUS" = \'CLOSED\'') == []
+        # (0.10.9) but a value that is another field's own name (its flag) is sent back on a sample too
+        u = unknown('SELECT 100.0 * SUM(CASE WHEN "STATUS" = \'RETRIED\' THEN 1 ELSE 0 END) / COUNT(*) FROM "jobs"')
+        assert [(x["field"], x["value"], x["elsewhere"]) for x in u] == [("STATUS", "RETRIED", ["RETRIED"])]
+        back = refusal("execute_sql", {"request": {"database_id": 1, "sql": 'SELECT COUNT(*) FROM "jobs" WHERE '
+                                                                            '"STATUS" = \'Retried\''}})
+        assert "a field of jobs of its own (\"RETRIED\")" in back
     finally:
         idx.stats = old
         db.session.delete(retried)

@@ -354,6 +354,31 @@
     return box;
   }
 
+  /* (0.10.9.2) the proposals the learning found to be other names of values you have: merged into them together,
+     a category at a time, after a confirmation */
+  function sameBulk(same) {
+    var cats = Object.keys(same || {}).filter(function (c) { return same[c] > 0; }).sort();
+    if (!cats.length || !S.canDelete) return null;
+    var box = el("span", { class: "rbulk" });
+    cats.forEach(function (c) {
+      var label = "Merge the " + S.num(same[c]) + " other name" + (same[c] > 1 ? "s" : "") + " of " + (FACET_NAMES[c] || c).toLowerCase() + " values you have";
+      var go = el("button", { type: "button", class: "btn small", text: label, onclick: function () {
+        S.confirm(go, label + "?", { yes: "Merge " + S.num(same[c]), no: "Cancel",
+          detail: "Each proposal is written like a value you have (case, spaces, a short form, an environment, a typo): it becomes one of that value's other names, its items and links go to it." }).then(function (ok) {
+          if (!ok) return;
+          go.disabled = true;
+          S.admin("POST", "facets/merge-same", { facet: c }).then(function (r) {
+            if (r.error) { go.disabled = false; go.title = r.error; return; }
+            saved();
+            reviewLoad();
+          });
+        });
+      } });
+      box.appendChild(go);
+    });
+    return box;
+  }
+
   function bulk(label, key, items, fn, reject) {   // "Approve all shown" (or reject): a second click confirms
     var box = el("span", { class: "rbulk" });
     var go = el("button", { type: "button", class: "btn small", text: label, onclick: function () {
@@ -561,7 +586,7 @@
           }));
           var from = v.source === "data" ? "found in the data" + ((v.origins || []).length ? ": " + v.origins[0] : "") : "proposed by the LLM";
           return card([name, desc, parts, same], S.num(v.items) + " item" + (v.items === 1 ? "" : "s") + " · " + from, acts);
-        }, { bulk: el("span", { class: "rbulks" }, [foundBulk(d.found || {}),
+        }, { bulk: el("span", { class: "rbulks" }, [sameBulk(d.same || {}), foundBulk(d.found || {}),
           (d.values || []).length > 1 ? bulk("Approve all shown", "values", d.values, function (v) { return S.admin("POST", "facets/" + v.id, { status: "approved" }); }) : null,
           (d.values || []).length > 1 ? bulk("Reject all shown", "values", d.values, function (v) { return S.admin("POST", "facets/" + v.id, { status: "rejected" }); }, true) : null]) }),
         group("removals", d.removals || [], function (x) {
@@ -1115,12 +1140,35 @@
     var cell = el("td", { colspan: "8" }, [el("div", { class: "muted", text: "Reading the list of pages…" })]);
     var box = el("tr", { class: "doc-pages" }, [cell]);
     row.after(box); btn.textContent = "Hide pages";
-    S.admin("GET", "docs/" + x.id + "/pages").then(function (d) {
+    var read = function () { return S.admin("GET", "docs/" + x.id + "/pages").then(render); };
+    /* (0.10.9.1) a page removed by an admin: not read again, its text, its search pieces and what was learned from
+       it deleted at once; given back from the list of the removed pages */
+    var removeBtn = function (p, tr) {
+      var b = el("button", { type: "button", class: "linkish", text: "Remove", title: "Not read again; its text, its search pieces and what was learned from it deleted" });
+      b.addEventListener("click", function () {
+        var td = b.parentNode, res = el("span", { class: "result", role: "status" });
+        var yes = el("button", { type: "button", class: "btn small danger", text: "Remove it" });
+        var no = el("button", { type: "button", class: "btn small", text: "Cancel" });
+        td.innerHTML = "";
+        td.appendChild(el("div", { class: "doc-page-confirm" }, [el("span", { text: "Remove this page from the document? " }), yes, no, res]));
+        no.addEventListener("click", function () { td.innerHTML = ""; td.appendChild(removeBtn(p, tr)); });
+        yes.addEventListener("click", function () {
+          yes.disabled = no.disabled = true;
+          S.admin("POST", "docs/" + x.id + "/pages/remove", { page_id: p.page_id || "", path: p.path || "", url: p.url || "" }).then(function (r) {
+            if (!r || r.error) { res.textContent = (r && r.error) || "not removed"; res.className = "result bad"; yes.disabled = no.disabled = false; return; }
+            read();
+          });
+        });
+      });
+      return b;
+    };
+    function render(d) {
       cell.innerHTML = "";
       if (d.error) { cell.appendChild(el("div", { class: "result bad", text: d.error })); return; }
-      var last = d.last_reading || {}, pages = d.pages || [];
+      var last = d.last_reading || {}, pages = d.pages || [], gone = d.excluded || [], can = !!d.can_remove;
       var said = S.num(pages.length) + " page" + (pages.length === 1 ? "" : "s") + " read";
       if (last.not_read) said += " · " + S.num(last.not_read) + " not read (listed below)";
+      if (gone.length) said += " · " + S.num(gone.length) + " removed";
       if (last.at) said += " · last read " + S.when(last.at);
       cell.appendChild(el("div", { class: "doc-pages-head", text: said }));
       if (last.limit_reached) {
@@ -1128,19 +1176,45 @@
           (last.left ? ": at least " + S.num(last.left) + " more linked page" + (last.left === 1 ? " was" : "s were") + " not read" : "") +
           ". Raise “Pages” (Edit) to read more of the site." }));
       }
-      var table = el("table", { class: "grid compact" }, [el("thead", {}, [el("tr", {}, ["Page", "Space", "Size", "Links", "Images"].map(function (h) {
+      var heads = ["Page", "Space", "Size", "Links", "Images"].concat(can ? [""] : []);
+      var table = el("table", { class: "grid compact" }, [el("thead", {}, [el("tr", {}, heads.map(function (h) {
         return el("th", { text: h }); }))])]);
       var tb = el("tbody", {});
       pages.forEach(function (p) {
         var name = p.url ? el("a", { href: p.url, target: "_blank", rel: "noopener", text: p.title || p.path || p.url }) :
           el("span", { text: p.title || p.path || "" });
-        tb.appendChild(el("tr", {}, [el("td", {}, [name, p.url ? el("div", { class: "muted nm", text: p.url }) : null]),
+        var tr = el("tr", {}, [el("td", {}, [name, p.url ? el("div", { class: "muted nm", text: p.url }) : null]),
           el("td", { text: p.space || "" }), el("td", { class: "num", text: S.bytes(p.chars || 0) }),
-          el("td", { class: "num", text: p.links ? S.num(p.links) : "" }), el("td", { class: "num", text: p.images ? S.num(p.images) : "" })]));
+          el("td", { class: "num", text: p.links ? S.num(p.links) : "" }), el("td", { class: "num", text: p.images ? S.num(p.images) : "" })]);
+        if (can) tr.appendChild(el("td", { class: "row-actions" }, [removeBtn(p, tr)]));
+        tb.appendChild(tr);
       });
-      if (!pages.length) tb.appendChild(D.emptyRow(5, "No page read yet."));
+      if (!pages.length) tb.appendChild(D.emptyRow(heads.length, "No page read yet."));
       table.appendChild(tb);
       cell.appendChild(el("div", { class: "table-wrap" }, [table]));
+      if (gone.length) {
+        cell.appendChild(el("div", { class: "doc-pages-head", text: "Removed (not read again)" }));
+        cell.appendChild(el("p", { class: "muted small-note", text: "Their text, their search pieces and what was learned from them " +
+          "were deleted; what the System map was proposed from them is withdrawn at the next learning (a link already approved " +
+          "is only proposed for removal)." }));
+        var rt = el("tbody", {});
+        gone.slice().reverse().forEach(function (k) {
+          var back = el("button", { type: "button", class: "linkish", text: "Read again", title: "Read at the document's next reading (Read again on its row: now)" });
+          back.addEventListener("click", function () {
+            back.disabled = true;
+            S.admin("POST", "docs/" + x.id + "/pages/restore", { key: k.key }).then(function (r) {
+              if (!r || r.error) { back.disabled = false; back.textContent = (r && r.error) || "not given back"; return; }
+              read();
+            });
+          });
+          rt.appendChild(el("tr", {}, [el("td", {}, [el("div", { text: k.title || k.url || k.key }),
+            k.url ? el("div", { class: "muted nm", text: k.url }) : null]),
+            el("td", { class: "muted", text: [k.by, k.at ? S.when(k.at) : ""].filter(Boolean).join(" · ") }),
+            el("td", { class: "row-actions" }, [back])]));
+        });
+        cell.appendChild(el("div", { class: "table-wrap" }, [el("table", { class: "grid compact" }, [el("thead", {}, [el("tr", {}, [
+          el("th", { text: "Page" }), el("th", { text: "Removed" }), el("th", { text: "" })])]), rt])]));
+      }
       if ((last.skipped || []).length) {
         cell.appendChild(el("div", { class: "doc-pages-head", text: "Not read" }));
         var nt = el("tbody", {});
@@ -1151,7 +1225,8 @@
         cell.appendChild(el("div", { class: "table-wrap" }, [el("table", { class: "grid compact" }, [el("thead", {}, [el("tr", {}, [
           el("th", { text: "Page" }), el("th", { text: "Why" })])]), nt])]));
       }
-    });
+    }
+    read();
   }
   function docsLoad() {
     var tb = $("docs").querySelector("tbody");

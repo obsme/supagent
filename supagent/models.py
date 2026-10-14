@@ -819,3 +819,6 @@ def create_or_upgrade() -> tuple[int, int]:
         row.value = str(SCHEMA_VERSION)
     db.session.commit()
     return before, SCHEMA_VERSION
+
+
+from supagent.knowledge import pagecache as _pagecache  # noqa: E402,F401  (0.10.9.1: the pages' change stamp, every process)

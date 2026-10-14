@@ -258,7 +258,7 @@ class ChatView(BaseView):
     method_permission_name = {"index": "read", "conversations": "read", "conversation": "read",
                               "delete_conversation": "write", "ask": "write", "message": "read",
                               "feedback": "write", "file": "read", "cancel": "write", "result_xlsx": "read",
-                              "memory": "read", "add_memory": "write", "delete_memory": "write",
+                              "memory": "read", "add_memory": "write", "delete_memory": "write", "edit_memory": "write",
                               "search_chats": "read", "notes": "read", "add_note": "write", "change_note": "write",
                               "delete_note": "write", "promote_note": "write", "sharing": "share"}
     template_folder = os.path.join(HERE, "templates")
@@ -550,6 +550,37 @@ class ChatView(BaseView):
                 group_id=group.id if group is not None else None)
         if m is None:
             return _json({"error": "empty, or already remembered"}, 400)
+        _sync_chunks("memory:")
+        return _json({"memory": self._memory_json(m, g.user.id)})
+
+    @expose("/api/memory/<int:mem_id>", methods=("PUT",))
+    @has_access_api
+    def edit_memory(self, mem_id: int) -> Response:
+        """(0.10.9.1) A memory edited: its text (kept as written), its kind (rule, preference, fact), its category.
+        One's own memory by its author; a team's or a group's by an editor or an admin (still approved), or by its
+        author while it waits for approval."""
+        from superset import db
+
+        from supagent.knowledge.memory import SAVED_CHARS
+        from supagent.models import Memory
+
+        m = db.session.get(Memory, mem_id)
+        mine = m is not None and m.user_id == g.user.id
+        if m is None or not (m.scope == "user" and mine or m.scope != "user" and (_can_edit() or
+                                                                                 mine and m.status == "proposed")):
+            abort(404)
+        body = _body()
+        text = str(body.get("text") if body.get("text") is not None else m.text or "").strip()
+        if not text:
+            return _json({"error": "a memory needs a text"}, 400)
+        m.text = text[:SAVED_CHARS]
+        if body.get("kind") in ("preference", "rule", "fact"):
+            m.kind = body["kind"]
+        if "category" in body:
+            m.category = str(body.get("category") or "").strip() or None
+        if m.scope != "user" and _can_edit():
+            m.approved_by = g.user.username
+        db.session.commit()
         _sync_chunks("memory:")
         return _json({"memory": self._memory_json(m, g.user.id)})
 
@@ -948,7 +979,7 @@ class KnowledgeView(_RecipesMixin, BaseView):
                               "context_export": "read",
                               "where_data": "read", "forget_where": "write", "add_where": "write",
                               "where_tables": "read", "system_map": "read", "edit_system_map": "write",
-                              "map_pdf": "read", "value_links": "read"}
+                              "map_pdf": "read", "value_links": "read", "map_missing": "read"}
 
     @expose("/api/search", methods=("GET",))
     @has_access_api
@@ -1050,8 +1081,14 @@ class KnowledgeView(_RecipesMixin, BaseView):
         elif show == "undescribed":
             q = q.filter((KObject.description.is_(None)) | (KObject.description == ""))
         elif show == "gone":
-            q = q.filter(KObject.gone_at.isnot(None))
-        if show != "gone":
+            from supagent.knowledge.deactivate import DEACTIVATED
+
+            q = q.filter(KObject.gone_at.isnot(None), KObject.gone_at != DEACTIVATED)
+        elif show == "deactivated":              # (0.10.9.1) what the team deactivated
+            from supagent.knowledge.deactivate import DEACTIVATED
+
+            q = q.filter(KObject.gone_at == DEACTIVATED)
+        if show not in ("gone", "deactivated"):
             q = q.filter(KObject.gone_at.is_(None))
         text = (args.get("q") or "").strip()
         if text:
@@ -1138,15 +1175,32 @@ class KnowledgeView(_RecipesMixin, BaseView):
             syn = body.get("synonyms")
             o.synonyms = [s.strip() for s in (syn if isinstance(syn, list) else str(syn or "").split(","))
                           if str(s).strip()] or None
+        changed_ids = [o.id]
+        if "active" in body:                     # (0.10.9.1) deactivated: the agent and the search never use it
+            from supagent.knowledge.deactivate import CHILD_KIND, set_active
+
+            set_active(o, bool(body.get("active")))
+            if o.kind in CHILD_KIND:
+                changed_ids += [k.id for k in db.session.query(KObject).filter(
+                    KObject.source_id == o.source_id, KObject.parent == o.name,
+                    KObject.kind == CHILD_KIND[o.kind])]
         from supagent.knowledge.freshness import touch
 
         touch()                                  # every server: the next answer uses it
         db.session.commit()
         try:                                     # and the agent's search finds it in a moment
-            _apply("objects", ids=[o.id])
+            _apply("objects", ids=changed_ids)
         except Exception:  # pylint: disable=broad-except
             db.session.rollback()
             log.warning("supagent: search pieces of %s: not written", o.name, exc_info=True)
+        if "active" in body:                     # (0.10.9.1) the LLM context written again without (or with) it
+            try:
+                from supagent.knowledge.llm_context import build as build_llm_context
+
+                build_llm_context()
+            except Exception:  # pylint: disable=broad-except
+                db.session.rollback()
+                log.warning("supagent: the LLM context: not written again", exc_info=True)
         return _json(_obj_row(o, self._sources()))
 
     @expose("/api/changes", methods=("GET",))
@@ -1534,9 +1588,32 @@ class KnowledgeView(_RecipesMixin, BaseView):
     def system_map(self) -> Response:
         """The system map (knowledge.sysmap): the categories' values this user may see, what each is part of, its
         explanation, the interactions an admin drew, the places of the boxes."""
+        from supagent import settings
         from supagent.knowledge.sysmap import map_data
 
-        return _json({**map_data(_can_edit()), "can_delete": _can_delete()})
+        with settings.memo():                            # (0.10.9.1) the settings read once for the whole map
+            return _json({**map_data(_can_edit()), "can_delete": _can_delete()})
+
+    @expose("/api/map/missing", methods=("GET",))
+    @has_access_api
+    def map_missing(self) -> Response:
+        """(0.10.9.1) What an investigation still lacks (knowledge.readiness), for the map's chip: asked once the map is
+        drawn (it was most of the map's time), kept until the knowledge changes (pagecache). Who edits the map."""
+        if not _can_edit():
+            return _json({"missing": []})
+        from superset import db
+
+        from supagent import settings
+        from supagent.knowledge import pagecache
+        from supagent.knowledge.sysmap import missing_points
+
+        try:
+            with settings.memo():
+                return _json({"missing": pagecache.cached("missing", missing_points)})
+        except Exception:  # pylint: disable=broad-except   (the map without it)
+            log.warning("supagent map: what is missing for investigations: not read", exc_info=True)
+            db.session.rollback()
+            return _json({"missing": []})
 
     @expose("/api/map", methods=("POST",))
     @has_access_api
@@ -1614,6 +1691,9 @@ class KnowledgeView(_RecipesMixin, BaseView):
                 return _json(sysmap.add_value(str(x.get("facet") or ""), str(x.get("value") or ""),
                                               int(inside) if inside.isdigit() else None, g.user.username,
                                               str(x.get("description") or "")))
+            if isinstance(body.get("move_value"), dict):      # (0.10.9.1) a value dropped into another category
+                x = body["move_value"]
+                return _json(sysmap.move_value(int(x.get("id") or 0), str(x.get("facet") or ""), g.user.username))
             if isinstance(body.get("inside"), dict):          # a value moved or copied inside another, or taken out
                 x = body["inside"]
                 return _json(sysmap.put_inside(int(x.get("id") or 0), int(x.get("parent") or 0),
@@ -1764,12 +1844,15 @@ def _context_rank(slug: str | None) -> int:
 
 
 def _obj_row(o: Any, sources: dict[int, Any]) -> dict:
+    from supagent.knowledge.deactivate import DEACTIVATED
+
     st = o.stats or {}
     src = sources.get(o.source_id)
     return {"id": o.id, "kind": o.kind, "parent": o.parent or None, "name": o.name, "database": src.database_name
             if src else None, "source_id": o.source_id, "data_type": o.data_type, "metric_type": o.metric_type,
             "unit": o.unit, "description": o.description, "description_source": o.description_source,
-            "verified": bool(o.verified), "category": o.category, "gone": o.gone_at is not None,
+            "verified": bool(o.verified), "category": o.category,
+            "gone": o.gone_at is not None and o.gone_at != DEACTIVATED, "deactivated": o.gone_at == DEACTIVATED,
             "series": st.get("series"), "cardinality": st.get("cardinality"), "docs": st.get("docs")}
 
 
@@ -1784,11 +1867,11 @@ class AdminView(BaseView):
         "classify_now": "write", "backups": "write", "backup_file": "write", "backup_restore": "write",
         "stop_learning": "write", "runs": "write", "status": "write", "usage": "write", "usage_data": "write",
         "entries": "read", "entry_history": "read", "export_catalog": "read", "team_memory": "read", "docs": "read",
-        "doc_pages": "read",
+        "doc_pages": "read", "doc_page_remove": "delete", "doc_page_restore": "edit",
         "review": "read", "facets": "read", "facet_map": "read", "facet_categories": "read", "apply_status": "read",
         "create_entry": "edit", "update_entry": "edit", "restore_entry": "edit", "put_catalog": "edit",
         "set_memory": "edit", "add_doc": "edit", "edit_doc": "edit", "refresh_doc": "edit", "add_facet": "edit",
-        "approve_found": "edit", "set_facet": "edit", "set_tag": "edit", "set_link": "edit", "set_route": "edit",
+        "approve_found": "edit", "merge_same": "delete", "set_facet": "edit", "set_tag": "edit", "set_link": "edit", "set_route": "edit",
         "delete_entry": "delete", "delete_doc": "delete",
         "context_proposals": "read", "context_review": "edit", "context_diff": "read", "lint_dismiss": "edit",
         "fields_decide": "edit"}
@@ -1838,7 +1921,9 @@ class AdminView(BaseView):
             if status == "active":
                 m.approved_by = g.user.username
         if body.get("text"):
-            m.text = str(body["text"]).strip()[:1000]
+            from supagent.knowledge.memory import SAVED_CHARS
+
+            m.text = str(body["text"]).strip()[:SAVED_CHARS]       # (0.10.9.1) kept as written (was cut at 1,000)
         if "category" in body:
             m.category = str(body.get("category") or "").strip() or None
         db.session.commit()
@@ -1986,7 +2071,7 @@ class AdminView(BaseView):
         the limit (max_pages) reached with pages left unread."""
         from superset import db
 
-        from supagent.knowledge.docs import read_log
+        from supagent.knowledge.docs import excluded_pages, read_log
         from supagent.models import Doc
 
         d = db.session.get(Doc, doc_id)
@@ -1999,7 +2084,52 @@ class AdminView(BaseView):
                  for p in (d.pages or []) if isinstance(p, dict)]
         return _json({"id": d.id, "title": d.title, "url": d.url, "status": d.status, "error": d.error,
                       "fetched_at": d.fetched_at, "max_pages": d.max_pages, "pages": pages,
-                      "last_reading": read_log(d.id) if d.kind == "url" else {}})
+                      "last_reading": read_log(d.id) if d.kind == "url" else {},
+                      "excluded": excluded_pages(d), "can_remove": _can_delete()})
+
+    @expose("/api/docs/<int:doc_id>/pages/remove", methods=("POST",))
+    @has_access_api
+    def doc_page_remove(self, doc_id: int) -> Response:
+        """(0.10.9.1) A page removed from a document ({"page_id"} or {"path"} or {"url"}): never read again, its text,
+        its search pieces and what the understanding read from it deleted now."""
+        from superset import db
+
+        from supagent.knowledge.docs import exclude_page
+        from supagent.models import Doc
+
+        if not _can_delete():
+            return _json({"error": "your role may not remove what was read (Admin)"}, 403)
+        d = db.session.get(Doc, doc_id)
+        if d is None or d.kind != "url":
+            abort(404)
+        body = _body()
+        try:
+            out = exclude_page(d, g.user.username, url=str(body.get("url") or ""),
+                               page_id=str(body.get("page_id") or ""), path=str(body.get("path") or ""))
+        except ValueError as ex:
+            db.session.rollback()
+            return _json({"error": str(ex)}, 400)
+        db.session.commit()
+        _sync_chunks("doc:")
+        return _json(out)
+
+    @expose("/api/docs/<int:doc_id>/pages/restore", methods=("POST",))
+    @has_access_api
+    def doc_page_restore(self, doc_id: int) -> Response:
+        """(0.10.9.1) A removed page given back ({"key"}): read again at the document's next reading."""
+        from superset import db
+
+        from supagent.knowledge.docs import include_page
+        from supagent.models import Doc
+
+        d = db.session.get(Doc, doc_id)
+        if d is None or d.kind != "url":
+            abort(404)
+        key = str(_body().get("key") or "")
+        if not include_page(d, key):
+            return _json({"error": "no such removed page"}, 400)
+        db.session.commit()
+        return _json({"restored": key})
 
     @expose("/api/docs/<int:doc_id>/refresh", methods=("POST",))
     @has_access_api
@@ -2361,6 +2491,12 @@ class AdminView(BaseView):
     @expose("/api/review", methods=("GET",))
     @has_access_api
     def review(self) -> Response:
+        from supagent import settings
+
+        with settings.memo():                            # (0.10.9.1) the settings read once for the whole page
+            return self._review()
+
+    def _review(self) -> Response:
         from sqlalchemy import func, or_
 
         from superset import db
@@ -2429,6 +2565,11 @@ class AdminView(BaseView):
         # the values the learning read in the data's category fields, per category: approved together in one click
         found = {c: int(n) for c, n in db.session.query(Facet.facet, func.count(Facet.id)).filter(
             Facet.status == "proposed", Facet.source == "data").group_by(Facet.facet)}
+        same: dict[str, int] = {}                      # (0.10.9.2) other names of values people have, by category
+        for c, sug in db.session.query(Facet.facet, Facet.suggested).filter(Facet.status == "proposed",
+                                                                            Facet.suggested.isnot(None)):
+            if isinstance(sug, dict) and sug.get("same_by") and str(sug.get("same_as") or "").isdigit():
+                same[c] = same.get(c, 0) + 1
         relations: list[dict[str, Any]] = []          # (0.9.6: what a value is part of is a link, reviewed as one)
         tag_q = (db.session.query(Tag, Facet).join(Facet, Facet.id == Tag.facet_id)
                  .filter(Tag.status == "proposed", Facet.status == "approved"))
@@ -2485,7 +2626,7 @@ class AdminView(BaseView):
         if q:
             pages = [pg for pg in pages if q.lower() in str(pg.get("title") or "").lower()]
         try:                                             # (0.10.2) what would confuse the agent or the search
-            from supagent.knowledge.lint import warnings as lint_warnings
+            from supagent.knowledge.lint import for_review as lint_warnings
 
             warns = lint_warnings()
         except Exception:  # pylint: disable=broad-except   (the review shows the rest)
@@ -2494,7 +2635,7 @@ class AdminView(BaseView):
         if q:
             warns = [w for w in warns if q.lower() in f"{w['subject']} {w['why']}".lower()]
         try:                                             # (0.10.2) where a category is in the data, from its values
-            from supagent.knowledge.datafields import proposals as field_proposals
+            from supagent.knowledge.datafields import for_review as field_proposals
 
             fields = field_proposals()
         except Exception:  # pylint: disable=broad-except   (the review shows the rest)
@@ -2507,7 +2648,8 @@ class AdminView(BaseView):
                   "values": val_q.count(), "relations": len(rel_all), "tags": tag_q.count(), "links": link_q.count(),
                   "removals": drop_q.count(), "retire": n_retire, "routes": route_q.count(), "context": len(pages),
                   "warnings": len(warns), "fields": len(fields)}
-        return _json({"memory": memories, "recipes": recipes, "values": values, "found": found, "retire": retire,
+        return _json({"memory": memories, "recipes": recipes, "values": values, "found": found, "same": same,
+                      "retire": retire,
                       "relations": relations, "tags": tags, "links": links, "removals": removals, "routes": routes,
                       "context": pages[:limit], "warnings": warns[:limit], "fields": fields[:limit], "counts": counts,
                       "can_delete": _can_delete(), "q": q,
@@ -2650,6 +2792,24 @@ class AdminView(BaseView):
         touch()
         db.session.commit()
         return _json({"id": f.id, "facet": f.facet, "value": f.value, "status": f.status})
+
+    @expose("/api/facets/merge-same", methods=("POST",))
+    @has_access_api
+    def merge_same(self) -> Response:
+        """(0.10.9.2) To review's "Merge them": every waiting proposal the learning found to be another name of a
+        value people have ({"facet"}: of one category), merged into it (its names kept as that value's other
+        names, its items and links moved)."""
+        if not _can_delete():
+            return _json({"error": "your role may not merge values (Admin)"}, 403)
+        from supagent.knowledge.consolidate import merge_suggested
+        from supagent.knowledge.freshness import touch
+
+        n = merge_suggested(g.user.username, str(_body().get("facet") or "") or None)
+        touch()
+        from superset import db
+
+        db.session.commit()
+        return _json({"merged": n})
 
     @expose("/api/facets/approve-found", methods=("POST",))
     @has_access_api

@@ -192,7 +192,8 @@ def texts() -> Iterator[dict[str, Any]]:
         yield {"ref": f"doc:{d.id}", "title": d.title or d.url or "", "text": d.content or ""}
     for e in db.session.query(Entry).filter(Entry.deleted_at.is_(None), Entry.enabled.is_(True)):
         yield {"ref": f"entry:{e.id}", "title": e.title, "text": e.content or ""}
-    for p in db.session.query(ContextPage).filter(ContextPage.kind.is_distinct_from("rejected")):
+    for p in db.session.query(ContextPage).filter(ContextPage.kind.is_distinct_from("rejected"),
+                                                       ContextPage.slug.notin_(_llm_slugs())):
         yield {"ref": f"context:{p.id}", "title": p.title, "text": p.content or ""}
     for n in db.session.query(Note).filter(Note.scope == "team"):
         yield {"ref": f"note:{n.id}", "title": n.title or "", "text": n.text or ""}
@@ -393,3 +394,10 @@ def decide(f: Any, retire: bool, by: str) -> str:
     f.suggested = sug or None
     f.reviewed_by, f.reviewed_at = by, dt.datetime.utcnow()
     return f.status
+
+
+def _llm_slugs() -> tuple[str, ...]:
+    """(0.10.9.1) The LLM context's two pages: written from the rest of the knowledge, never read as a source of it."""
+    from supagent.knowledge.context import LLM_CONTEXT_SLUGS
+
+    return LLM_CONTEXT_SLUGS

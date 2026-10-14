@@ -57,6 +57,8 @@ VERBS = {"is", "are", "was", "were", "be", "been", "being", "has", "have", "had"
          "will", "would", "shall", "should", "must", "may", "might", "est", "sont", "peut", "doit"}
 SENTENCE = re.compile(r"[,;:!?\"“”«»()\[\]{}<>|]|\.(\s|$)")
 DOTTED = re.compile(r"^[A-Za-z0-9][\w-]*(\.[\w-]+)+$")
+REVERSE_DNS = re.compile(r"(?i)com|org|net|io|edu|gov|int|eu|fr|de|uk|ch|be|nl|it|es|ca|us|lu|at")   # a package name's
+#                                                                                            first word
 # what a part is, by its name (a word of it: a name ending -db is a database, node-exporter a monitoring tool)
 LIBRARY = re.compile(
     r"^(?:log4j2?|slf4j(?:-[\w-]+)?|logback(?:-[\w-]+)?|commons-[\w-]+|apache-commons(?:-[\w-]+)?|jackson(?:-[\w-]+)?|"
@@ -93,7 +95,7 @@ DATABASE = re.compile(
     r"(^|[\W_])(postgres(?:ql)?|pg|mysql|mariadb|oracle-?db|mssql|sql-?server|db2|mongo(?:db)?|cassandra|"
     r"scylla(?:db)?|couchbase|couchdb|neo4j|clickhouse|timescale(?:db)?|influx(?:db)?|elasticsearch|opensearch|solr|"
     r"sybase|informix|teradata|snowflake|bigquery|redshift|hbase|druid|cockroach(?:db)?|yugabyte(?:db)?|tidb|"
-    r"sqlite|db|database|pgbouncer|patroni)($|[\W_])", re.I)
+    r"sqlite|db|database|pgbouncer|patroni|valkey|keydb|dragonfly(?:db)?)($|[\W_])", re.I)
 INFRASTRUCTURE = re.compile(
     r"(^|[\W_])(dns|bind9|unbound|coredns|powerdns|ntp|chrony|ldap|openldap|active-?directory|kerberos|keycloak|"
     r"freeipa|vault|consul|etcd|zookeeper|nomad|kubernetes|k8s|openshift|rancher|harbor|nexus|artifactory|jenkins|"
@@ -101,9 +103,13 @@ INFRASTRUCTURE = re.compile(
     r"vmware|vsphere|esxi|vcenter|proxmox|openstack|ceph|nfs|glusterfs|minio|s3|nginx|haproxy|envoy|traefik|istio|"
     r"linkerd|f5|bigip|httpd|squid|load-?balancer|firewall|vpn|bastion|jump-?host|smtp|postfix|exim|sendmail|"
     r"mail-?relay|kafka|rabbitmq|activemq|artemis|ibm-?mq|mqseries|nats|pulsar|redis|memcached|veeam|bacula|"
-    r"commvault|netbackup|control-?m|autosys|rundeck|dhcp|cobbler|netbox|tomcat|jboss|wildfly|weblogic|websphere|"
+    r"commvault|netbackup|control-?m|autosys|rundeck|dhcp|cobbler|netbox|tomcat\d*|apache2?|jboss|wildfly|weblogic|websphere|"
     r"jetty|ingress(?:-nginx)?|cert-?manager|external-dns|docker-registry|gitea|cache|queue|broker|proxy)($|[\W_])",
     re.I)
+# (0.10.10) a language's runtime installed on the hosts (a host's software, no application of the system)
+RUNTIME = re.compile(r"^(miniconda\d*|anaconda\d*|conda|mamba|micromamba|pyenv|openjdk(?:-?\d+)?|jdk(?:-?\d+)?|"
+                     r"jre(?:-?\d+)?|nodejs(?:-?\d+)?|php-?fpm|rbenv|rvm)$", re.I)
+BROKER_NAME = re.compile(r"(^|[\W_])(kafka|rabbitmq|activemq|artemis|ibm-?mq|mqseries|nats|pulsar|broker)($|[\W_])", re.I)
 INFRASTRUCTURE_SAID = re.compile(r"\b(infrastructure|middleware|message broker|load balancer|reverse proxy|"
                                  r"directory service|application server|ci server|backup (?:server|tool))\b", re.I)
 # the deployment's own categories for them (a name of its own; none: a component)
@@ -112,7 +118,123 @@ OWN = {"library": re.compile(r"^(librar(?:y|ies)|frameworks?|dependenc(?:y|ies))
                                 r"solutions?))?$|^(?:monitoring |observability )?tools?$", re.I),
        "infrastructure": re.compile(r"^(infra|infrastructure|platform|middleware)(?: (?:services?|components?|"
                                     r"tools?))?$|^(?:technical|shared|core) services?$", re.I),
-       "database": re.compile(r"^(databases?|data ?stores?|datastores?)$", re.I)}
+       "database": re.compile(r"^(databases?|data ?stores?|datastores?)$", re.I),
+       # (0.10.10) the software installed on the hosts (web servers, agents, runtimes): "host software", "tools"
+       "software": re.compile(r"^(?:(?:host|server|installed|system|base|shared|infrastructure) )?(?:software|"
+                              r"packages?|utilities)$", re.I),
+       "broker": re.compile(r"^(?:message |event )?brokers?$|^messaging(?: (?:systems?|services?))?$", re.I)}
+
+
+# (0.10.9.2, the team's report of 12 October: an application named "20", a component named "300", 500 applications
+# to review) what is no name of a part or a subject, whatever reads it: a number, a version, a size or a duration,
+# an address or a port, a date, a placeholder, a ticket, a path or a file, a hash, a word that names a kind of thing
+NO_LETTER = re.compile(r"^[^A-Za-zÀ-ÿ]*$")
+VERSION = re.compile(r"^v?\d+(?:[._-]\d+)+(?:[-+._]?[a-z]+\d*)?$|^v\d+[a-z]?$|^r\d+$|^\d+(?:st|nd|rd|th)$", re.I)
+MEASURE = re.compile(r"^\d+(?:[.,]\d+)?\s*(?:%|‰|ms|µs|us|ns|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?|"
+                     r"w|weeks?|months?|y|years?|k|m|g|kb|mb|gb|tb|pb|kib|mib|gib|tib|b|bytes?|bits?|kbps|mbps|gbps|"
+                     r"cpus?|cores?|vcpus?|gpus?|x|rps|qps|tps|req/s|ops|users?|nodes?|pods?|replicas?|instances?|"
+                     r"rows?|lines?|files?|items?|times?)$", re.I)
+DATE = re.compile(r"^\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?(?:[ t]\d{1,2}:\d{2}.*)?$|^\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}$|"
+                  r"^\d{1,2}:\d{2}(?::\d{2})?$|^(?:q[1-4]|h[12])[ -]?\d{2,4}$|^(?:19|20)\d{2}$", re.I)
+ADDRESS = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?(?::\d+)?$|^:\d{2,5}$|^\d{2,5}/(?:tcp|udp)$|"
+                     r"^[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}(?:/\d+)?$|^(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}$", re.I)
+PLACEHOLDER = re.compile(r"^(?:<[^>]*>|\{\{.*\}\}|\$\{[^}]*\}|\$[A-Z_]+|%[sd]|x{2,}|y{3,}|tbd|tba|tbc|todo|fixme|n/?a|"
+                         r"none|null|nil|undefined|unknown|unnamed|untitled|other|others|misc|various|default|example|"
+                         r"examples|sample|samples|dummy|foo|bar|baz|qux|changeme|placeholder|lorem|ipsum|test\d*|"
+                         r"\?+|-+|—|–|_+|\.{2,}|\*+|#)$", re.I)
+TICKET = re.compile(r"^[A-Z][A-Z0-9]{1,9}-\d{1,7}$|^(?:inc|chg|req|ritm|prb|task|ctask|sr|cr)\d{4,}$|^#\d+$", re.I)
+TICKET_UPPER = re.compile(r"^[A-Z][A-Z0-9]{1,9}-\d{1,7}$")
+PATHLIKE = re.compile(r"[/\\]|^~|^\.[\w]|\.(?:ya?ml|json|xml|ini|conf|cfg|py|sh|ps1|bat|js|ts|jsx|tsx|java|kt|go|rb|php|"
+                      r"cs|md|rst|txt|csv|log|sql|j2|jinja2?|tpl|tmpl|properties|toml|env|lock|gz|zip|tar|jar|war|"
+                      r"rpm|deb|html?|png|jpe?g|svg|pdf|docx?|xlsx?)$", re.I)
+WEBLIKE = re.compile(r"^[a-z][a-z0-9+.-]*://|^www\.|\w@\w|^mailto:", re.I)
+HASHLIKE = re.compile(r"^(?:[0-9a-f]{12,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|sha\d*[:-][0-9a-f]+)$",
+                      re.I)
+# words that name a kind of thing (or say nothing) rather than one thing: no value of a part's or a subject's category
+KIND_WORDS = {"application", "applications", "app", "apps", "appli", "component", "components", "composant",
+              "composants", "service", "services", "server", "servers", "serveur", "serveurs", "system", "systems",
+              "systeme", "système", "platform", "platforms", "plateforme", "module", "modules", "tool", "tools",
+              "outil", "outils", "database", "databases", "db", "dbs", "base", "team", "teams", "equipe", "équipe",
+              "environment", "environments", "environnement", "env", "envs", "host", "hosts", "node", "nodes",
+              "instance", "instances", "cluster", "clusters", "group", "groups", "groupe", "item", "items", "data",
+              "donnees", "données", "info", "infos", "information", "informations", "name", "names", "nom", "value",
+              "values", "valeur", "type", "types", "id", "ids", "list", "liste", "table", "tables", "field",
+              "fields", "champ", "total", "count", "sum", "yes", "no", "oui", "non", "true", "false", "vrai",
+              "faux", "on", "off", "enabled", "disabled", "ok", "ko", "up", "down", "all", "tous", "toutes",
+              "everything", "main", "general", "général", "common", "commun", "generic", "new", "old", "legacy",
+              "current", "user", "users", "client", "clients", "customer", "customers", "status", "state", "statut",
+              "description", "comment", "comments", "note", "notes", "version", "versions", "release", "releases",
+              "owner", "owners", "contact", "contacts", "link", "links", "lien", "liens", "doc", "docs",
+              "documentation", "page", "pages", "wiki", "home", "index", "readme", "overview", "summary",
+              "introduction", "intro", "architecture", "design", "process", "procedure", "runbook", "runbooks",
+              "config", "configuration", "settings", "parameters", "params", "properties", "options", "default",
+              "monitoring", "logs", "log", "metrics", "metric", "alerts", "alert", "dashboard", "dashboards"}
+ENV_WORDS = {"prod", "production", "prd", "preprod", "pre-prod", "pprod", "staging", "stage", "stg", "dev",
+             "development", "devel", "test", "tests", "testing", "tst", "uat", "qa", "qualif", "qualification",
+             "recette", "rec", "int", "integration", "sandbox", "demo", "dr", "drp", "pra", "local", "lab"}
+# a subject is a topic: "monitoring", "security", "data" are topics; these kind words are not
+KIND_WORDS_SUBJECT = KIND_WORDS - {"monitoring", "logs", "metrics", "alerts", "data", "architecture", "security",
+                                   "configuration", "documentation", "process", "release", "releases"}
+
+
+def no_name(category: str | None, raw: str) -> str:
+    """(0.10.9.2) Why `raw` is no name of a value the learning would propose in `category` ("": it may be one). A
+    category of addresses (an IP, a VIP, a DNS name, a URL, a port) takes addresses; a server's takes a name with
+    digits; none takes a bare number, a version, a size, a date, a placeholder, a ticket, a path or a hash."""
+    v = " ".join(str(raw or "").split()).strip()
+    c = str(category or "").lower()
+    low = v.lower()
+    addressy = bool(re.search(r"\b(?:ip|ips|vip|vips|address|addresses|addr|dns|url|urls|endpoint|port|ports|cidr|"
+                              r"subnet|network|domain|fqdn|certificate|cert)\b", c))
+    if not v:
+        return "empty"
+    if ADDRESS.match(v):
+        return "" if addressy else "an address or a port, not a name"
+    if addressy and (WEBLIKE.search(v) or re.match(r"^[\w.-]+\.[a-z]{2,}$", v, re.I)):
+        return ""                                       # a URL, a DNS name: an address category's value
+    if NO_LETTER.match(v):
+        return "no letter: a number or a code, not a name"
+    if VERSION.match(v):
+        return "a version, not a name"
+    if MEASURE.match(v):
+        return "a quantity (a size, a duration, a count), not a name"
+    if DATE.match(v):
+        return "a date or a time, not a name"
+    if PLACEHOLDER.match(v):
+        return "a placeholder or a word that names nothing"
+    if (WEBLIKE.search(v) or PATHLIKE.search(v)) and not addressy:
+        return "an address, a path or a file, not a name"
+    if HASHLIKE.match(v):
+        return "a hash or an identifier, not a name"
+    if TICKET_UPPER.match(v) or (TICKET.match(v) and not v[0].islower()):
+        return "a ticket, not a name"
+    hosty = bool(re.search(r"server|host|node|machine|instance|\bvm|pod|container", c))
+    letters = sum(ch.isalpha() for ch in v)
+    if letters < 2 and not re.match(r"^[A-Za-z]\d{1,2}$", v):     # (S3, a known service's short name, is one)
+        return "fewer than two letters"
+    if letters * 3 < len(v.replace(" ", "")) and not hosty:
+        return "mostly digits and signs: a code, not a name"
+    if hosty:
+        return ""
+    words = re.split(r"[\s_.-]+", low)
+    kinds = KIND_WORDS_SUBJECT if c == "subject" else KIND_WORDS
+    identifier = bool(re.fullmatch(r"[a-z][a-z0-9]*(?:[-_][a-z0-9]+)+", v))   # (0.10.9.3) config-server,
+    #                                 customers-service: one identifier of a code or a configuration is a name
+    if not identifier and all(w in kinds or w in ENV_WORDS or w.isdigit() or not w for w in words) and \
+            c not in ("environment", "env", "environments"):
+        from supagent.knowledge.placing import phrases
+
+        said = phrases(c)                               # (0.10.9.3) a team named with common words ("Platform team",
+        named = [w for w in words if w]                 # "Team Data"), an area named by one ("data", "compute"):
+        if ("team" in said and len(named) >= 2 and any(w in TEAM_WORDS for w in named)) or \
+                ("domain" in said and not any(w in DOMAIN_WORDS for w in named)):   # names in their category
+            return ""
+        return "a word for a kind of thing or an environment, not the name of one"
+    return ""
+
+
+TEAM_WORDS = {"team", "teams", "equipe", "équipe", "squad", "crew", "tribe"}
+DOMAIN_WORDS = {"area", "areas", "domain", "domains", "domaine", "domaines"}
 
 
 def _setting(key: str, default: int) -> int:
@@ -142,10 +264,15 @@ def checked(category: str | None, name: Any) -> tuple[str | None, list[str], str
         return raw[:128], [], ""
     others: list[str] = []
     limit = max_chars()
+    from supagent.knowledge.placing import phrases
+
+    if DOTTED.match(raw) and "messaging" in phrases(str(category or "")):
+        limit = max(limit, 64)                            # (0.10.10) a topic's dotted name is a name, however long
     if len(raw) > limit and DOTTED.match(raw):           # a host's full name: its first label
         first = raw.split(".", 1)[0]
-        if len(first) >= 2 and any(ch.isalpha() for ch in first):
-            raw, others = first, [raw[:128]]
+        if len(first) >= 2 and any(ch.isalpha() for ch in first) and not REVERSE_DNS.fullmatch(first) and \
+                "messaging" not in phrases(str(category or "")):   # (0.10.10) never a topic's first word
+            raw, others = first, [raw[:128]]                     # ("com.x.created.v1" is no "com")
     if len(raw) > limit:
         return None, [], f"longer than {limit} characters"
     if SENTENCE.search(raw):
@@ -158,6 +285,9 @@ def checked(category: str | None, name: Any) -> tuple[str | None, list[str], str
         return None, [], "a phrase (it starts with an article)"
     if any(w in VERBS for w in low):
         return None, [], "a phrase (a verb)"
+    why = no_name(category, raw)                          # (0.10.9.2) a number, a version, a placeholder...
+    if why:
+        return None, [], why
     return raw, others, ""
 
 
@@ -170,6 +300,10 @@ def gated(category: str | None) -> bool:
     c = str(category or "")
     if not c or c == "aspect" or SERVERISH.search(c):
         return False
+    from supagent.knowledge.placing import HOSTISH, phrases
+
+    if set(phrases(c)) & HOSTISH:                         # (0.10.10) an "ansible group", a "virtual ip": an
+        return False                                      # inventory names them too ("web (ops prod)")
     try:
         from supagent.knowledge.facets import BUILTIN, field_rules
 
@@ -195,6 +329,8 @@ def kind_of(name: Any, description: str | None = None) -> str | None:
         return "database"
     if INFRASTRUCTURE.search(n) or (said and INFRASTRUCTURE_SAID.search(said)):
         return "infrastructure"
+    if RUNTIME.match(n):
+        return "runtime"
     return None
 
 
@@ -212,9 +348,20 @@ def filed(category: str, name: Any, description: str | None = None, cats: list[s
         from supagent.knowledge.facets import editable
 
         cats = list(editable())
-    own = next((c for c in cats if OWN[kind].match(c)), None)
+    own = next((c for c in cats if OWN[kind].match(c)), None) if kind in OWN else None
     if kind == "library":
         return own, kind
+    # (0.10.10) the deployment's category for the software installed on its hosts ("host software"): a web server, an
+    # agent, a runtime goes there before a platform's category (a broker to the deployment's brokers when it has them)
+    soft = next((c for c in cats if OWN["software"].match(c)), None)
+    broker = next((c for c in cats if OWN["broker"].match(c)), None)
+    if kind == "infrastructure" and BROKER_NAME.search(str(name or "")) and broker:
+        return broker, kind
+    if soft and (kind == "runtime" or kind == "infrastructure" and not BROKER_NAME.search(str(name or "")) or
+                 kind == "monitoring" and not own):
+        return soft, kind
+    if kind == "runtime":
+        return category, kind
     if own:
         return own, kind
     if kind in ("database", "infrastructure") and category == "component":
