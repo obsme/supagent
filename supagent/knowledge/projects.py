@@ -64,6 +64,10 @@ BASE_ROLES = {
     "download", "downloads", "reset", "remove", "uninstall", "install", "preinstall", "postinstall", "configure",
     "deploy-finish", "post-deploy", "pre-deploy", "migrate", "migration", "backup-config", "gather-facts"}
 LANGUAGES = ("java", "python", "pip", "nodejs", "node", "ruby", "php", "golang", "dotnet", "rust")
+# (0.10.9.2) the roles installing a language's runtime that a deployment with a category for its hosts' software files
+# there (python, node: the system's own, never)
+RUNTIME_ROLES = {"java", "openjdk", "jdk", "jre", "php", "php-fpm", "nodejs", "ruby", "erlang", "elixir", "golang",
+                 "dotnet"}
 # (0.10.10) the words of a role that sets the hosts up rather than runs a service (os_setup, ssh_hardening, admin-tools,
 # yum-cron, motd, bashrc, autofs, aws-cli, certbot, disable-overcommit): every word one of these, no part
 CONFIG_WORDS = BASE_ROLES | {"os", "admin", "tools", "tool", "utils", "autofs", "nfs", "automount", "autoupdates", "auto",
@@ -95,7 +99,13 @@ CONFIG_SUFFIX = re.compile(r"[_-](users|user|databases|database|dbs|schemas|priv
 #                         applies others, no part; (0.10.9.3) x_systemd, x_upload_module, x-plugins: x's units, x's own;
 #                         (0.10.9.1) psql-client, hr_share, extra_path: a client tool, a share mounted, a path set
 # (0.10.9.3) a role named after a job it runs on its hosts (x-importer, x_auto_lint, x-cleanup): no service of its own
-JOB_SUFFIX = re.compile(r"[_-](importer|lint|linter|cleanup|cleaner)$", re.I)
+JOB_SUFFIX = re.compile(r"[_-](importer|lint|linter|cleanup|cleaner|fix|fixes|patch|patches|hotfix|hotfixes|"
+                        r"dependencies|deps|prereqs|prerequisites|requirements)$", re.I)   # (0.10.9.2) x-fixes,
+#                         core_dependencies: what a role applies once or installs for others, no service
+# (0.10.9.2) an organisation's prefix for its deployment roles ("acme-deploy-redis", "acme_role_solr"): the part is
+# what follows it
+ORG_DEPLOY_PREFIX = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*?[-_](?:deploy|deployment|role|ansible)[-_](?=[a-z0-9]{3})",
+                               re.I)
 # the services of the system itself: a role starting only these configures the system
 SYSTEM_SERVICES = re.compile(r"^(ntpd?|chronyd?|firewalld|iptables|ip6tables|ufw|sshd?|rsyslog|syslog-ng|crond?|"
                              r"auditd|systemd-[\w-]+|tuned|irqbalance|network|networking|NetworkManager|docker|"
@@ -148,6 +158,38 @@ def _short(role: str) -> str:
 
 GENERIC_ROLE = {"machine", "server", "servers", "client", "clients", "node", "nodes", "agent", "install", "setup",
                 "common", "main", "default", "base", "config", "configure", "role", "deploy"}
+
+# (0.10.9.2) a nested role (roles/<software>/<piece>) whose piece is named by a generic word: its base is the
+# software's (monitor/base, quokka/server: monitor, quokka), a piece that runs on hosts of its own is the software's
+# piece (quokka/worker: quokka-worker), an object it makes in other software is no part (mq/queue: a queue of the
+# broker; vault/policy: a policy of the vault; idm/client: a host enrolled)
+NESTED_BASE = {"base", "common", "main", "default", "core", "install", "setup", "server", "servers"}
+NESTED_PIECE = {"backend", "back-end", "frontend", "front-end", "worker", "workers", "dispatcher", "scheduler", "web",
+                "api", "consumer", "consumers", "listener", "listeners", "poller", "hub", "node", "nodes", "agent",
+                "agents", "controller", "ui", "daemon", "runner", "runners", "executor", "indexer", "collector"}
+NESTED_OBJECT = {"queue", "queues", "exchange", "exchanges", "topic", "topics", "vhost", "vhosts", "user", "users",
+                 "database", "databases", "db", "dbs", "bucket", "buckets", "index", "indices", "dashboard", "dashboards",
+                 "datasource", "datasources", "rule", "rules", "policy", "policies", "schema", "schemas", "grant",
+                 "grants", "service", "services", "certificate", "certificates", "cert", "certs", "keytab", "keytabs",
+                 "share", "shares", "mount", "mounts", "client", "clients"}
+
+
+def _nested(role: str) -> str | None:
+    """(0.10.9.2) The part a nested role whose piece has a generic name is (NESTED_BASE): its software's name, the
+    software's piece, or "" (none); None for any other role (its own name says what it is)."""
+    bits = [b for b in str(role or "").strip().strip("/").split("/") if b]
+    if len(bits) < 2 or "." in bits[-1] or "." in bits[-2] or "{" in bits[-2]:
+        return None
+    parent, piece = bits[-2], _norm(bits[-1])
+    if piece in NESTED_OBJECT:
+        return ""
+    if piece in NESTED_BASE:
+        return parent
+    if piece in NESTED_PIECE:
+        return parent + ("_" if "_" in parent else "-") + bits[-1]
+    if re.fullmatch(r"(?:[a-z0-9]+-)?(?:app|application)", piece):
+        return parent                                     # (0.10.9.2) site/x-app: the site's application itself
+    return None
 
 
 def _collection_short(role: str) -> str:
@@ -548,16 +590,26 @@ class Role:
         Compose stack: its services are the parts, not the role)."""
         if self.stack:
             return None
-        short = _collection_short(self.name)
+        nested = _nested(self.name)
+        if nested == "":
+            return None                                    # (0.10.9.2) an object it makes in other software
+        short = nested or _collection_short(self.name)
+        short = ORG_DEPLOY_PREFIX.sub("", short)             # (0.10.9.2) acme-deploy-redis: redis
         n = _norm(short)
         if self.root is not None and self.tasks:           # its tasks tell
             own = [s for s in self.services if not SYSTEM_SERVICES.match(s) and
                    not (AGENT_DAEMONS.match(s) and not _own_service(self, ""))]   # (0.10.10) a metrics agent's
             #                                                   restart (telegraf) is the agent's, not the role's
-            if OPERATION_ROLE.match(n):
-                return None                                # (0.10.10) fix-x, monitor-x: an operation, no service
+            if OPERATION_ROLE.match(n) or JOB_SUFFIX.search(n):
+                return None                                # (0.10.10) fix-x, monitor-x: an operation, no service;
+                #                                            (0.10.9.2) x-fixes with its own tasks too
             return _part_name(short) if (own or self.deploys or self.site) and \
                 not n.startswith(("base-", "common")) else None   # (0.10.4) a web site it publishes: an application
+        from supagent.knowledge.naming import software_category
+
+        if n in RUNTIME_ROLES and software_category():
+            return _part_name(short)                       # (0.10.9.2) a language's runtime: the hosts' software,
+            #                                                where the deployment files it (else no part, as before)
         if n in BASE_ROLES or n.startswith("base-") or CONFIG_SUFFIX.search(n) or OPERATION_ROLE.match(n) or \
                 JOB_SUFFIX.search(n) or \
                 set(re.split(r"[-_.]+", n)) <= CONFIG_WORDS or \
@@ -967,6 +1019,11 @@ def ansible(units: list[dict[str, Any]], named: frozenset[str] | set[str] = froz
              for p in _plays(u)]
     adhoc = [(u, m) for u in units if (u["path"] or "").endswith((".sh", ".bash")) for m in ADHOC.finditer(u["text"] or "")]
     names: dict[str, list[str]] = {"parts": [], "hosts": [], "groups": []}
+    for p in plays:                                       # (0.10.9.2) the groups the plays run on, whether or not an
+        for g in re.split(r"[:,]", str(p["pattern"] or "")):   # inventory here lists them (an inventory kept
+            g = g.strip().lstrip("!&")                    # elsewhere, a dynamic one)
+            if g not in ("all", "ungrouped", "localhost") and re.fullmatch(r"[A-Za-z][\w-]*", g):
+                names.setdefault("play_groups", []).append(g)
     role_tasks = any(re.search(r"(^|/)roles/[^/]+/tasks/[^/]+\.ya?ml$", p) for p in by_path)
     tooling = any(re.search(r"(^|/)(ansible\.cfg|galaxy\.yml|requirements\.ya?ml|site\.ya?ml)$", p) for p in by_path)
     if not (plays or adhoc or invs or (role_tasks and tooling)):

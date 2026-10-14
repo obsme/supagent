@@ -486,3 +486,19 @@ def test_who_did_it_says_where_the_part_writes_it_first(ctx, monkeypatch):
     assert "its servers (zqo-db-1) have their own log lines in field \"host.name\" of zqo-logs-*" in who
     other = A.Agent._question_blocks(a, "How many long transactions did zqo-db have?", set())
     assert "own log lines" not in other
+
+
+def test_a_value_its_queries_grouped_by_but_the_answer_never_named_is_new():
+    """(0.10.9.2) "And the flash PnL?" after an answer that gave the official PnL only, its query grouped by PNL_STATUS:
+    the chat keeps no rows, so the flash figure is asked for again by a query (the gate's C07.2: the official figure
+    given as the flash one with no query). An answer that named it (its figure told) holds it."""
+    from supagent.knowledge.carry import new_values
+
+    values = {"flash": "PNL_STATUS", "official": "PNL_STATUS"}
+    grouped = ['SELECT "PNL_STATUS", COUNT(*), SUM("PNL_TOTAL") FROM "pnl" WHERE "DESK" = \'EQ\' GROUP BY "PNL_STATUS"']
+    asked = "What was the official PnL of the EQ desk on 22 September?"
+    official_only = "The official PnL of the EQ desk on 22 September was 567,189.49 EUR."
+    both = "Official: 567,189.49 EUR; flash: 576,885.24 EUR."
+    got = new_values("And the flash PnL?", [asked, official_only], grouped, values_of=lambda t: values)
+    assert got == ["flash (PNL_STATUS)"]
+    assert new_values("And the flash PnL?", [asked, both], grouped, values_of=lambda t: values) == []

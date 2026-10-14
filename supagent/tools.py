@@ -4149,7 +4149,7 @@ def _servers_of_named(names: list[str]) -> list[str]:
     be read."""
     try:
         from supagent.knowledge.brief import _by_host, _graph
-        from supagent.knowledge.datalinks import SERVERISH
+        from supagent.knowledge.catkind import serverish
 
         g = _graph()
         V, out = g["values"], []
@@ -4157,7 +4157,7 @@ def _servers_of_named(names: list[str]) -> list[str]:
             for i in (g["names"].get(" ".join(str(n).lower().split())) or _by_host(str(n), g))[:2]:
                 for kind, b, _note in g["out"].get(i, []):
                     name = V[b]["name"]               # a server or a group of servers (not a namespace, a cluster:
-                    if kind == "runs_on" and SERVERISH.search(V[b]["cat"] or "") and name not in out and \
+                    if kind == "runs_on" and serverish(V[b]["cat"]) and name not in out and \
                             name not in names:        # their words are in every record of what runs there)
                         out.append(name)
         return out

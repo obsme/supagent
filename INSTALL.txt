@@ -1,14 +1,14 @@
-supagent 0.10.9.1 - the AI agent inside Apache Superset
+supagent 0.10.9.2 - the AI agent inside Apache Superset
 =======================================================
 
 What is in this folder
-  supagent-0.10.9.1-py3-none-any.whl  the package for Superset 6.1 (pure Python; nothing else to install)
+  supagent-0.10.9.2-py3-none-any.whl  the package for Superset 6.1 (pure Python; nothing else to install)
   supagent-guide.html / .pdf          the guide (install, LLM middleware, learning, screens)
   catalog.example.yaml                an example catalog, to adapt
   SHA256SUMS                          checksums
 
-Upgrading? From 0.10.9: pip install this wheel on every host, restart; nothing to run: "From 0.10.9 to 0.10.9.1"
-below. From 0.10.8.1: the same (osagg 0.2.15 or 0.2.16), and "From 0.10.8.1 to 0.10.9" below. From 0.10.8: the same with osagg 0.2.15, and "From 0.10.8 to 0.10.8.1" below. From 0.10.7: the same, and "From 0.10.7 to 0.10.8" below. From 0.10.6.2, 0.10.6.1 or 0.10.6: the same, and "From 0.10.6.2 to 0.10.7" below (and "From 0.10.6.1 to
+Upgrading? From 0.10.9.1: pip install this wheel on every host, restart; nothing to run: "From 0.10.9.1 to
+0.10.9.2" below. From 0.10.9: the same, and "From 0.10.9 to 0.10.9.1" below. From 0.10.8.1: the same (osagg 0.2.15 or 0.2.16), and "From 0.10.8.1 to 0.10.9" below. From 0.10.8: the same with osagg 0.2.15, and "From 0.10.8 to 0.10.8.1" below. From 0.10.7: the same, and "From 0.10.7 to 0.10.8" below. From 0.10.6.2, 0.10.6.1 or 0.10.6: the same, and "From 0.10.6.2 to 0.10.7" below (and "From 0.10.6.1 to
 0.10.6.2", "From 0.10.6 to 0.10.6.1" for what they brought, in this wheel too). From 0.10.0: pip install this wheel on every host,
 superset supagent init once (no table changes: v18), restart: "From 0.10.0 to 0.10.6" below (0.10.4 and 0.10.5 were not released: "What 0.10.5 brings" and "What 0.10.4 brings" too). From 0.9.6.9,
 0.9.6.8, ... 0.9.6.1 or 0.9.6: pip install this wheel on every host, superset supagent init once (tables v17 to v18:
@@ -134,6 +134,19 @@ role): three packages must be pinned, or Superset itself does not start (none is
    supagent_store). Then:
      superset supagent init          builds it (the first time it finds the extensions)
      superset supagent store status  extensions, versions, size, warnings
+
+From 0.10.9.1 to 0.10.9.2
+=========================
+  - No table change (v18), no new setting. pip install the wheel on every host, restart the web servers, the workers
+    and beat. Nothing to run.
+  - The learning now reads each of your categories by its description when its name is not one it knows (Categories,
+    each category's description: "a machine (a virtual machine or a server) by its hostname", "an Ansible inventory
+    group of one role", "the team that runs ...", "software installed on the hosts: ..."). Categories named the usual
+    way ("server", "host group", "team") are read as before.
+  - Measured: main open set 159/162, observability 29/29; unit tests 2033; upgrade from 0.10.9.1 checked; learning not
+    below 0.10.9.1 on ten development corpora; on a real repository read once after the build was frozen, 63 % of the
+    proposed values in the right category (0.10.9.1: 49 %) and 87 % of the links right (71 %); categories renamed but
+    described: filed as under their own names.
 
 From 0.10.9 to 0.10.9.1
 =======================

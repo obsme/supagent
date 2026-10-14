@@ -547,15 +547,20 @@ ORDER_SCOPES = 500         # (0.10.9.1) the lists put in order by hand, at most
 ORDER_IDS = 5000           # the values of one list kept in its order, at most
 
 
-def _order(raw: Any) -> dict[str, list[int]]:
+SUB_BOX = re.compile(r"^sub:[^\n]{1,80}$")   # (0.10.9.2) a subcategory's box in its column's list
+
+
+def _order(raw: Any) -> dict[str, list[int | str]]:
     """(0.10.9.1) {list: [value ids in the order a person put them]}: a category's column ("server") or what is
-    inside a value ("in:<id>")."""
-    out: dict[str, list[int]] = {}
+    inside a value ("in:<id>"); (0.10.9.2) a column's subcategory boxes among them ("sub:<category>")."""
+    out: dict[str, list[int | str]] = {}
     for k, ids in (raw if isinstance(raw, dict) else {}).items():
         k = str(k).strip()[:64]
         if not k or not isinstance(ids, (list, tuple)) or len(out) >= ORDER_SCOPES:
             continue
-        seen = list(dict.fromkeys(int(i) for i in ids if str(i).isdigit()))[:ORDER_IDS]
+        kept: list[int | str] = [int(i) if str(i).isdigit() else str(i).strip() for i in ids
+                                 if str(i).isdigit() or (isinstance(i, str) and SUB_BOX.match(i.strip()))]
+        seen = list(dict.fromkeys(kept))[:ORDER_IDS]
         if seen:
             out[k] = seen
     return out

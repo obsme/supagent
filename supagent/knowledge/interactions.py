@@ -161,6 +161,7 @@ def apply(found: list[dict[str, Any]], text: str, g: dict[str, Any], origin: str
     """The LLM's interactions kept: both parts known and named in the text, the sentence in the text word for
     word, no such interaction already drawn, proposed or rejected."""
     from supagent.knowledge.brief import named
+    from supagent.knowledge.catkind import kind_name
     from supagent.models import Link
 
     V, plain = g["values"], _norm(text)
@@ -179,9 +180,9 @@ def apply(found: list[dict[str, Any]], text: str, g: dict[str, Any], origin: str
         ca, cb = V[a[0]].get("cat"), V[b[0]].get("cat")
         if ca in TOPICS or cb in TOPICS:                # (0.10.6) a subject is a topic, no part of a flow
             continue
-        if kind == "runs_on" and ca in SERVERISH and cb not in SERVERISH:
+        if kind == "runs_on" and kind_name(ca) in SERVERISH and kind_name(cb) not in SERVERISH:
             a, b = b, a                                  # (0.10.6) what runs is the part, where it runs the server
-        elif kind != "runs_on" and kind != "monitors" and cb in SERVERISH:
+        elif kind != "runs_on" and kind != "monitors" and kind_name(cb) in SERVERISH:
             continue                                     # (0.10.6) a flow goes to the service there, not the server
         a_ref, b_ref = f"facet:{a[0]}", f"facet:{b[0]}"
         if db.session.query(Link.id).filter(Link.a_ref == a_ref, Link.b_ref == b_ref, Link.kind == kind).first():

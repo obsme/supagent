@@ -1,5 +1,84 @@
 # Changes
 
+## 0.10.9.2 — 2026-10-14
+
+The team's requests of 14 October: the known gap of 0.10.9.1 (an answer that writes out its query waited for a second
+LLM request), the learning's weak spot (a deployment's own categories, when their names are not the usual ones), and
+the System map's subcategories; the learning again, on real repositories and wikis it never saw. No table change
+(v18); no new setting.
+
+Measured before the release under a rule written before any result, on the frozen build 17a4e01 (0.10.9.2 is that
+build with its version) with Qwen3.6-35B-A3B (llama.cpp, its server restarted first), one round of each open set on
+the small model's profile (the lab's model reads 64k tokens per request): the main open set 159 of 162 right (the
+rule: 158), 2 wrong without a mark; the observability open set 29 of 29 right (the rule: 26), 0 wrong without a mark.
+The unit tests: 2033 passed. The upgrade from 0.10.9.1 on a copy of a lab: tables unchanged (v18), every setting kept,
+the System map's 289 values and 2,224 links kept, health 200, the knowledge search answering. The learning, no LLM: on
+ten development corpora no figure lower than 0.10.9.1's (seven higher); on a corpus built from a real infrastructure
+repository and its wiki after 0.10.9.1 was released and frozen before this build was, read once: 63.4 % of the
+proposed values in the right category (0.10.9.1: 48.5 %), 59 of its parts found (33), 87.4 % of the links between
+known parts right (71.2 %), 3 of 28 map-wide questions answered (none); on four development corpora with the team's
+categories renamed (other words, or none at all) and the same descriptions, the same figures as with their own names
+(0.10.9.1 filed 33 % to 100 % of them). Not measured: gpt-oss-120b, the big model's profile (unchanged since
+0.10.9.1).
+
+The learning
+* **The team's categories read by what they say they hold**: the learning filed what it reads into the team's
+  categories by their names ("server", "host group", "team", "host software"...). A category named otherwise ("box",
+  "fleet", "landscape", or any word of the team's own) is now read by its description in Categories: the head noun
+  of its first phrase ("a machine (a virtual machine or a server) by its hostname" holds servers; "an Ansible
+  inventory group: ..." groups; "a crew (a team of people)" a team; "software installed on the machines" the hosts'
+  software; "a service run by someone else" outside services), else by where the category is nested (inside a
+  category of groups: their hosts). A name that already says what it holds is read as before; a description that
+  defines nothing changes nothing; the category's own name is the one stored and shown. Describe your categories
+  (Categories, each category's description) for the learning to use them whatever their names.
+* **Real infrastructure repositories and their wikis read better**: nested roles (roles/<software>/<piece>), the
+  servers of a load balancer's backend, a table read by what its columns hold (where each row runs, keeps its data,
+  who looks after it), a page defining its title, the groups the plays run on even when no inventory lists them, an
+  organisation's deployment roles named after their software (fix and dependency roles propose nothing), an
+  application's address whose host is a template (the engine its scheme names), a team named in two languages on two
+  pages as one team, the team's own words for a part ("the event bus is a Kafka cluster"), a system named in prose
+  by a name of its own shape when a known part's sentence relates to it.
+* **Faster**: the learning reads each category's name and description once (a learning run's proposals about a third
+  faster on the lab's corpora).
+
+The System map
+* **A subcategory moves like a value**: a subcategory's box (made with "+" on a category's name) takes its place
+  among its column's values: drag it up or down its column, it stays where it is dropped, for everyone. Before, it
+  was always drawn at the bottom of its column.
+* **An empty subcategory takes a value dropped on it.**
+* **The values inside a subcategory are set in a little**, with a line down their side, so they are easy to tell from
+  the category's own values.
+
+Map-wide questions and the knowledge search
+* **What breaks when a store or a stream is down** includes what writes to it (an application storing its records, a
+  service publishing on a bus), not only what reads it or runs on it.
+* **Questions as people write them**: an outage in other words ("unavailable", "goes away", "cannot be reached",
+  "which products feel it"), "installed on", the environments a group is in, "the x group" for the groups of that
+  name, a team asked in another language than the map names it, where a service of no parts of its own is deployed.
+* **A category of servers known by its description** in what the agent reads of the map (the servers a name or an
+  address names, what runs where, "if db-01 is down").
+
+The agent
+* **A query written out in an answer is run at once** (0.10.9.1's known gap): an answer that writes the query its
+  figures claim without calling the tool had that query asked for in a second LLM request first, which could wait
+  about two minutes on the lab's model; the query is now run at once and the answer written from its rows.
+* **A follow-up's knowledge searched with the question it goes on from**, so another subject's entries of the same
+  word do not come first.
+* **A follow-up asking a value its chat grouped by but never named** gets its own query instead of being answered as
+  if the value had been read.
+
+Known gaps
+* **Applications and services of a repository the learning never saw** are found better but not yet well: on a
+  real infrastructure repository and wiki read only once, after this build was frozen, 63 % of what the learning
+  proposes goes to the right category of the team (0.10.9.1: 49 %), 87 % of the links it proposes between known
+  parts are right (0.10.9.1: 71 %), and 3 of 28 map-wide questions are answered (0.10.9.1: none).
+* **A category's description changed in Categories** reaches the filing of the hosts' software within a minute (that
+  one choice is read again every minute); every other use of it at once.
+* **The big model's profile** was measured on the lab's 64k-per-request model forced to a 128k window (0.10.9.1) and
+  not on gpt-oss-120b; agent.context_profile = short keeps the small model's sizes.
+* The rest of 0.10.9.1's known gaps stand (see 0.10.9.1), but the second request of an answer written without its
+  tool, fixed here.
+
 ## 0.10.9.1 — 2026-10-14
 
 The team's requests of 14 October: what the agent gives the LLM settable in Settings, for the small model and for the

@@ -196,14 +196,14 @@ def _host_aliases(values: dict[int, dict[str, Any]], synonyms: dict[int, list[st
     shorter names of the servers of the map (web01 for web01.corp.example, for web01:9100), each with the
     servers named so: a name of the map's own is never taken."""
     from supagent.knowledge import ambiguity, resolve
-    from supagent.knowledge.datalinks import SERVERISH
+    from supagent.knowledge.catkind import serverish
     from supagent.knowledge.describe import STOP
     from supagent.knowledge.values import host_aliases
 
     common = STOP | resolve.GENERIC | ambiguity.GENERIC   # a word of every question never names a server (graph for
     out: dict[str, list[int]] = {}                        # graph.corp.example: "show the graph of the errors")
     for v in values.values():
-        if SERVERISH.search(str(v["cat"] or "")):
+        if serverish(v["cat"]):                          # (0.10.9.2) by its name or what its description says
             for n in [v["name"]] + synonyms.get(v["id"], []):
                 for alias in host_aliases(n):
                     if alias not in common and v["id"] not in out.setdefault(alias, []):
@@ -214,14 +214,14 @@ def _host_aliases(values: dict[int, dict[str, Any]], synonyms: dict[int, list[st
 def _by_host(key: str, g: dict[str, Any]) -> list[int]:
     """(0.10.8) The servers of the map a full name or an address names (web01.corp.example, web01:9100 for a
     server named web01), never another server of the same short name (web01.dmz.example)."""
-    from supagent.knowledge.datalinks import SERVERISH
+    from supagent.knowledge.catkind import serverish
     from supagent.knowledge.values import host_aliases, same_host
 
     out: list[int] = []
     for alias in host_aliases(key):
         for x in g["names"].get(alias, []):
             v = g["values"].get(x) or {}
-            if x not in out and SERVERISH.search(str(v.get("cat") or "")) and same_host(key, v.get("name", "")):
+            if x not in out and serverish(v.get("cat")) and same_host(key, v.get("name", "")):
                 out.append(x)
     return out
 
@@ -795,9 +795,9 @@ HELD_SHOWN = 40                 # and named
 
 
 def _serverish(i: int, g: dict[str, Any]) -> bool:
-    from supagent.knowledge.datalinks import SERVERISH
+    from supagent.knowledge.catkind import serverish
 
-    return bool(SERVERISH.search(g["values"][i]["cat"] or ""))
+    return serverish(g["values"][i]["cat"])
 
 
 def held(p: int, g: dict[str, Any]) -> tuple[list[int], list[int]]:
@@ -947,7 +947,7 @@ def impact(places: list[int], g: dict[str, Any]) -> dict[str, dict[str, Any]]:
     depends on, calls, reads from or sends to those, and what does so to these, each with the step that reaches it.
     (0.10.7) A place that holds servers (a rack, a room, a cluster) too: _held_impact(); and what uses the place
     itself (a database archiving its WAL to a server), a person's link said with its own words."""
-    from supagent.knowledge.datalinks import SERVERISH
+    from supagent.knowledge.catkind import serverish
 
     V = g["values"]
 
@@ -965,7 +965,7 @@ def impact(places: list[int], g: dict[str, Any]) -> dict[str, dict[str, Any]]:
     res: dict[str, dict[str, Any]] = {}
     for p in places[:3]:
         seen = {p}
-        if not SERVERISH.search(V[p]["cat"] or ""):  # (0.10.7) a place that holds servers: a rack, a room...
+        if not serverish(V[p]["cat"]):              # (0.10.7) a place that holds servers: a rack, a room...
             item, frontier, gone = _held_impact(p, g, label)
             up = held_upstream(p, g)
             if up:                                     # (0.10.7) what it stands on outside: power, uplinks
@@ -985,14 +985,14 @@ def impact(places: list[int], g: dict[str, Any]) -> dict[str, dict[str, Any]]:
         seen.update(mine)
         groups: dict[str, list[int]] = {}
         for w in V[p].get("parents", []):
-            if w in V and w not in seen and SERVERISH.search(V[w]["cat"] or ""):
+            if w in V and w not in seen and serverish(V[w]["cat"]):
                 theirs = [a for a in on(w) if a not in seen]
                 seen.update(theirs)
                 if theirs:
                     groups[V[w]["name"]] = theirs
         members: dict[str, list[int]] = {}           # a group: what runs on each of its servers
         for c in g["children"].get(p, [])[:20]:
-            if c in V and SERVERISH.search(V[c]["cat"] or ""):
+            if c in V and serverish(V[c]["cat"]):
                 theirs = [a for a in on(c) if a not in mine and a != p]
                 if theirs:
                     members[V[c]["name"]] = theirs
@@ -1213,9 +1213,9 @@ def links_of(names: list[str], depth: int = 1, to: str | None = None) -> dict[st
     if listed:
         res["categories_listed"] = listed
     ids = [i for raw in names[:8] for i in (named(str(raw), g) or g["names"].get(" ".join(str(raw).lower().split()), []))[:2]]
-    from supagent.knowledge.datalinks import SERVERISH   # (0.10.6) a server or a group named: what its failure
+    from supagent.knowledge.catkind import serverish   # (0.10.6) a server or a group named: what its failure
 
-    places = [i for i in ids if SERVERISH.search(V[i]["cat"] or "") or is_place(i, g)]   # ("if db-01 is down,
+    places = [i for i in ids if serverish(V[i]["cat"]) or is_place(i, g)]   # ("if db-01 is down,
     if depth and int(depth) > 1 and out:                                # which applications stop?": what runs on it
         paths = chains(ids, g, min(int(depth), 4))                      # was not the answer)
         if paths:

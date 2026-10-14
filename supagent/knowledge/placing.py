@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from typing import Iterable
+from functools import lru_cache
+from typing import Any, Iterable
 
 # a concept and the words that say it (generic words of operations and architecture; the longest phrases first)
 CONCEPTS: dict[str, tuple[str, ...]] = {
@@ -85,19 +86,32 @@ def _name_rx(name: str) -> str:
 
 def phrases(text: str) -> Counter:
     """The concepts a text says (each phrase once, the longest first: "cron job" is a job, not a job and a cron)."""
-    low = " " + re.sub(r"[^a-z0-9.:/-]+", " ", str(text or "").lower()) + " "
+    return Counter(dict(_said(str(text or ""))))
+
+
+@lru_cache(maxsize=8192)
+def _said(text: str) -> tuple[tuple[str, int], ...]:
+    """(0.10.9.2) phrases() of one text, read once (category names and descriptions are read many times a run)."""
+    low = " " + re.sub(r"[^a-z0-9.:/-]+", " ", text.lower()) + " "
     out: Counter = Counter()
     for p, c in PHRASES:
-        pat = re.compile(r"(?<=[ ])" + re.escape(p) + r"(?=[ ])")
+        pat = _PATTERNS.get(p)
+        if pat is None:
+            pat = _PATTERNS[p] = re.compile(r"(?<=[ ])" + re.escape(p) + r"(?=[ ])")
         if pat.search(low):
             out[c] += 1
             low = pat.sub(" # ", low)
-    return out
+    return tuple(out.items())
+
+
+_PATTERNS: dict[str, Any] = {}
 
 
 def affinity(category: str, about: str = "") -> Counter:
     """What a category of the deployment is: the concepts its name says (x3), then its description (x1)."""
-    out = Counter({c: 3 * n for c, n in phrases(category.replace("_", " ")).items()})
+    from supagent.knowledge.catkind import kind_name   # (0.10.9.2) by its name, else by what its description says
+
+    out = Counter({c: 3 * n for c, n in phrases(kind_name(category).replace("_", " ")).items()})
     for c, n in phrases(about or "").items():
         out[c] += n
     return out
@@ -106,17 +120,19 @@ def affinity(category: str, about: str = "") -> Counter:
 def best_category(concept: str, cats: Iterable[str], about: dict[str, str] | None = None) -> str | None:
     """The deployment's category for a concept: the one whose NAME says it (the description breaks a tie), else
     none."""
+    from supagent.knowledge.catkind import kind_name   # (0.10.9.2) a name that says nothing: what the category's
+    #                                                        description says it holds
     about = about or {}
     if concept != "external":                  # (0.10.9.1) a category for another company's things ("partner api",
-        cats = [c for c in cats if "external" not in phrases(c.replace("_", " "))]   # "vendor apps"): never for
-    scored = []                                #   the system's own
+        cats = [c for c in cats if "external" not in phrases(kind_name(c).replace("_", " "))]   # "vendor apps"):
+    scored = []                                #   never for the system's own
     for c in cats:
         a = affinity(c, about.get(c, ""))
-        named = phrases(c.replace("_", " ")).get(concept, 0)
+        named = phrases(kind_name(c).replace("_", " ")).get(concept, 0)
         if named:
             # the concept said by the name, then fewer other concepts in the name (a "data store" over an
             # "object store" for a store: object said first), then the description
-            others = sum(1 for k in phrases(c.replace("_", " ")) if k != concept)
+            others = sum(1 for k in phrases(kind_name(c).replace("_", " ")) if k != concept)
             scored.append((named, -others, a.get(concept, 0), -len(c), c))
     if scored:
         return max(scored)[-1]

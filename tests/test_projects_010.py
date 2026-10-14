@@ -338,5 +338,6 @@ def test_a_nested_role_is_judged_by_its_tasks(ctx):
              "roles/platform/agent/templates/lb.conf.j2": "upstream api {\n{% for h in groups['cp'] %}\n  server {{ h }}:6443;"
                                                           "\n{% endfor %}\n}\n"}
     t = triples(facts(units(files))[0])
-    assert {("control-plane", "runs_on", "cp"), ("agent", "runs_on", "nodes"), ("agent", "calls", "control-plane")} <= t
+    assert {("control-plane", "runs_on", "cp"), ("platform-agent", "runs_on", "nodes"),
+            ("platform-agent", "calls", "control-plane")} <= t       # (0.10.9.2) a generic piece named with its software
     assert not any(s == "labels" for s, _v, _o in t)                 # a role without a service: no part

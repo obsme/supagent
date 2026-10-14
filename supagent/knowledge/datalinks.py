@@ -37,10 +37,11 @@ PAIR_VALUES = 5000       # value pairs kept per pair of labels
 
 def kind_of(cat_a: str, cat_b: str) -> tuple[str, str, str]:
     """(kind, the category the link goes from, the one it goes to) for two categories seen together."""
+    from supagent.knowledge.catkind import serverish
     from supagent.knowledge.facets import PART_OF, rank
 
     for x, y in ((cat_a, cat_b), (cat_b, cat_a)):
-        if SERVERISH.search(y) and not SERVERISH.search(x):
+        if serverish(y) and not serverish(x):          # (0.10.9.2) by its name or what its description says
             if DISKISH.search(x):
                 return PART_OF, x, y                       # a disk of a server
             if OWNING.search(x):

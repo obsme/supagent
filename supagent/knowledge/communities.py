@@ -153,6 +153,11 @@ def build(g: dict[str, Any] | None = None) -> dict[str, Any]:
     for root, members in systems.items():                 # a system's owner: its own, else its parts' owners
         for t in owners.get(root, []) or [t for m in members for t in owners.get(m, [])]:
             teams[t].add(root)
+    for a, ts in owners.items():                          # (0.10.9.2) what a team owns that has no parts (a product
+        if a in values and not hostish(a):                # of one piece, a service): the team's too, as its system
+            for t in ts:                                  # when it is a part of one
+                if t in values and t != a:
+                    teams[t].add(of[a] if of.get(a) in systems else a)
     # what nobody organized: communities of the links between values of no community
     rest = [i for i in values if i not in of and i not in holders and i not in teams and i not in environments
             and not hostish(i)]
@@ -224,13 +229,20 @@ def _env_of(i: int, g: dict[str, Any], places: dict[int, list[int]]) -> str:
     return ""
 
 
-def _where(members: list[int], g: dict[str, Any], c: dict[str, Any]) -> dict[str, set[int]]:
-    """Where a system's parts run, per environment ("" when the place has none)."""
+def _where(members: list[int], g: dict[str, Any], c: dict[str, Any], inner: bool = False) -> dict[str, set[int]]:
+    """Where a system's parts run, per environment ("" when the place has none). (0.10.9.2) `inner`: with the groups
+    inside those groups (what runs on a group runs on its child groups' hosts too)."""
     out: dict[str, set[int]] = defaultdict(set)
     for m in members:
         for kind, b, _note in g["out"].get(m, []):
             if kind == "runs_on" and b in g["values"]:
                 out[_env_of(b, g, c["places"])].add(b)
+                todo = list(g["children"].get(b, [])) if inner else []
+                while todo:
+                    k = todo.pop()
+                    if k in c["places"] and k not in out[_env_of(b, g, c["places"])]:
+                        out[_env_of(b, g, c["places"])].add(k)
+                        todo += g["children"].get(k, [])
     return out
 
 
@@ -314,23 +326,40 @@ def pages() -> list[dict[str, Any]]:
 
 
 # ------------------------------------------------------------------------------------------------- map-wide questions
+# (0.10.9.2) what keeps its data, its files, its pages in a store: uses it ("which sites store files in X")
+KEEPS_IN = r"\b(?:stores?|keeps?|saves?|puts?|archives?)\s+(?:\w+\s+){0,3}?(?:in|into|to|on)\b"
 INTENTS = [   # (intent, words of the question)
-    ("impact", re.compile(r"\b(down|fails?|failure|outage|breaks?|affected|impact|impacted)\b", re.I)),
+    ("impact", re.compile(r"\b(down|fails?|failure|outage|breaks?|affected|impact|impacted|unavailable|unreachable|"
+                          r"offline|(?:can\s*not|can't|cannot)\s+be\s+reached|goes\s+away|went\s+away|is\s+gone|"
+                          r"suffers?|feels?\s+it|stops?\s+(?:working|answering|responding)|stopped|crash(?:es|ed)?|"
+                          r"dies|died|lose|loses|lost|are\s+hit|is\s+hit|get\s+hit|gets\s+hit)\b", re.I)),
+    #   (0.10.9.2) "if X is unavailable, which sites are hit", "which products suffer when X goes away", "X cannot be
+    #   reached: which products feel it"
     ("owner", re.compile(r"\b(own|owns|owned|ownership|owners?|maintains?|maintained|maintainers?|accountable|"
                          r"responsible|in\s+charge|looks?\s+after|looking\s+after|takes?\s+care\s+of|run\s+by|"
                          r"operated\s+by)\b", re.I)),   # (0.10.10) "who maintains X", "what is T accountable for"
     ("readers", re.compile(r"\b(read|reads|consume|consumes|consumers?|subscribe|subscribes|listens?|listeners?)\b",
                            re.I)),
     ("writers", re.compile(r"\b(write|writes|publish|publishes|producers?)\b", re.I)),
-    ("callers", re.compile(r"\b(call|calls|use|uses|depends?\s+on|relies\s+on|rely\s+on)\b", re.I)),
-    ("placement", re.compile(r"\b(where|run|runs|hosted|deployed)\b", re.I)),
+    ("callers", re.compile(r"\b(call|calls|use|uses|depends?\s+on|relies\s+on|rely\s+on)\b|" + KEEPS_IN, re.I)),
+    ("environments", re.compile(r"\b(?:which|what)\s+(?:environments?|envs?|stages?)\b|\bin\s+which\s+(?:environments?|"
+                                r"envs?|stages?)\b|\b(?:prod(?:uction)?|staging|stage|test|dev(?:elopment)?)\s+or\s+"
+                                r"(?:an?\s+)?(?:prod(?:uction)?|staging|stage|test|dev(?:elopment)?)\b", re.I)),
+    #   (0.10.9.2) "in which environments is the x group deployed", "is x a production or a staging group"
+    ("placement", re.compile(r"\b(where|run|runs|hosted|deployed|installed|located|lives)\b|"
+                             r"\b(?:which|what)\s+(?:\w+\s+)?(?:groups?|collections?|pools?|clusters?)\s+(?:hold|holds|"
+                             r"have|has|carry|carries|contain|contains|host|hosts)\b", re.I)),   # (0.10.9.2)
+    #   "which host group is x installed on", "which collections hold the x backend": where it runs
     ("members", re.compile(r"\b(make up|made of|consists?|belong|in the)\b", re.I)),
 ]
 
 
 # (0.10.9.1) a team is what the question asks for: "which team runs X", "who looks after X"
 TEAM_ASKED = re.compile(r"\b(?:which|what)\s+teams?\b|\bwho\s+(?:runs?|looks?\s+after|maintains?|takes?\s+care\s+of|"
-                        r"is\s+in\s+charge\s+of|supports?|manages?|operates?)\b", re.I)
+                        r"is\s+in\s+charge\s+of|supports?|manages?|operates?)\b|"
+                        r"\bwho\s+(?:should|do|can|must|would)\s+(?:i|we|you)\s+(?:contact|ask|call|page|reach|"
+                        r"escalate\s+to)\b|\b(?:point|person)\s+of\s+contact\b|\bcontact\s+(?:person|team)\b",
+                        re.I)   # (0.10.9.2) "who should I contact about X": its owner
 
 
 def intent_of(question: str) -> str:
@@ -363,11 +392,41 @@ def _env_pick(ids: list[int], question: str, values: dict[int, Any]) -> list[int
     return out
 
 
+# (0.10.9.2) a team named in a question ("the Security crew", "l'équipe Plateforme"): its name's words
+TEAM_NAMED = re.compile(r"(?i)\b([A-Za-zÀ-ÿ][\w&-]*(?:\s+[A-Za-zÀ-ÿ][\w&-]*){0,2})\s+(?:team|crew|squad|tribe)s?\b|"
+                        r"\b(?:team|crew|squad|tribe|[ée]quipe|equipo)\s+([A-Za-zÀ-ÿ][\w&-]*(?:\s+[A-Za-zÀ-ÿ][\w&-]*){0,2})")
+
+
 def _anchors(question: str, g: dict[str, Any]) -> list[int]:
-    """The values the question names (the longest names first)."""
+    """The values the question names (the longest names first); (0.10.9.2) a team named in another language than the
+    map's (the Security crew for "l'équipe Sécurité")."""
     from supagent.knowledge.brief import named
 
-    return named(question, g, loose=True)                 # (0.10.10) "pharmacy wholesaler" for pharmacy-wholesaler
+    found = named(question, g, loose=True)                # (0.10.10) "pharmacy wholesaler" for pharmacy-wholesaler
+    if any(_team_value(i, g) for i in found if i in g["values"]):
+        return found                                      # (a team the question names as the map does)
+    from supagent.knowledge.consolidate import _cognate, team_core, words
+
+    for m in TEAM_NAMED.finditer(question or ""):
+        said = [w for w in words(m.group(1) or m.group(2) or "") if w not in ("the", "our", "your", "their", "a", "an",
+                                                                            "which", "what", "is", "are", "does")]
+        for take in range(min(3, len(said)), 0, -1):      # "the Security crew": security; "is the X crew": x
+            core = tuple(said[-take:]) if m.group(1) else tuple(said[:take])
+            hits = [i for i, v in g["values"].items() if _team_value(i, g) and (tc := team_core(v["name"])) and
+                    len(tc) == len(core) and all(x == y or _cognate(x, y) for x, y in zip(tc, core))]
+            if hits:
+                found += [i for i in hits if i not in found]
+                break
+    return found
+
+
+def _team_value(i: int, g: dict[str, Any]) -> bool:
+    """(0.10.9.2) A value of the deployment's category for teams, or named as a team ("the x team")."""
+    from supagent.knowledge.consolidate import team_core
+
+    v = g["values"].get(i) or {}
+    return bool(re.search(r"(?i)\b(teams?|crews?|squads?|tribes?|[ée]quipes?|owners?)\b", str(v.get("cat") or ""))) or \
+        team_core(str(v.get("name") or "")) is not None
 
 
 def _which(anchors: list[int], question: str, intent: str, g: dict[str, Any], c: dict[str, Any]) -> list[int]:
@@ -389,11 +448,66 @@ def _which(anchors: list[int], question: str, intent: str, g: dict[str, Any], c:
             pick = [i for i in ids if values[i]["cat"] in said] if said else []
             if not pick:
                 need = {"owner": c["teams"], "members": {**c["holders"], **c["systems"], **c["environments"]},
-                        "placement": {**c["systems"], **c["places"]}}.get(intent)
+                        "placement": {**c["systems"], **c["places"]}, "environments": c["places"]}.get(intent)
                 pick = [i for i in ids if need is not None and i in need]
             ids = pick or ids
         out += ids
     return out
+
+
+# (0.10.9.2) a name written with a word for places next to it: the groups named so ("the bilby group", "the quokka
+# collection", "the web hosts"), not the software of the same name
+PLACE_WORDS = r"(?:(?:host|server|inventory)\s+)?(?:groups?|collections?|hosts|machines|servers|nodes|pools?)"
+
+
+def _as_groups(anchors: list[int], question: str, g: dict[str, Any], c: dict[str, Any]) -> list[int]:
+    """(0.10.9.2) Of the values a question names, one asked as a group of servers ("which hosts are in the bilby
+    group?") that is no group itself: the groups of that name (one per environment: "bilby (ops prod)") instead."""
+    from supagent.knowledge.brief import QUALIFIED
+
+    values = g["values"]
+
+    def base(i: int) -> str:
+        n = " ".join(str(values[i]["name"]).lower().split())
+        m = QUALIFIED.match(n)
+        return m.group(1) if m else n
+
+    out: list[int] = []
+    for a in anchors:
+        if a not in values or a in c["places"]:
+            out.append(a)
+            continue
+        b = re.escape(base(a))
+        said = re.search(r"(?<![\w.-])" + b + r"(?:\s*\([^()]*\))?\s+" + PLACE_WORDS + r"\b", question or "", re.I) or \
+            re.search(r"\b" + PLACE_WORDS + r"\s+" + b + r"(?![\w.-])", question or "", re.I)
+        groups = [i for i in c["places"] if i in values and i != a and base(i) == base(a)] if said else []
+        out += [i for i in (groups or [a]) if i not in out]
+    return out
+
+
+def _environments_of(a: int, g: dict[str, Any], c: dict[str, Any]) -> set[int]:
+    """(0.10.9.2) The environments a value is in: those holding it or what holds it (its groups, a system's
+    places), up the map."""
+    values = g["values"]
+    concept = _concept_of(g)
+    starts = {a}
+    if a in c["systems"]:
+        parts = [m for m in c["systems"][a] if m == a or m in g["children"].get(a, [])]
+        for places in _where(parts, g, c).values():
+            starts |= set(places)
+    found: set[int] = set()
+    seen: set[int] = set()
+    todo = list(starts)
+    while todo:
+        x = todo.pop()
+        if x in seen or x not in values:
+            continue
+        seen.add(x)
+        for p in values[x]["parents"]:
+            if p in values and (p in c["environments"] or concept.get(values[p]["cat"], "") == "environment"):
+                found.add(p)
+            todo.append(p)
+    return found
 
 
 def overview(question: str) -> dict[str, Any]:
@@ -406,7 +520,7 @@ def overview(question: str) -> dict[str, Any]:
     values = g["values"]
     anchors = _anchors(question, g)
     intent = intent_of(question)
-    anchors = _env_pick(_which(anchors, question, intent, g, c), question, values)
+    anchors = _env_pick(_as_groups(_which(anchors, question, intent, g, c), question, g, c), question, values)
     if intent in ("placement", "members") and anchors and all(a in c["teams"] for a in anchors):
         intent = "owner"                                  # (0.10.9.1) "what does the data team run": what it owns
     systems_asked = bool(re.search(r"\b(systems?|services?|applications?|platform)\b", question or "", re.I))
@@ -418,8 +532,9 @@ def overview(question: str) -> dict[str, Any]:
 
     for a in anchors:
         if intent == "impact":
-            users = {x for k, x, _n in g["in"].get(a, []) if k in ("depends_on", "reads_from", "runs_on", "calls")}
-            wholes = {system_of(u) for u in users}
+            users = {x for k, x, _n in g["in"].get(a, []) if k in ("depends_on", "reads_from", "runs_on", "calls",
+                                                                     "sends_to", "uses")}   # (0.10.9.2) what writes
+            wholes = {system_of(u) for u in users}                                       # to it fails with it too
             parts_asked = _categories_named(question, {values[u]["cat"] for u in users if u in values}) - \
                 {values[w]["cat"] for w in wholes if w in values}
             out |= users if parts_asked and not systems_asked else wholes   # (0.10.10) "what breaks": the systems
@@ -442,24 +557,36 @@ def overview(question: str) -> dict[str, Any]:
         elif intent == "writers":
             out |= {x for k, x, _n in g["in"].get(a, []) if k == "sends_to"}
             why = "what writes to it"
-        elif intent == "callers":
-            users = {x for k, x, _n in g["in"].get(a, []) if k in ("calls", "depends_on")}
+        elif intent == "callers":                         # (0.10.9.2) what uses it too; what keeps its data in it:
+            kinds = ("calls", "depends_on", "uses") + (("sends_to",) if re.search(KEEPS_IN, question or "", re.I)
+                                                       else ())   # what writes to it
+            users = {x for k, x, _n in g["in"].get(a, []) if k in kinds}
             out |= {system_of(u) for u in users} if systems_asked else users
             why = "what calls or uses it"
+        elif intent == "environments":
+            out |= _environments_of(a, g, c)
+            why = "the environments it is in"
         elif intent == "placement":
             if a in c["systems"]:
                 parts = [m for m in c["systems"][a] if m == a or m in g["children"].get(a, [])]
-                where = _where(parts, g, c)
+                where = _where(parts, g, c, inner=True)
                 env = _env_named(question, [e for e in where if e])
                 every = set().union(*where.values()) if where else set()
                 out |= where.get(env, set()) if env else (_named_env_places(question, every, g) or every)
                 why = f"where its parts run{' in ' + env if env else ''}"
+            elif a not in c["places"] and any(k == "runs_on" and b in values for k, b, _n in g["out"].get(a, [])):
+                where = _where([a], g, c, inner=True)     # (0.10.9.2) a service or a store of no parts asked
+                env = _env_named(question, [e for e in where if e])   # where it is deployed: where it runs
+                every = set().union(*where.values()) if where else set()
+                out |= where.get(env, set()) if env else (_named_env_places(question, every, g) or every)
+                why = f"where it runs{' in ' + env if env else ''}"
             else:
                 users = {x for k, x, _n in g["in"].get(a, []) if k == "runs_on"}
                 out |= {system_of(u) for u in users} if systems_asked else users
                 why = "what runs on it"
         else:
-            held = c["holders"].get(a) or c["teams"].get(a) or c["environments"].get(a) or c["systems"].get(a) or []
+            held = c["holders"].get(a) or c["teams"].get(a) or c["environments"].get(a) or c["systems"].get(a) or \
+                c["places"].get(a) or []                  # (0.10.9.2) a group's hosts or groups
             out |= set(held) - {a}
             why = "what it holds"
     said = _categories_named(question, {values[i]["cat"] for i in out if i in values})

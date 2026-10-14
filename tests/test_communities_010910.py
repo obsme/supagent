@@ -157,6 +157,8 @@ def test_the_communities_of_the_map(landscape):
 
 @pytest.mark.parametrize("question,want", [
     (f"If {PFX}-desk-pg is down, which systems are affected?", {f"{PFX}-desk"}),
+    (f"If {PFX}-desk.created is down, which systems are affected?", {f"{PFX}-desk", f"{PFX}-audit"}),   # (0.10.9.2)
+    #                                                   what writes to it fails with it too, not only what reads it
     (f"Which systems does {PFX}-crew own?", {f"{PFX}-desk"}),
     (f"Which parts read {PFX}-desk.created?", {f"{PFX}-audit-reader"}),
     (f"Where does {PFX}-desk run?", {f"{PFX}-grp-web"}),

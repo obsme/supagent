@@ -794,9 +794,9 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
         hit = known(value)
         if hit is None or hit.facet in (facet, "subject") or hit.status not in ("approved", "proposed"):
             return None
-        from supagent.knowledge.datalinks import SERVERISH
+        from supagent.knowledge.catkind import serverish
 
-        return None if facet == "subject" and SERVERISH.search(hit.facet or "") else hit
+        return None if facet == "subject" and serverish(hit.facet) else hit
 
     cats = list(editable())
     cat_about = about()

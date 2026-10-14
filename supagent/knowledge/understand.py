@@ -245,6 +245,7 @@ class Names:
         self.homes: dict[str, set] = {}             # (0.10.4) norm(part) -> the documents that declare it
         self.own_sites: set[str] = set()            # (0.10.9.1) the sites that are the system's own (run())
         self.groups: set[str] = set()               # (0.10.9.1) norm(a group's bare name) mapped in hosts (run())
+        self.inventory_groups: set[str] = set()     # (0.10.9.2) norm(every inventory group's bare name) (run())
         self.placement: dict[str, Any] = {}        # (0.10.9.1) the repository being read: {"groups_of": {norm(host):
         #                                             its groups}, "runs_on": {part: its groups}} (run(), per document)
 
@@ -314,8 +315,7 @@ def known_names() -> Names:
     """The System map's parts, the data's indices and metrics and the values of their identity fields."""
     from supagent.models import Facet, KObject
 
-    from supagent.knowledge.datalinks import SERVERISH
-
+    from supagent.knowledge.catkind import serverish
     from supagent.knowledge.interactions import TOPICS
 
     n = Names()
@@ -323,7 +323,7 @@ def known_names() -> Names:
         for f in db.session.query(Facet).filter(Facet.status == "approved"):
             if f.facet in TOPICS:                        # (0.10.6) a subject is a topic, no part a text names ("every
                 continue                                 # other service reads..." is no link of the subject Other)
-            if SERVERISH.search(f.facet or ""):          # (0.10.5) a server, a group of servers, a VIP: a place, as
+            if serverish(f.facet):                        # (0.10.5) a server, a group of servers, a VIP: a place, as
                 for x in [f.value, *[str(y) for y in (f.synonyms or [])]]:   # the inventories read them (as a part,
                     n.hosts.setdefault(norm(x), f.value)  # the next reading renamed the groups "lb (group)")
                 continue
@@ -551,12 +551,42 @@ def _host_part(host: str, names: Names) -> str:
     for lab in labels:
         if names.part(lab):
             return names.part(lab) or lab
+    if len(labels) >= 2 and names.own_sites and _any_site(h) in names.own_sites:
+        return labels[0] if norm(labels[0]) in names.inventory_groups else ""
+        #                                                   (0.10.9.2) an address on the system's own site naming no
+        #                                                   part known: the service of the inventory's group its first
+        #                                                   label names (reports.example.org), else none, never its
+        #                                                   domain's name (example.org holds the inventories' servers)
     if len(labels) >= 2 and labels[-1] in PUBLIC_SUFFIXES:   # (0.10.4) a public name: its organisation
         org = labels[-3] if len(labels) >= 3 and labels[-2] in ("co", "com", "org", "net", "ac", "gov") else labels[-2]
         return "" if org in ("example", "invalid", "test", "localhost") else org   # (hooks.slack.com: slack)
     meaningful = [x for x in labels if x not in GENERIC_LABELS]
     return meaningful[0] if meaningful else labels[0]
 
+
+
+# (0.10.9.2) a load balancer's backend in HAProxy's syntax: a section "backend <name>" or "listen <name>" and its
+# lines "server <label> <address>"
+LB_SECTION = re.compile(r"(?m)^(?:global|defaults|frontend|backend|listen|peers|resolvers|userlist|cache|program|"
+                        r"mailers|http-errors|ring)\b[^\n]*")
+LB_BACKEND = re.compile(r"(?:backend|listen)[ \t]+([\w.:-]+)")
+LB_SERVER = re.compile(r"[ \t]+server[ \t]+[\w.-]+[ \t]+[A-Za-z0-9]")
+
+
+def lb_backend(text: str, pos: int) -> str | None:
+    """(0.10.9.2) The name of the application a load balancer's server line at pos sends to (HAProxy's "server
+    web01 web01:80" in "backend bilby-backend": bilby); None for any other line."""
+    start = text.rfind("\n", 0, pos) + 1
+    if not LB_SERVER.match(text, start):
+        return None
+    section = None
+    for s in LB_SECTION.finditer(text, 0, start):
+        section = s
+    m = LB_BACKEND.match(section.group(0)) if section else None
+    if not m:
+        return None
+    name = m.group(1).split(":")[0]
+    return UPSTREAM_SUFFIX.sub("", name) or name
 
 
 # (0.10.9.1) a load balancer's upstream in its own file (nginx): its name and its servers
@@ -703,6 +733,26 @@ def _url_parts(url: str) -> tuple[str, str, int | None, str]:
         return "", "", None, ""
     return m.group("scheme").lower(), m.group("host"), int(m.group("port")) if m.group("port") else None, \
         (m.group("path") or "")
+
+
+# (0.10.9.2) the store or broker an address names by its scheme, or a search engine by its path, when its host is a
+# template ("postgresql://app@{{ db_host }}/app", "redis://:pw@%(REDIS_HOST)s/1", "http://%(solr)s:{{ port }}/solr/x"):
+# the part of that engine the documents know (a name is never made from a scheme alone)
+ENGINES = {"postgres": ("postgresql", "postgres"), "postgresql": ("postgresql", "postgres"), "mysql": ("mysql",),
+           "mariadb": ("mariadb", "mysql"), "mongodb": ("mongodb", "mongo"), "mongodb+srv": ("mongodb", "mongo"),
+           "redis": ("redis",), "rediss": ("redis",), "amqp": ("rabbitmq",), "amqps": ("rabbitmq",),
+           "kafka": ("kafka",), "nats": ("nats",)}
+ENGINE_PATH = re.compile(r"/(solr|elasticsearch|opensearch)(?=[/?#\s\"']|$)", re.I)
+
+
+def _templated_engine(scheme: str, url_line: str, names: "Names") -> str | None:
+    """(0.10.9.2) The known part of the engine an address with a templated host names (see ENGINES), else None."""
+    s = scheme.split(":")[-1] if scheme.startswith("jdbc") else scheme
+    words = ENGINES.get(s) or ()
+    if not words and s in ("http", "https"):
+        m = ENGINE_PATH.search(url_line)
+        words = (m.group(1).lower(),) if m else ()
+    return next((p for p in (names.service(w) for w in words) if p), None)
 
 
 def _endpoint_verb(scheme: str, port: int | None, line: str, text: str) -> tuple[str, str]:
@@ -1249,7 +1299,16 @@ AREA_COL = re.compile(r"(?i)^\s*(?:(?:service|business|functional|platform)\s+)?
                       r"dominios?|bereiche?|domänen?)\s*$")
 PART_OF_HEAD = re.compile(r"^\s*(?:apps?|applications?|services?|platform\s+services?|systems?|products?|parent|"
                           r"part\s+of|belongs\s+to)\s*$", re.I)   # (0.10.10) a module's whole, in a table of modules
-STORE_COLUMN = re.compile(r"(?i)^\s*(?:dbs?|databases?|datastores?|data\s+stores?|stores?|bases?\s+de\s+donn[ée]es)\s*$")
+# (0.10.9.2) where a row keeps its data ("Keeps its data in", "Data stored in", "Backed by"; a "Storage" column often
+# says a size: not read so)
+KEEPS_DATA = (r"(?:keeps?|stores?|holds?|saves?|persists?)\s+(?:its|their|the)?\s*(?:data|files|records|pages|state)"
+              r"(?:\s+(?:in|into|on))?|(?:its\s+|their\s+)?data\s+(?:(?:is\s+|are\s+)?(?:kept|stored|held|saved)\s+)?"
+              r"(?:in|into|on)|backed\s+by|donn[ée]es\s+dans|stocke\s+ses\s+donn[ée]es(?:\s+dans)?|datenhaltung")
+# (0.10.9.2) a cloud provider's service named by its provider ("Amazon S3", "Azure Blob Storage"): outside the system
+CLOUD_SERVICE = re.compile(r"(?i)^(?:amazon|aws|azure|microsoft\s+azure|google\s+cloud|gcp|oracle\s+cloud|ibm\s+cloud|"
+                           r"alibaba\s+cloud|ovh\s?cloud|scaleway|digitalocean|cloudflare)[\s-]+\w")
+STORE_COLUMN = re.compile(r"(?i)^\s*(?:dbs?|databases?|datastores?|data\s+stores?|stores?|bases?\s+de\s+donn[ée]es|"
+                          + KEEPS_DATA + r")\s*$")
 COLUMNS = [   # what a table's column says of its row's part (its header)
     ("runs_on", re.compile(r"\b(runs?\s+on|hosts?|servers?|nodes?|machines?|vms?|platform|cluster|located|hosting|"
                            r"hosted\s+on|deployed\s+(?:to|on))\b|"
@@ -1257,13 +1316,16 @@ COLUMNS = [   # what a table's column says of its row's part (its header)
     #                         (0.10.5) "Target Group", "Inventory group": where a role runs, not what it monitors
     ("monitors", re.compile(r"\b(scrapes?|scraped\s+targets?|monitors|watches|probes|targets?)\b", re.I)),   # (0.10.4)
     ("owned_by", re.compile(r"\b(owners?|owned\s+by|team|squad|responsible|maintainers?|maintained\s+by|accountable|"
-                            r"contacts?|(?:run|operated|managed|supported)\s+by)\b", re.I)),   # (0.10.9.3) "Run by"
+                            r"contacts?|(?:run|operated|managed|supported|handled)\s+by|looked\s+after\s+by|"
+                            r"cared\s+for\s+by|taken\s+care\s+of\s+by|in\s+charge)\b", re.I)),   # (0.10.9.3) "Run by"
+    #                         (0.10.9.2) "Cared for by", "In charge"
     ("alias", re.compile(r"^\s*(?:short\s+names?|abbreviations?|acronyms?|aliases|aka|nom\s+court|kurzname)\s*$", re.I)),
     ("reads_from", re.compile(r"^\s*(?:reads?|reads?\s+from|consumes?|subscribes?(?:\s+to)?|inputs?|in)\s*$", re.I)),
     ("sends_to", re.compile(r"^\s*(?:writes?|writes?\s+(?:to|into)|publishes|publishes\s+to|produces?|outputs?|"
                             r"out)\s*$", re.I)),     # (0.10.10) a table of jobs or modules: what each reads, writes
     ("uses", re.compile(r"\b(depends?\s+on|dependencies|dependency|requires|d[ée]pend\s+de)\b|^\s*(?:dbs?|databases?|"
-                        r"datastores?|data\s+stores?|bases?\s+de\s+donn[ée]es)\s*$", re.I)),   # (0.10.9) what it needs:
+                        r"datastores?|data\s+stores?|bases?\s+de\s+donn[ée]es|" + KEEPS_DATA + r")\s*$", re.I)),
+    #                         (0.10.9.2) "Keeps its data in": the stores it uses; (0.10.9) what it needs:
     #                         a dependency, written from the dependent's side, not a call ("Depends on: prometheus")
     ("calls", re.compile(r"\b(calls|upstreams?|uses|clients?\s+of)\b", re.I)),
     ("logs_to", re.compile(r"\b(logs?|log\s+index|indices|indexes)\b", re.I)),
@@ -1305,7 +1367,8 @@ PROPERTIES = [
                                    r"appartient\s+à|gehört\s+zu|teil\s+von)$")),
     ("owned_by", "owner", re.compile(r"(?i)^(?:(?:[\w-]+\s+)?owners?|owned\s+by|(?:[\w-]+\s+)?(?:team|squad|tribe)|"
                                      r"(?:team|equipo|squadra)(?:\s+[\w-]+)?|propietario|proprietario|"
-                                     r"maintained\s+by|maintainers?|"
+                                     r"maintained\s+by|maintainers?|looked\s+after\s+by|cared\s+for\s+by|"
+                                     r"(?:run|operated|managed|supported|handled)\s+by|in\s+charge|"
                                      r"accountable(?:\s+(?:team|squad|tribe))?|responsible(?:\s+(?:team|squad))?|"
                                      r"(?:support|owning)\s+team|équipe(?:\s+responsable)?|responsable|"
                                      r"verantwortlich(?:es\s+team)?|zuständig(?:es\s+team)?|eigentümer)$")),
@@ -1589,13 +1652,19 @@ def _memberships(s: str, found: list[tuple[int, str, str]], names: Any, unit_par
 # (0.10.10) who owns a part, as a sentence says it: "x is owned by the y team", "the y squad owns x and z", "x est géré
 # par l'équipe y", "x appartient à l'équipe y"; the owner is a team (its words say so), never a person
 TEAM_WORD = re.compile(r"(?i)\b(?:teams?|squads?|tribes?|crews?|guilds?|chapters?|[ée]quipes?|equipos?)\b")
+# (0.10.9.2) a team's word standing alone in the phrase, never inside a name (a "teams-chat-notifier" job)
+TEAM_ALONE = re.compile(r"(?i)(?<![\w.-])(?:teams?|squads?|tribes?|crews?|guilds?|chapters?|[ée]quipes?|equipos?)(?![\w.-])")
 OWNED_BY = re.compile(r"(?i)^\W*(?:the\s+)?(?P<a>.+?)\s+(?:is|are)\s+(?:owned|maintained|run|operated|managed)\s+by\s+"
                       r"(?:the\s+)?(?P<b>[^,;:()]+?)\s*(?:[.;,(]|$)")
-OWNS = re.compile(r"(?i)^\W*(?:the\s+|l[ea]\s+|l['’]|die\s+|der\s+|das\s+)?(?P<b>[^,;:()]+?)\s+(?:owns|maintains|operates|"
-                  r"is\s+responsible\s+for|"
-                  r"(?:is|are)\s+accountable\s+for|(?:is|are)\s+in\s+charge\s+of|looks\s+after|takes\s+care\s+of|"
-                  r"(?:est|sont)\s+responsables?\s+(?:de|du|des|d['’])|betreut|betreuen|verantwortet|verantworten|pflegt|"
-                  r"pflegen)\s*:?\s+(?:the\s+|l['’]|la\s+|le\s+|les\s+|die\s+|den\s+|das\s+)?(?P<list>.+?)\s*[.;]?$")
+OWNS = re.compile(r"(?i)^\W*(?:the\s+|l[ea]\s+|l['’]|die\s+|der\s+|das\s+)?(?P<b>[^,;:()]+?)\s+(?:also\s+)?"
+                  r"(?:owns|maintains|operates|manages|runs|is\s+responsible\s+for|(?:is|are)\s+accountable\s+for|"
+                  r"(?:is|are)\s+in\s+charge\s+of|looks\s+after|takes\s+care\s+of|"
+                  r"(?:est|sont)\s+responsables?\s+(?:de|du|des|d['’])|"
+                  r"(?:gèrent|gère|exploitent|exploite|administrent|administre|maintiennent|maintient|fait\s+tourner|"
+                  r"font\s+tourner)(?:\s+aussi)?|s['’]occupe(?:nt)?(?:\s+aussi)?\s+(?:de|du|des|d['’])|"
+                  r"betreut|betreuen|verantwortet|verantworten|pflegt|pflegen)(?:\s+(?:also|too|aussi))?"
+                  r"(?:\s*:?\s+|(?<=['’]))(?:the\s+|l['’]|la\s+|le\s+|les\s+|die\s+|den\s+|das\s+)?(?P<list>.+?)\s*[.;]?$")
+#                 (0.10.9.2) "manages", "runs", "L'équipe X gère aussi a, b et c", "s'occupe des a", "fait tourner a"
 # (0.10.10) a team's own page speaking of itself: "We maintain: a, b", "Applications we maintain: a, b", "Nous sommes
 # responsables de : a, b", "Wir betreuen: a, b"
 WE_OWN = re.compile(r"(?i)^\W*(?:(?:we|nous|wir)\s+(?:own|maintain|run|operate|are\s+(?:responsible|accountable)\s+for|"
@@ -1648,7 +1717,23 @@ def titled_name(title: str, text: str) -> str | None:
         first = next((x for _at, x in _sentences(diagram_free(text or "")) if " | " not in x), "")
         if norm(first[:len(t) + 2]).startswith(norm(t)):
             return t
+    if re.fullmatch(r"[A-Za-zÀ-ÿ][\wÀ-ÿ+]{2,30}", t):   # (0.10.9.2) a one-word title its page defines as a system:
+        first = next((x for _at, x in _sentences(diagram_free(text or "")) if " | " not in x), "")   # "Quokka is the
+        if LEAD_DEFINITION.match(first[len(t):]) and first[:len(t)] == t and SYSTEM_NOUN.search(first[len(t):][:80]):
+            return t                                      # update system", "Bilby est l'outil de tests"
     return None
+
+
+# (0.10.9.2) a page's lead sentence defining its title: "<title> is the ...", "est le ...", "ist das ..."; and the
+# nouns of the systems a title so defined may be (never "Operations is where we keep runbooks")
+LEAD_DEFINITION = re.compile(r"(?i)\s+(?:is|est|ist|es|è)\s+(?:the|an?|our|their|le|la|l['’]|un|une|notre|der|die|das|"
+                             r"ein|eine|unser\w*|el|la|un|una|nuestro|il|lo|uno)\b")
+SYSTEM_NOUN = re.compile(r"(?i)\b(?:system|systems|service|services|application|app|tool|platform|server|forge|"
+                         r"database|queue|bus|broker|portal|site|website|api|front[- ]?end|back[- ]?end|engine|"
+                         r"registry|cache|proxy|gateway|scheduler|repository|tracker|archive|provider|cluster|"
+                         r"store|directory|catalog(?:ue)?|dashboard|pipeline|wiki|forum|mailing\s+lists?|"
+                         r"syst[èe]me|outil|plateforme|serveur|logiciel|annuaire|anwendung|dienst|werkzeug|"
+                         r"plattform|sistema|herramienta|servicio)\b")
 
 
 def introduced_names(text: str) -> list[str]:
@@ -1757,7 +1842,7 @@ def _ownerships(s: str, found: list[tuple[int, str, str]], unit_part: str = "", 
         pass
     elif m and (PRONOUN.match(m.group("b")) or re.fullmatch(r"(?i)\W*(?:we|nous|wir|on)\W*", m.group("b"))) and page_team:
         team = " ".join(page_team.split()).strip(" .")
-    elif m and TEAM_WORD.search(m.group("b")) and len(m.group("b").split()) <= 5:
+    elif m and TEAM_ALONE.search(m.group("b")) and len(m.group("b").split()) <= 5:
         team = " ".join(m.group("b").split()).strip(" .")
     else:
         m = None
@@ -1798,6 +1883,40 @@ def _abbreviations(s: str) -> list[tuple[str, str]]:
                     out.append((" ".join(ws), short))                   # the letters are of
                     break
     return list(dict.fromkeys(out))
+
+
+# (0.10.9.2) a name of its own shape written in prose: inner capitals (QuokkaDB, BilbyHub, openThing), never a
+# language, a practice or a consumer product's name
+PROSE_NAME = re.compile(r"(?<![\w./@-])(?:[A-Z][a-z]+(?:[A-Z][A-Za-z0-9]*)+|[a-z]+[A-Z][A-Za-z0-9]+)(?![\w/@-]|\.\w)")
+NOT_A_SYSTEM = re.compile(r"(?i)^(?:javascript|typescript|coffeescript|actionscript|livescript|powershell|postscript|"
+                          r"devops|gitops|finops|secops|mlops|dataops|devsecops|websockets?|graphql|openapi|openid|"
+                          r"youtube|linkedin|whatsapp|iphone|ipad|macos|javadoc|nosql|objectivec|powerpoint|"
+                          r"wordpress|pdfs?|csvs?|apis?)$")
+
+
+# (0.10.9.2) the team's own words for a part, defined in a sentence: "The message bus is a RabbitMQ cluster of three
+# nodes", "Le bus de messages est un cluster RabbitMQ": the phrase is another name of the part named right after
+JARGON = re.compile(r"(?i)^\s*(?:the|our|le|la|les|l['’])\s*(?P<np>[a-zà-ÿ][a-zà-ÿ-]*(?:\s+(?:(?:de|du|des)\s+|d['’])?"
+                    r"[a-zà-ÿ][a-zà-ÿ-]*){0,3}?)\s+(?:is|are|est|sont)\s+(?:a|an|the|our|un|une|le|la|les|l['’])\s*")
+JARGON_NOT = re.compile(r"(?i)^(?:system|service|services|application|app|one|first|second|last|main|goal|aim|idea|"
+                        r"plan|rule|problem|issue|reason|result|answer|question|team|page|document|following|same|"
+                        r"other|best|easiest|fastest|simplest|only)$")
+
+
+def _jargon_aliases(s: str, found: list[tuple[int, str, str]], names: Names) -> list[tuple[str, str]]:
+    """(0.10.9.2) (part, the team's phrase for it) a sentence defines: the phrase opens the sentence after "the", the
+    part is named within the two words after its article ("is a RabbitMQ cluster", "est un cluster RabbitMQ"); never
+    a part's or a host's own name, nor a generic word."""
+    m = JARGON.match(s)
+    if not m:
+        return []
+    np_ = " ".join(m.group("np").split())
+    if JARGON_NOT.match(np_) or len(np_) < 4 or names.part(np_) or names.hosts.get(norm(np_)):
+        return []
+    head = re.match(r"\s*(?:\S+\s+){0,2}", s[m.end():])
+    limit = m.end() + (head.end() if head else 0)        # (the part starts in those two words)
+    hits = [p for at, _w, p in found if m.end() <= at < limit and norm(p) != norm(np_)]
+    return [(hits[0], np_)] if hits else []
 
 
 SCHEDULE_AFTER = re.compile(r"(?i)\s+(?:the\s+|every\s+|each\s+)?(?:\d{1,2}(?:st|nd|rd|th)?\b|first|second|last|"
@@ -2023,6 +2142,13 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
             ph = PLACEHOLDER_HOST.match(host)
             if ph and (names.part(ph.group(1) or ph.group(2)) or own.get(norm(ph.group(1) or ph.group(2)))):
                 host = (ph.group(1) or ph.group(2)).lower()   # (0.10.4) http://${CATALOGUE_HOST}:8080: the catalogue
+            if re.search(r"[{}%$<>]", host) and me and not COMMENT.match(line) and \
+                    not DOC_KEY.search(line[:max(0, line.find(m.group(1)))]):
+                eng = _templated_engine(scheme, line[max(0, line.find(m.group(1))):], names)
+                if eng and norm(eng) != norm(me):               # (0.10.9.2) "postgresql://app@{{ db_host }}/app":
+                    verb, what = _endpoint_verb(scheme, port, line, text)   # the application uses PostgreSQL
+                    fact(me, verb, eng, what if what in ("database", "cache") else "part", m.start(), conf=0.7)
+                continue
             if COMMENT.match(line) or host.isupper() or re.search(r"[{}%$<>]", host) or DOC_HOSTS.search(host.lower()) \
                     or NOT_ENDPOINT.search(m.group(1)) or SEE_ALSO.search(line[:max(0, line.find(m.group(1)))]) or \
                     FETCH_LINE.search(line) or DOC_KEY.search(line[:max(0, line.find(m.group(1)))]) or \
@@ -2115,6 +2241,18 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
             if host.lower() in ("localhost", "0.0.0.0"):
                 continue
             verb, what = _endpoint_verb("", port, line, text)
+            backend = lb_backend(text, m.start())
+            if backend is not None:                       # (0.10.9.2) a load balancer's server: the backend's
+                target = names.part(backend) or own.get(norm(backend))   # application, its host where it runs;
+                server = names.hosts.get(norm(host)) or (names.hosts.get(norm(host.split(".")[0])) if "." in host
+                                                         else None)       # a server's label is no application
+                if target and norm(target) != norm(me):
+                    fact(me, "calls", target, "part", m.start())
+                    if server:
+                        fact(target, "runs_on", server, "host", m.start(), conf=0.7)
+                if server:                                # an inventory's server: the balancer sends to it too
+                    fact(me, verb, _host_part(host, names), "part", m.start())
+                continue
             fact(me, verb, _host_part(host, names), "part", m.start())
         for m in re.finditer(r"\b(?:Redis|StrictRedis|RedisCluster|Jedis\w*|createClient|from_url|Memcache\w*)\s*\("
                              r"[^)]*?(?:host\s*=\s*)?(?:os\.environ\.get\(\s*[\"']\w+[\"']\s*,\s*)?[\"']"
@@ -2339,6 +2477,7 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                      "alias" if STORE_HEAD.fullmatch(first_head) and re.fullmatch(
                          r"(?i)\s*(?:schemas?|database\s+names?|db\s+names?)\s*", h) else r
                      for i, (h, r) in enumerate(zip(header, roles))]
+            roles = [r if not i or r else _content_role(i, rows, names) for i, r in enumerate(roles)]   # (0.10.9.2)
             reverse = {i: ("sends_to" if PRODUCER_COL.match(h) else "reads_from" if CONSUMER_COL.match(h) else
                            "calls" if CALLER_COL.match(h) and not STORE_HEAD.fullmatch(first_head) else None)
                        for i, h in enumerate(header) if i}
@@ -2493,8 +2632,9 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                                 #               servers (a database inside its cluster): no host made of it
                             if re.search(r"\s", value.strip()) and not names.hosts.get(norm(value)):
                                 continue      # (0.10.10) "Sim Lifecycle" in a host's cell: words, no host's name
+                            group = norm(value) in names.inventory_groups and not names.hosts.get(norm(value))
                             fact(part, "runs_on", names.hosts.get(norm(value)) or re.sub(r"\s*\(.*\)", "", value),
-                                 "host", r0, conf=0.75)
+                                 "group" if group else "host", r0, conf=0.75)   # (0.10.9.2) an inventory's group
                         elif role in ("logs_to", "watched_by"):
                             obj = names.index(value) if role == "logs_to" else names.metric(value)
                             if obj:
@@ -2506,9 +2646,12 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                                     not names.hosts.get(norm(value))):
                                 continue                  # (0.10.9) a new part's calls: to parts known, nothing invented;
                                 #   (0.10.10) a job's input and output named as names: what it reads and writes
+                            ext = bool(CLOUD_SERVICE.match(value)) and not (names.part(value) or own.get(norm(value)))
                             fact(part, role, names.part(value) or own.get(norm(value)) or value,
-                                 "database" if role == "uses" and STORE_COLUMN.match(h.strip(" *`")) else "part", r0,
-                                 conf=0.7)               # (0.10.9.1) a "Datastores" column: its databases
+                                 "database" if role == "uses" and STORE_COLUMN.match(h.strip(" *`")) and not ext
+                                 else "part", r0, conf=0.7)   # (0.10.9.1) a "Datastores" column: its databases
+                            if ext:                       # (0.10.9.2) "Amazon S3": a service outside the system
+                                fact(value, "is_a", "external", "kind", r0, conf=0.7)
                         elif role == "monitors":                  # (0.10.4) "Scrapes: ceph-mgr (port 9283)": a known part
                             target = names.part(re.sub(r"\s*\(.*?\)", "", value).strip()) or \
                                 own.get(norm(re.sub(r"\s*\(.*?\)", "", value)))
@@ -2607,6 +2750,14 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                 at = m.start("name")                      # noun says what it is, known or not
                 if not any(a <= at < a + len(w) for a, w, _p in found) and not names.hosts.get(norm(m.group("name"))):
                     found.append((at, m.group("name"), names.part(m.group("name")) or m.group("name")))
+            for m in PROSE_NAME.finditer(s):              # (0.10.9.2) a system named in prose by a name of its own
+                at, nm = m.start(), m.group(0)            # shape ("reads its results from QuokkaDB"), the object of
+                if any(a <= at < a + len(w) for a, w, _p in found) or names.hosts.get(norm(nm)) or \
+                        NOT_A_SYSTEM.match(nm):           # a relation a known part's sentence states
+                    continue
+                subj = [x for x in found if x[0] < at and not names.hosts.get(norm(x[2]))]
+                if subj and any(rx.search(s[subj[-1][0]:at]) for _v, rx in CUES):
+                    found.append((at, nm, names.part(nm) or nm))
             found.sort(key=lambda x: x[0])
             said_kinds: list[tuple[str, str]] = []
             members = _memberships(s, found, names, unit_part, said_kinds)
@@ -2618,6 +2769,8 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                 fact(part, "owned_by", team, "owner", start, conf=0.75)                      # by the y team"
             for long, short in _abbreviations(s):         # (0.10.10) "Identity Hub (IH)": IH is Identity Hub
                 fact(long, "alias", short, "part", start, conf=0.8)
+            for part, phrase in _jargon_aliases(s, found, names):   # (0.10.9.2) "The message bus is a RabbitMQ
+                fact(part, "alias", phrase, "part", start, conf=0.7)  # cluster": the team's words for it
             if members or any(rx.match(s) for rx in (MADE_OF_LABEL, MADE_OF, MADE_OF_FR, MADE_OF_ES_IT, MEMBER_OF_ES,
                                                       MEMBER_OF_IT, LABEL_LIST, MEMBER_OF, MEMBER_OF_FR,
                                                       MEMBER_OF_DE, PLACE_OF, HAS_LIST, KIND_OF_ARE, HAS_LIST_FR,
@@ -2918,6 +3071,58 @@ def _implied_head(head: str, title: str) -> str:
     return head
 
 
+TEAM_END = re.compile(r"(?i)\b(?:team|squad|tribe|crew|guild|ops|sre|devops)s?$|^(?:[ée]quipe|equipo|grupo|groupe)\b")
+
+
+def _content_role(i: int, rows: list[tuple[int, list[str]]], names: Names) -> str | None:
+    """(0.10.9.2) What a column whose heading says nothing known holds, by its cells: the inventories' groups or hosts
+    (where its row runs: "Lives in", "Machines du service"; more of them than names of parts), or teams (who looks
+    after its row: "Release crew"); None otherwise."""
+    vals = [re.sub(r"\s*\(.*?\)", "", v).strip(" `*") for _r, cells in rows if i < len(cells)
+            for v in _cell_values(cells[i])]
+    vals = [v for v in vals if v and not PLACEHOLDER.fullmatch(v)]
+    if len(vals) < 2:
+        return None
+    if all(names.hosts.get(norm(v)) or norm(v) in names.inventory_groups for v in vals) and \
+            2 * sum(1 for v in vals if names.parts.get(norm(v))) < len(vals):
+        return "runs_on"
+    if all(len(v) <= 40 and len(v.split()) <= 4 and TEAM_END.search(v) for v in vals):
+        return "owned_by"
+    return None
+
+
+def _named_after_its_group(first: str, roles: list[str | None], cells: list[str], names: Names) -> bool:
+    """(0.10.9.2) Whatever the table's headings and the name's case ("Quokka", "bilbyQA"): a row whose name is the name
+    of an inventory group its row says it runs on ("quokka_backend", "bilbyqa") names what the plays deploy there."""
+    stem = norm(first)
+    if len(stem) < 3 or not re.fullmatch(r"[A-Za-z][\w.-]{2,40}", first or "") or PLACEHOLDER.fullmatch(first) or \
+            PLATFORMS.match(first) or (names.hosts.get(stem) and stem not in names.groups):
+        return False
+    for role, cell in zip(roles[1:], cells[1:]):
+        if role == "runs_on" and any((norm(v) in names.groups or norm(v) in names.inventory_groups) and
+                                     (norm(v) == stem or norm(v).startswith(stem + "-")) for v in _cell_values(cell)):
+            return True
+    return False
+
+
+def grouped_rows(text: str, names: Names) -> list[str]:
+    """(0.10.9.2) The names of a page's table rows named after an inventory group their row says they run on (see
+    _named_after_its_group), whatever the table's headings."""
+    out = []
+    for _t0, header, rows in _tables(text or ""):
+        if len(header) < 2:
+            continue
+        roles = [next((v for v, rx in COLUMNS if rx.search(h)), None) for h in header]
+        roles = [r if not i or r else _content_role(i, rows, names) for i, r in enumerate(roles)]
+        if "runs_on" not in roles[1:]:
+            continue
+        for _r0, cells in rows:
+            first = (cells[0] if cells else "").strip(" `*")
+            if first and _named_after_its_group(first, roles, cells, names):
+                out.append(first)
+    return out
+
+
 def _service_row(header: list[str], roles: list[str | None], first: str, cells: list[str], names: Names) -> bool:
     """(0.10.9) A row of a table of services ("Application | Purpose | Owner | Servers") naming a service nothing else
     declares: its first column is headed as services, its name is a name (lowercase, or with a separator or a digit:
@@ -2926,6 +3131,8 @@ def _service_row(header: list[str], roles: list[str | None], first: str, cells: 
             not PLACEHOLDER.fullmatch(first or "") and not names.hosts.get(norm(first)) and \
             re.fullmatch(r"[A-Za-z0-9][\w]*[-_.\d][\w.-]*", first or ""):
         return True                                       # (0.10.10) a table of datastores, topics, jobs lists them
+    if _named_after_its_group(first, roles, cells, names):
+        return True                                       # (0.10.9.2) "Quokka | ... | quokka_backend, quokka_backend_stg"
     if not header or not SERVICE_HEAD.fullmatch(header[0].strip(" *`")) or PLACEHOLDER.fullmatch(first or "") or \
             PLATFORMS.match(first or "") or names.hosts.get(norm(first)) or not (
                 re.fullmatch(r"[a-z0-9][a-z0-9_.-]{1,40}", first or "") or
@@ -3052,8 +3259,11 @@ def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
             for h in declared.get("hosts", []):
                 names.hosts.setdefault(norm(h), h)
                 names.homes.setdefault(norm(h), set()).add(d.id)        # (0.10.4) a host's repository too
+            for g in declared.get("play_groups", []):      # (0.10.9.2) a group a play runs on, listed by no
+                names.inventory_groups.add(norm(g))        # inventory here
             for g in declared.get("groups", []):           # (0.10.9.1) an inventory's group kept per environment
                 bare = re.sub(r"\s*\([^)]*\)$", "", g)    # ("web (orders PRD)"): a page's "runs on web" is it
+                names.inventory_groups.add(norm(bare))
                 if bare != g:                              # when only one environment has a group so named
                     group_bases[norm(bare)].add(g)
         for u in us:                                      # (0.10.10) the names a page introduces by what they are
@@ -3096,6 +3306,16 @@ def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
     for n, shown in own.items():
         if not names.part(n):
             names.add_part(shown)
+    for d in docs:                                       # (0.10.9.2) what the pages' tables and definitions name,
+        for u in per_doc[d.id]:                          # known to every page of this reading (not only the next)
+            if u.get("kind") != "page":
+                continue
+            for nm in grouped_rows(u["text"] or "", names):     # a row named after the groups it runs on
+                if not names.part(nm):
+                    names.add_part(nm)
+            for _at, s in _sentences(diagram_free(u["text"] or "")):   # "The message bus is a RabbitMQ cluster"
+                for part, phrase in _jargon_aliases(s, _named(s, names, own), names):
+                    names.alias.setdefault(norm(phrase), names.part(part) or part)
     for bare, groups in group_bases.items():             # (0.10.9.1) "runs on prod_web": the one "prod_web (prod)"
         if len(groups) == 1 and bare not in names.hosts and not names.part(bare) and bare not in own and \
                 re.search(r"[-_\d]", bare):              # an identifier (prod_web), never a word (billing, web)
@@ -3559,3 +3779,4 @@ def export() -> dict[str, Any]:
     return {"relations": relations, "data_links": data_links, "denied": denied,
             "aliases": [{"name": k, "part": v} for k, v in alias.items()],
             "wiki_edges": sorted(map(list, {tuple(e) for e in wiki_edges})), "diagram_edges": diagram_edges}
+

@@ -88,7 +88,8 @@ MONITORING = re.compile(
     r"new-?relic|dynatrace|appdynamics|splunk|sumo-?logic|sentry|pagerduty|opsgenie|uptime-?kuma|blackbox|cadvisor|"
     r"kube-state-metrics|pushgateway|graylog|elastalert|cloudwatch|instana|wavefront|signalfx|honeycomb|"
     r"lightstep|solarwinds|netdata|munin|cacti|observium|librenms|smokeping|nxlog|syslog-ng|apm|monitoring|"
-    r"observability|exporter|grafana-agent|beyla|alloy)($|[\W_])", re.I)   # (0.10.9.1) beyla, alloy: Grafana's agents
+    r"observability|exporter|grafana-agent|beyla|alloy|monit)($|[\W_])", re.I)   # (0.10.9.1) beyla, alloy: Grafana's
+#                                                                          agents; (0.10.9.2) monit: a process monitor
 MONITORING_SAID = re.compile(r"\b(monitor(?:ing|s)?|observability|metrics? (?:collector|server|store)|alerting|"
                              r"dashboards? tool|log (?:shipper|collector|aggregator))\b", re.I)
 DATABASE = re.compile(
@@ -102,7 +103,8 @@ INFRASTRUCTURE = re.compile(
     r"freeipa|vault|consul|etcd|zookeeper|nomad|kubernetes|k8s|openshift|rancher|harbor|nexus|artifactory|jenkins|"
     r"gitlab(?:-runner)?|bamboo|teamcity|sonarqube|argo-?cd|ansible|awx|terraform|puppet(?:server)?|saltstack|"
     r"vmware|vsphere|esxi|vcenter|proxmox|openstack|ceph|nfs|glusterfs|minio|s3|nginx|haproxy|envoy|traefik|istio|"
-    r"linkerd|f5|bigip|nginx-?plus|httpd|squid|load-?balancer|firewall|vpn|bastion|jump-?host|smtp|postfix|exim|"
+    r"linkerd|f5|bigip|nginx-?plus|httpd|squid|load-?balancer|firewall|vpn|bastion|jump-?host|jump-?box(?:es)?|smtp|"
+    r"postfix|exim|"
     r"sendmail|"
     r"mail-?relay|kafka|rabbitmq|activemq|artemis|ibm-?mq|mqseries|nats|pulsar|redis|memcached|veeam|bacula|"
     r"commvault|netbackup|control-?m|autosys|rundeck|dhcp|cobbler|netbox|tomcat\d*|apache2?|jboss|wildfly|weblogic|websphere|"
@@ -110,7 +112,10 @@ INFRASTRUCTURE = re.compile(
     re.I)
 # (0.10.10) a language's runtime installed on the hosts (a host's software, no application of the system)
 RUNTIME = re.compile(r"^(miniconda\d*|anaconda\d*|conda|mamba|micromamba|pyenv|openjdk(?:-?\d+)?|jdk(?:-?\d+)?|"
-                     r"jre(?:-?\d+)?|nodejs(?:-?\d+)?|php-?fpm|rbenv|rvm)$", re.I)
+                     r"jre(?:-?\d+)?|nodejs(?:-?\d+)?|php-?fpm|rbenv|rvm|"
+                     # (0.10.9.2) a language's runtime and its package tool installed on the hosts
+                     r"java(?:-?\d+)?|php(?:-?\d+(?:\.\d+)?)?|ruby(?:-?\d+(?:\.\d+)?)?|erlang|elixir|golang|dotnet|"
+                     r"composer)$", re.I)
 BROKER_NAME = re.compile(r"(^|[\W_])(kafka|rabbitmq|activemq|artemis|ibm-?mq|mqseries|nats|pulsar|broker)($|[\W_])", re.I)
 # (0.10.9.1) the software a host runs for the applications, named by itself (a role "passenger", "sidekiq_worker",
 # "samba"): web and application servers, the runners of workers, file, mail and time daemons, an antivirus: the
@@ -118,7 +123,11 @@ BROKER_NAME = re.compile(r"(^|[\W_])(kafka|rabbitmq|activemq|artemis|ibm-?mq|mqs
 HOSTED = re.compile(
     r"^(nginx(?!-?plus)|httpd|apache2?|apache-httpd|tomcat|jetty|jboss|wildfly|weblogic|websphere|squid|bind9?|"
     r"unbound|chronyd?|ntpd?|postfix|exim4?|sendmail|dhcpd?|passenger|puma|unicorn|gunicorn|uwsgi|sidekiq|sneakers|"
-    r"resque|samba|smbd|clamav|clamd|mailcatcher|subversion|svn|supervisord?|pm2)(?:\d+(?:\.\d+)*)?"
+    r"resque|samba|smbd|clamav|clamd|mailcatcher|subversion|svn|supervisord?|pm2|"
+    # (0.10.9.2) a cache in front of a web server, an Apache module, a mail filter, a TLS tunnel, a host's checker, a
+    # git host's daemon (a file or mail server other systems use is a service of its own: ftp, imap)
+    r"varnish|varnishd|mod[-_][a-z0-9]+|spamassassin|spamd|amavisd?|opendkim|stunnel|rkhunter|gitolite)"
+    r"(?:\d+(?:\.\d+)*)?"
     r"(?:[-_](?:worker|workers|server|daemon|service|client))?$", re.I)
 # (0.10.9.1) a key-value store by its name (an application's own one too: "x_redis", "x-valkey"): the deployment's
 # category for caches, else for its datastores (a key-value store is a datastore, no host's software)
@@ -138,7 +147,10 @@ OWN = {"library": re.compile(r"^(librar(?:y|ies)|frameworks?|dependenc(?:y|ies))
        # (0.10.10) the software installed on the hosts (web servers, agents, runtimes): "host software", "tools"
        "software": re.compile(r"^(?:(?:host|server|installed|system|base|shared|infrastructure) )?(?:software|"
                               r"packages?|utilities)$", re.I),
-       "broker": re.compile(r"^(?:message |event )?brokers?$|^messaging(?: (?:systems?|services?))?$", re.I)}
+       "broker": re.compile(r"^(?:message |event )?brokers?$|^messaging(?: (?:systems?|services?))?$|"
+                            r"^(?:message|event) (?:queues?|bus(?:es)?)$", re.I)}   # (0.10.9.2) "message queue",
+#                                                                  "event bus": the broker's category (a bare "queue": its
+#                                                                  queues, no broker)
 
 
 # (0.10.9.2, the team's report of 12 October: an application named "20", a component named "300", 500 applications
@@ -240,7 +252,9 @@ def no_name(category: str | None, raw: str) -> str:
             c not in ("environment", "env", "environments"):
         from supagent.knowledge.placing import phrases
 
-        said = phrases(c)                               # (0.10.9.3) a team named with common words ("Platform team",
+        from supagent.knowledge.catkind import kind_name
+
+        said = phrases(kind_name(c))                    # (0.10.9.3) a team named with common words ("Platform team",
         named = [w for w in words if w]                 # "Team Data"), an area named by one ("data", "compute"):
         if ("team" in said and len(named) >= 2 and any(w in TEAM_WORDS for w in named)) or \
                 ("domain" in said and not any(w in DOMAIN_WORDS for w in named)):   # names in their category
@@ -280,14 +294,16 @@ def checked(category: str | None, name: Any) -> tuple[str | None, list[str], str
         return raw[:128], [], ""
     others: list[str] = []
     limit = max_chars()
+    from supagent.knowledge.catkind import kind_name
     from supagent.knowledge.placing import phrases
 
-    if DOTTED.match(raw) and "messaging" in phrases(str(category or "")):
+    holds = phrases(kind_name(category))                  # (0.10.9.2) by its name or what its description says
+    if DOTTED.match(raw) and "messaging" in holds:
         limit = max(limit, 64)                            # (0.10.10) a topic's dotted name is a name, however long
     if len(raw) > limit and DOTTED.match(raw):           # a host's full name: its first label
         first = raw.split(".", 1)[0]
         if len(first) >= 2 and any(ch.isalpha() for ch in first) and not REVERSE_DNS.fullmatch(first) and \
-                "messaging" not in phrases(str(category or "")):   # (0.10.10) never a topic's first word
+                "messaging" not in holds:                    # (0.10.10) never a topic's first word
             raw, others = first, [raw[:128]]                     # ("com.x.created.v1" is no "com")
     if len(raw) > limit:
         return None, [], f"longer than {limit} characters"
@@ -311,14 +327,14 @@ def gated(category: str | None) -> bool:
     """Whether the learning's new values of this category are checked as names: not a server's, a group's or an
     address's category (an inventory names them), not one of the deployment's own read from the data's fields (an
     environment, a tenant: the data's values); the built-in ones always (the AI and the documents propose them)."""
-    from supagent.knowledge.datalinks import SERVERISH
+    from supagent.knowledge.catkind import kind_name, serverish
 
     c = str(category or "")
-    if not c or c == "aspect" or SERVERISH.search(c):
+    if not c or c == "aspect" or serverish(c):            # (0.10.9.2) by its name or what its description says
         return False
     from supagent.knowledge.placing import HOSTISH, phrases
 
-    if set(phrases(c)) & HOSTISH:                         # (0.10.10) an "ansible group", a "virtual ip": an
+    if set(phrases(kind_name(c))) & HOSTISH:              # (0.10.10) an "ansible group", a "virtual ip": an
         return False                                      # inventory names them too ("web (ops prod)")
     try:
         from supagent.knowledge.facets import BUILTIN, field_rules
@@ -326,6 +342,27 @@ def gated(category: str | None) -> bool:
         return c in BUILTIN or c not in {cat for cat, _rx in field_rules()}
     except Exception:  # pylint: disable=broad-except
         return True
+
+
+_SOFT: dict[str, tuple[float, str | None]] = {}
+
+
+def software_category() -> str | None:
+    """(0.10.9.2) The deployment's own category for the software installed on its hosts ("server software",
+    "installed software"), or None (read again at most every minute)."""
+    import time
+
+    at, cat = _SOFT.get("cat", (0.0, None))
+    if time.time() - at > 60:
+        try:
+            from supagent.knowledge.catkind import kind_name
+            from supagent.knowledge.facets import editable
+
+            cat = next((c for c in editable() if OWN["software"].match(kind_name(c))), None)
+        except Exception:                                 # (no application: no category of the person's)
+            cat = None
+        _SOFT["cat"] = (time.time(), cat)
+    return cat
 
 
 def kind_of(name: Any, description: str | None = None) -> str | None:
@@ -366,21 +403,23 @@ def filed(category: str, name: Any, description: str | None = None, cats: list[s
         from supagent.knowledge.facets import editable
 
         cats = list(editable())
-    own = next((c for c in cats if OWN[kind].match(c)), None) if kind in OWN else None
+    from supagent.knowledge.catkind import kind_name   # (0.10.9.2) by its name, else what its description says
+
+    own = next((c for c in cats if OWN[kind].match(kind_name(c))), None) if kind in OWN else None
     if kind == "library":
         return own, kind
     # (0.10.10) the deployment's category for the software installed on its hosts ("host software"): a web server, an
     # agent, a runtime goes there before a platform's category (a broker to the deployment's brokers when it has them)
-    soft = next((c for c in cats if OWN["software"].match(c)), None)
-    broker = next((c for c in cats if OWN["broker"].match(c)), None)
+    soft = next((c for c in cats if OWN["software"].match(kind_name(c))), None)
+    broker = next((c for c in cats if OWN["broker"].match(kind_name(c))), None)
     if kind == "infrastructure" and BROKER_NAME.search(str(name or "")) and broker:
         return broker, kind
     if kind in ("infrastructure", "database") and CACHE_NAME.search(str(name or "").strip()):
-        store = next((c for c in cats if OWN["cache"].match(c)), None) or \
-            next((c for c in cats if OWN["database"].match(c)), None)
+        store = next((c for c in cats if OWN["cache"].match(kind_name(c))), None) or \
+            next((c for c in cats if OWN["database"].match(kind_name(c))), None)
         if store:                                        # (0.10.9.1) redis, valkey: a key-value store
             return store, "database"
-    platform = next((c for c in cats if OWN["infrastructure"].match(c)), None)
+    platform = next((c for c in cats if OWN["infrastructure"].match(kind_name(c))), None)
     if kind == "hosted":                                 # (0.10.9.1) the hosts' software, else as infrastructure
         return (soft or platform or ("component" if "component" in cats else category)), kind
     if kind == "infrastructure" and platform and not BROKER_NAME.search(str(name or "")):
@@ -484,11 +523,11 @@ def _titles(refs: list[str]) -> dict[str, str]:
 def subject_links(dry_run: bool = False) -> dict[str, int]:
     """The parts and the subjects the same items are about, proposed linked (see the module). Counts; `dry_run`
     counts what would be proposed and changes nothing."""
-    from supagent.knowledge.datalinks import SERVERISH
+    from supagent.knowledge.catkind import serverish
     from supagent.knowledge.facets import base_ref, editable
     from supagent.models import Facet, Link, Tag
 
-    cats = [c for c in editable() if c not in ("subject", "aspect") and not SERVERISH.search(c)]
+    cats = [c for c in editable() if c not in ("subject", "aspect") and not serverish(c)]
     subjects = {f.id: f for f in db.session.query(Facet).filter(Facet.facet == "subject", Facet.status == "approved")}
     parts = {f.id: f for f in db.session.query(Facet).filter(Facet.facet.in_(cats), Facet.status == "approved")}
     out = {"proposed": 0, "withdrawn": 0, "largest": 0, "subjects": 0}

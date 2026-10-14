@@ -77,7 +77,7 @@ def same_name() -> list[dict[str, Any]]:
     by: dict[str, list[Any]] = defaultdict(list)
     for f in db.session.query(Facet).filter(Facet.status.in_(("approved", "proposed"))):
         by[_norm(f.value)].append(f)
-    from supagent.knowledge.datalinks import SERVERISH
+    from supagent.knowledge.catkind import serverish
     from supagent.knowledge.interactions import TOPICS
 
     out = []
@@ -86,7 +86,7 @@ def same_name() -> list[dict[str, Any]]:
         if len(cats) < 2:
             continue
         topics = [f for f in fs if f.facet in TOPICS]
-        places = [f for f in fs if SERVERISH.search(f.facet or "")]
+        places = [f for f in fs if serverish(f.facet)]
         if topics and places and len(topics) + len(places) == len(fs):
             continue                            # (0.10.6) a topic and a server or a group of one name ("monitoring"):
             #                                     two things, which the classification keeps apart

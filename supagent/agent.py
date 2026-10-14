@@ -3412,7 +3412,8 @@ class Agent:
                 from supagent.router import ROUTE_KINDS
 
                 moa = getattr(self, "moa", None)
-                ask = f"{question}\n{reading}" if reading else question
+                base = getattr(self, "intent_text", None) or question   # (0.10.9.2) a follow-up searched with
+                ask = f"{base}\n{reading}" if reading else base      # the question it goes on from (its subject)
                 if getattr(self, "chat_values", None):   # (0.10.7) the values the follow-up's category stands for
                     ask += "\n" + " ".join(self.chat_values)
                 text += knowledge_block(ask, shown,
@@ -3841,6 +3842,7 @@ class Agent:
         forced = force_tool = ledger_asked = unclear_asked = grain_asked = definition_asked = stage_asked = False
         cut_asked = zero_asked = units_asked = written_run = shows_asked = map_asked = placeholder_asked = False
         premise_asked = recut_asked = crash_asked = False
+        pending_call = None                            # (0.10.9.2) a query an answer wrote, run at the next step
         suspect_asked = records_asked = period_kept = map_asked = which_asked = buckets_asked = False
         verdict_asked = cause_records_asked = reach_asked = fields_asked = where_asked = own_asked = False
         blamed_asked = waiter_asked = parts_asked = False
@@ -3897,8 +3899,13 @@ class Agent:
                 #                                        turn of it (a model looked the data up first, or after the
                 #                                        check that asks for the question back, and counted)
             try:
-                msg = self.llm.chat(messages, tools=specs, max_tokens=self._answer_tokens(short=bool(unreadable)),
-                                    **({"tool_choice": choice} if choice else {}))
+                if pending_call is not None:           # (0.10.9.2) the query the answer wrote out, run with no LLM
+                    msg, pending_call = {"role": "assistant", "content": "", "tool_calls": [pending_call]}, None
+                else:                                  # request between (it was asked for the call again, and wrote
+                    #                                    the query again, minutes later, before it was run)
+                    msg = self.llm.chat(messages, tools=specs,
+                                        max_tokens=self._answer_tokens(short=bool(unreadable)),
+                                        **({"tool_choice": choice} if choice else {}))
             except EmptyAnswer:
                 add_usage(self.usage, self.llm.last_usage)
                 fallback = self._empty_fallback(trace)
@@ -3926,7 +3933,9 @@ class Agent:
                 messages.append({"role": "user", "content": UNREADABLE_CALL if self._queried(trace) else
                                  UNREADABLE_NO_DATA})
                 continue
-            add_usage(self.usage, self.llm.last_usage)
+            if msg.get("content") or not all(str(c.get("id", "")).startswith("written-") for c in
+                                             msg.get("tool_calls") or [{}]):
+                add_usage(self.usage, self.llm.last_usage)
             kept = ("role", "content", "tool_calls")
             if msg.get("tool_calls") and settings.get("llm.keep_reasoning"):   # (0.10.8) a reasoning model's plan
                 kept += ("reasoning_content", "reasoning")                      # kept from one call to the next
@@ -4167,6 +4176,14 @@ class Agent:
                         forced = force_tool = True     # a query written, not run, or a follow-up that asks for
                         #                                another day, value or period: the next step runs one
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    written = self._written_call(answer) if not trace and not written_run else None
+                    if written is not None:            # (0.10.9.2) the answer wrote out the query its figures
+                        written_run, pending_call = True, written   # claim: run at once, the answer written from
+                        force_tool = False             # its rows (asking for the call again took two minutes and
+                        messages.pop()                 # gave the same query)
+                        log.info("supagent: the query written in the answer is run at once: %s",
+                                 written["function"]["arguments"][:200])
+                        continue
                     log.info("supagent: answer sent back (no tool / no query): %r", answer[-200:])
                     if nudge == NO_TOOL_NUDGE and not _has_data(answer):   # "if it needs no data, the same answer
                         before_check = (answer, len(trace))   # again" (a figure or rows: never brought back)

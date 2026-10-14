@@ -21,6 +21,7 @@
   var FOLD_AT = 18, FOLD_ALWAYS = 60;   // a category read from the data with more parts than 18 is folded into one
                                         // box (servers...), any category with more than 60
   var BOX_W = 224, GAP = 14, COL_GAP = 96, PAD = 28, HEAD_H = 40, LINE = 16, INDENT = 18;
+  var SUB_PAD = 16;                                          // (0.10.9.2) a subcategory's values: set in from its box
   var RUNS_ON = /\b(runs?|running|hosted|deployed|installed)\s+on\b/i;   // a link drawn by a person that says so
   var GROUP_AT = 40, PAGE = 60;         // (0.9.6) an open category of more parts than 40 shows them by what they
                                         // belong to (servers by their application), each group folded until opened;
@@ -448,14 +449,11 @@
     var heads = [], guides = [];
     var y = 0;
     /* (0.10.9.1) in Edit, a subcategory with no value outside the ones drawn inside others: a box to drop values on */
-    var subsEmpty = function (c, byCat, x) {
-      if (!st.edit || !st.data.is_admin || st.parts.length) return;
-      st.data.categories.forEach(function (k) {
-        if (k.name === c || byCat[k.name] || colOf(k.name) !== c || isOff(k.name)) return;
-        var sid = "sub:" + c + ":" + k.name;
-        nodes[sid] = { id: sid, subEmpty: k.name, sub: k.name, cat: c, x: x, y: y, w: BOX_W, h: 46 };
-        y += 46 + GAP;
-      });
+    var subsEmpty = function (c, byCat) {                     // (0.10.9.2) as entries of the column's own list
+      if (!st.edit || !st.data.is_admin || st.parts.length) return [];
+      return st.data.categories.filter(function (k) {
+        return !(k.name === c || byCat[k.name] || colOf(k.name) !== c || isOff(k.name));
+      }).map(function (k) { return { id: "sub:" + k.name, sub: k.name, subEntry: true, list: null }; });
     };
     var under = function (id) { return tree.down[id] || []; };  // the parts drawn inside a part
     var hideUnder = function (id, alias, seen) {              // everything inside a part: drawn as `alias`
@@ -478,7 +476,11 @@
       if (!cols[c].length) {                                  // no value yet: said in its column
         nodes["none:" + c] = { id: "none:" + c, none: c, cat: c, x: x, y: y, w: BOX_W, h: 58 };
         y += 58 + GAP;
-        subsEmpty(c, {}, x);
+        ordered(subsEmpty(c, {}), c).forEach(function (e) {   // its subcategories' boxes, in the order given
+          var sid = "sub:" + c + ":" + e.sub;
+          nodes[sid] = { id: sid, subEmpty: e.sub, sub: e.sub, cat: c, x: x, y: y, w: BOX_W, h: 46, list: c, oid: e.id };
+          y += 46 + GAP;
+        });
         return;
       }
       if (folded[c]) {
@@ -493,10 +495,11 @@
         return;
       }
       var listOf = c;                                         // (0.10.9.1) the list being placed (its order's key)
+      var subPad = 0;                                         // (0.10.9.2) set in when inside a subcategory's box
       var place = function (v, depth, seen) {
         seen = seen || {};
         seen[v.id] = true;
-        var w = Math.max(120, BOX_W - depth * INDENT), bx = x + depth * INDENT;
+        var w = Math.max(120, BOX_W - depth * INDENT - subPad), bx = x + depth * INDENT + subPad;
         var title = wrap(v.value, titleFont, w - 46, 2);        // (the funnel at its right)
         var about = v.description ? wrap(v.description, textFont, w - 24, 3) :
           v.hint ? wrap("“" + v.hint.text + "”", "italic " + textFont, w - 24, 3) : [];
@@ -521,22 +524,28 @@
         return node;
       };
       // the first PAGE, the others behind one box; returns the boxes placed (the one of the others last)
-      var paged = function (list, scope, depth, seen) {
+      var paged = function (list, scope, depth, seen, subs) {
         // (0.10.9.1) a column's own list, what is inside a value, a subcategory's: in the order a person gave them
-        // (a group of the column keeps the column's order)
+        // (a group of the column keeps the column's order); (0.10.9.2) a column's own list with its subcategories'
+        // boxes among its values, where a person put them (never only at the bottom)
         var sub = /^grp:/.test(scope) ? (scope.indexOf("grp:" + c + ":in:") === 0 ? scope.slice(("grp:" + c + ":in:").length) : c) : scope;
-        list = ordered(list, sub);
+        var all = ordered(subs && subs.length ? list.concat(subs) : list, sub);
         listOf = sub;
-        var shown = st.more[scope] || list.length <= PAGE + 5 ? list : list.slice(0, PAGE), out = [];
-        shown.forEach(function (v) { out.push(place(v, depth, seen)); });
-        if (shown.length < list.length) {
-          var id = "more:" + scope, rest = list.slice(shown.length), w = Math.max(120, BOX_W - depth * INDENT);
-          nodes[id] = { id: id, more: scope, cat: c, depth: depth, x: x + depth * INDENT, y: y, w: w, h: 40,
+        var vals = all.filter(function (e) { return !e.subEntry; });
+        var room = st.more[scope] || vals.length <= PAGE + 5 ? Infinity : PAGE, n = 0, out = [], rest = [], later = [];
+        all.forEach(function (e) {
+          if (e.subEntry) { if (rest.length) later.push(e); else { out.push(placeSub(e)); listOf = sub; } return; }
+          if (n < room) { out.push(place(e, depth, seen)); n++; } else rest.push(e);
+        });
+        if (rest.length) {
+          var id = "more:" + scope, w = Math.max(120, BOX_W - depth * INDENT - subPad);
+          nodes[id] = { id: id, more: scope, cat: c, depth: depth, x: x + depth * INDENT + subPad, y: y, w: w, h: 40,
                         title: ["Show the " + S.num(rest.length) + " others"], lines: [], members: rest.map(function (v) { return v.id; }) };
           rest.forEach(function (v) { nodes[v.id] = { alias: id }; hideUnder(v.id, id); });
           out.push(nodes[id]);
           y += 40 + GAP;
         }
+        later.forEach(function (e) { out.push(placeSub(e)); listOf = sub; });
         return out;
       };
       var box = function (gid, name, list, lines) {          // a group: folded until opened
@@ -546,7 +555,13 @@
                        title: [(open ? "▾ " : "▸ ") + name], lines: open ? [] : lines,
                        members: list.map(function (v) { return v.id; }) };
         y += gh + GAP;
-        if (open) paged(list, gid, 0);
+        var inSub = gid.indexOf("grp:" + c + ":in:") === 0, pad0 = subPad;
+        if (open) {                                           // (0.10.9.2) a subcategory's values: set in from its
+          if (inSub) subPad = pad0 + SUB_PAD;                 // box, a line down from it to each of them
+          var placed = paged(list, gid, 0);
+          subPad = pad0;
+          if (inSub && placed.length) guides.push({ x: x + pad0 + 8, y1: nodes[gid].y + nodes[gid].h, kids: placed });
+        }
         else list.forEach(function (v) { nodes[v.id] = { alias: gid }; hideUnder(v.id, gid); });
         return nodes[gid];
       };
@@ -554,8 +569,37 @@
         return wrap(list.slice(0, 5).map(function (v) { return v.value; }).join(", ") + (list.length > 5 ? "…" : ""),
                     textFont, BOX_W - 24, 2);
       };
+      // the values of a category inside this one that are inside none of its values shown: one box per category;
+      // (0.10.9.2) each box an entry of the column's own list ("sub:<category>"), moved up and down like a value
+      var byCat = {}, catsIn = [];
+      loose[c].forEach(function (v) {
+        if (!byCat[v.facet]) { byCat[v.facet] = []; catsIn.push(v.facet); }
+        byCat[v.facet].push(v);
+      });
+      var subs = catsIn.map(function (k) { return { id: "sub:" + k, sub: k, subEntry: true, list: byCat[k].sort(inOrder) }; })
+        .concat(subsEmpty(c, byCat));
+      var placeSub = function (e) {
+        var k = e.sub;
+        if (!e.list) {                                        // (0.10.9.1) in Edit, a subcategory with no value of its
+          var sid = "sub:" + c + ":" + k;                     // own here: a box to drop values on
+          nodes[sid] = { id: sid, subEmpty: k, sub: k, cat: c, x: x, y: y, w: BOX_W, h: 46, list: c, oid: e.id };
+          y += 46 + GAP;
+          return nodes[sid];
+        }
+        var list = e.list, noun = catLabel(k, list.length).toLowerCase();
+        if (list.length > 1 && !/s$/.test(noun)) noun += "s";
+        // (0.10.9.1) the subcategory's own box: its name and how many (drawn inside no value of the one above it);
+        // a value dropped on it goes into k
+        var sec = box("grp:" + c + ":in:" + k, catLabel(k, 2) + " · " + S.num(list.length), list, some(list));
+        sec.sub = k;
+        sec.list = c;
+        sec.oid = e.id;
+        sec.tip = S.num(list.length) + " " + noun + " inside no " + catLabel(st.inside[k] || c, 1).toLowerCase() + " shown" +
+          (st.edit ? ": drag a value on it to put it in " + catLabel(k, 2).toLowerCase() + ", drag it to move it" : "");
+        return sec;
+      };
       var grouped = !st.parts.length && roots[c].length > GROUP_AT ? groupsOf(c, roots[c], rankOf) : null;
-      if (!grouped) paged(roots[c], c, 0);
+      if (!grouped) paged(roots[c], c, 0, null, subs);
       else grouped.keys.forEach(function (key) {
         var list = grouped.by[key], noun = catLabel(c, list.length).toLowerCase();
         if (list.length > 1 && !/s$/.test(noun)) noun += "s";
@@ -570,23 +614,7 @@
         var g = box("grp:" + c + ":" + (grouped.kind === "holds" ? "h" + hash(key) : key), name, list, some(list));
         if (grouped.kind !== "holds" && key !== "none") g.owner = +key;
       });
-      // the values of a category inside this one that are inside none of its values shown: one group per category
-      var byCat = {}, catsIn = [];
-      loose[c].forEach(function (v) {
-        if (!byCat[v.facet]) { byCat[v.facet] = []; catsIn.push(v.facet); }
-        byCat[v.facet].push(v);
-      });
-      catsIn.forEach(function (k) {
-        var list = byCat[k].sort(inOrder), noun = catLabel(k, list.length).toLowerCase();
-        if (list.length > 1 && !/s$/.test(noun)) noun += "s";
-        // (0.10.9.1) the subcategory's own box: its name and how many (drawn inside no value of the one above it);
-        // a value dropped on it goes into k
-        var sec = box("grp:" + c + ":in:" + k, catLabel(k, 2) + " · " + S.num(list.length), list, some(list));
-        sec.sub = k;
-        sec.tip = S.num(list.length) + " " + noun + " inside no " + catLabel(st.inside[k] || c, 1).toLowerCase() + " shown" +
-          (st.edit ? ": drag a value on it to put it in " + catLabel(k, 2).toLowerCase() : "");
-      });
-      subsEmpty(c, byCat, x);
+      if (grouped) ordered(subs, c).forEach(placeSub);        // (a column of groups: its subcategories after them)
     });
     /* the groups an admin made (display only): a frame around the columns of their categories that are shown */
     var frames = [];
@@ -1032,7 +1060,12 @@
     g.appendChild(a);
     var open = function () { categoryPanel(n.subEmpty); };
     g.addEventListener("pointerdown", function (ev) { ev.stopPropagation(); });
-    g.addEventListener("click", function (ev) { ev.stopPropagation(); open(); });
+    g.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      if (g._dragged) { g._dragged = false; return; }        // (0.10.9.2) the end of a move: no panel
+      open();
+    });
+    if (n.oid) dragSub(g, n);                                 // (0.10.9.2) moved up and down its column
     g.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(); } });
     return g;
   }
@@ -1098,6 +1131,7 @@
     });
     g.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); g.dispatchEvent(new MouseEvent("click")); } });
     if (st.edit && !box && !n.depth) dragBox(g, n);
+    else if (st.edit && st.data.is_admin && n.group && n.oid) dragSub(g, n);   // (0.10.9.2) a subcategory's box
     return g;
   }
   /* (0.9.6.9) a small funnel: the map filtered on a category or a part, or no longer (`on`) */
@@ -1834,7 +1868,8 @@
       if (!ext) return;
       // up to its category's name only when it can go back there (a subcategory's value), else to its list's top
       var top = n.v && n.v.facet !== n.cat ? ext.top : ext.top + HEAD_H - GAP;
-      start = { y: ev.clientY, ny: n.y, top: top, bottom: Math.max(top, ext.bottom - n.h) };
+      // (0.10.9.2) down far enough for its upper part to reach the column's last box (a new subcategory's, 46 px)
+      start = { y: ev.clientY, ny: n.y, top: top, bottom: Math.max(top, ext.bottom - Math.min(n.h, 30)) };
       g.setPointerCapture(ev.pointerId);
     });
     g.addEventListener("pointermove", function (ev) {
@@ -1875,14 +1910,25 @@
       if (!target && o.sub && o.cat === n.cat && o.sub !== n.v.facet && mid >= o.y && mid <= o.y + o.h) target = o;
     });
     if (target) return { facet: target.sub, node: target };
-    var sibs = Object.keys(L.nodes).map(function (k) { return L.nodes[k]; }).filter(function (o) {
-      return o.v && o.list === n.list && o.cat === n.cat && o.id !== n.id && !o.alias && o.depth === n.depth;
-    }).sort(function (a, b) { return a.y - b.y; });
+    return placeAt(n, mid);
+  }
+  /* (0.10.9.2) the place in its list a box dropped at `mid` takes: before the box below it, else after the last;
+     a column's own list holds its subcategories' boxes too (their order ids "sub:<category>") */
+  function placeAt(n, mid) {
+    var sibs = listed(n.list, n.cat, n.depth || 0).filter(function (o) { return oidOf(o) !== oidOf(n); });
     if (!sibs.length) return null;                            // alone in its list: no other place
     var last = sibs[sibs.length - 1], before = null;
     sibs.some(function (o) { if (mid <= o.y + o.h / 2) { before = o; return true; } return false; });
-    return { list: n.list, before: before ? before.id : null, after: before ? null : last.id,
+    return { list: n.list, before: before ? oidOf(before) : null, after: before ? null : oidOf(last),
              y: before ? before.y - GAP / 2 : last.y + last.h + GAP / 2, x: n.x, w: n.w };
+  }
+  function oidOf(o) { return o.oid || o.id; }
+  /* the boxes of a list as drawn, top to bottom: its values (and a column's subcategory boxes) */
+  function listed(list, cat, depth) {
+    var L = st.layout;
+    return Object.keys(L.nodes).map(function (k) { return L.nodes[k]; }).filter(function (o) {
+      return !o.alias && o.cat === cat && o.list === list && ((o.v && (o.depth || 0) === depth) || (o.oid && !depth));
+    }).sort(function (a, b) { return a.y - b.y; });
   }
   function dropMark(at) {                                    // the place a box would take, or the box it would go in
     if (st.dropEl) { st.dropEl.remove(); st.dropEl = null; }
@@ -1901,17 +1947,54 @@
   /* (0.10.9.1) the dragged value takes its new place in its list: the list's whole order kept (its values not shown
      now keep theirs), the moved one before the value it was dropped above */
   function putInOrder(n, at) {
-    var shown = Object.keys(st.layout.nodes).map(function (k) { return st.layout.nodes[k]; }).filter(function (o) {
-      return o.v && o.list === n.list && o.cat === n.cat && !o.alias && o.depth === n.depth;
-    }).sort(function (a, b) { return a.y - b.y; }).map(function (o) { return o.id; });
+    var me = oidOf(n);
+    var shown = listed(n.list, n.cat, n.depth || 0).map(oidOf);
     var full = (st.order[n.list] || []).slice();
     shown.forEach(function (id) { if (full.indexOf(id) < 0) full.push(id); });
-    full = full.filter(function (id) { return id !== n.id; });
+    full = full.filter(function (id) { return id !== me; });
     var i = at.before !== null ? full.indexOf(at.before) : full.indexOf(at.after) + 1;
-    full.splice(i < 0 ? full.length : i, 0, n.id);
+    full.splice(i < 0 ? full.length : i, 0, me);
     st.order[n.list] = full;
     saveLayout();
     draw();
+  }
+  /* (0.10.9.2) In Edit, a subcategory's box (with values or still empty) moves up and down its column like a value:
+     dropped between two boxes it takes that place (kept for everyone, st.order); a click without a move still
+     opens it. */
+  function dragSub(g, n) {
+    var start = null;
+    g.addEventListener("pointerdown", function (ev) {
+      ev.stopPropagation();
+      var ext = (st.layout.extent || {})[n.cat];
+      if (!ext) return;
+      var top = ext.top + HEAD_H - GAP;
+      start = { y: ev.clientY, ny: n.y, top: top, bottom: Math.max(top, ext.bottom - Math.min(n.h, 30)) };
+      g.setPointerCapture(ev.pointerId);
+    });
+    g.addEventListener("pointermove", function (ev) {
+      if (!start) return;
+      var dy = (ev.clientY - start.y) / st.view.k;
+      if (Math.abs(dy) < 3 && !g._dragged) return;
+      if (!g._dragged && g.parentNode && g.parentNode.lastChild !== g) {
+        g.parentNode.appendChild(g);
+        try { g.setPointerCapture(ev.pointerId); } catch (e) { /* kept by the browser */ }
+      }
+      g._dragged = true;
+      g.classList.add("dragging");
+      n.y = Math.round(Math.max(start.top, Math.min(start.bottom, start.ny + dy)));
+      g.setAttribute("transform", "translate(" + n.x + "," + n.y + ")");
+      dropMark(placeAt(n, n.y + Math.min(n.h / 2, 20)));
+    });
+    g.addEventListener("pointerup", function () {
+      if (start && g._dragged) {
+        var at = placeAt(n, n.y + Math.min(n.h / 2, 20));
+        dropMark(null);
+        g.classList.remove("dragging");
+        if (at) putInOrder(n, at);
+        else { n.y = start.ny; g.setAttribute("transform", "translate(" + n.x + "," + n.y + ")"); }
+      }
+      start = null;
+    });
   }
   function moveValue(n, facet) {                             // (0.10.9.1) dropped into a (sub)category
     setState("Moving " + n.v.value + " into " + catLabel(facet, 2).toLowerCase() + "…", "busy");

@@ -278,7 +278,10 @@ def test_a_follow_up_naming_a_value_no_query_used_needs_its_own_query(ctx, monke
     assert carry.new_values("And the flash PnL?", [history[0]["content"], "the flash matched the official one"],
                             [prev]) == ["flash (PNL_STATUS)"]   # (0.10.7) an answer's words hold no figure of it
     grouped = prev.replace("AND \"PNL_STATUS\" IN ('OFFICIAL', 'RESTATED') ", "") + " GROUP BY \"PNL_STATUS\""
-    assert carry.new_values("And the flash PnL?", [history[0]["content"]], [grouped]) == []   # every status computed
+    assert carry.new_values("And the flash PnL?", [history[0]["content"], "Official 567,189 EUR, flash 576,885 EUR."],
+                            [grouped]) == []          # every status computed and its figure told
+    assert carry.new_values("And the flash PnL?", [history[0]["content"], history[1]["content"]], [grouped]) == \
+        ["flash (PNL_STATUS)"]                      # (0.10.9.2) computed but never told: the chat keeps no rows
     made_up = say("The flash PnL of EQ_DESK on 22 September was 567,189 EUR as well.")
     sql = {"request": {"database_id": 1, "sql": prev.replace("IN ('OFFICIAL', 'RESTATED')", "= 'FLASH'")}}
     rows = json.dumps({"success": True, "columns": [{"name": "total"}], "rows": [{"total": 576885.24}], "row_count": 1})

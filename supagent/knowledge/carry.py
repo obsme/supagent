@@ -135,9 +135,14 @@ def new_values(question: str, seen: list[str], queries: list[str],
         if not field or re.search(rf"(?<![\w-]){re.escape(low)}(?![\w-])", text) or \
                 re.search(rf"(?<![\w-]){re.escape(said)}(?![\w-])", text):   # its failures were timeouts?": 0
             continue                                     # with no query, 211 in the data)
+        answered = " ".join(seen[1:2]).lower()          # (0.10.9.2) the previous answer: a chat keeps no rows
         if any(re.search(rf"\bGROUP\s+BY\b[^;]*?(?<![\w-])\"?{re.escape(field)}\"?(?![\w-])", q or "", re.I)
-               for q in queries):
-            continue                                     # every value of its field computed: the chat holds it
+               for q in queries) and (re.search(rf"(?<![\w-]){re.escape(low)}(?![\w-])", answered) or
+                                      re.search(rf"(?<![\w-]){re.escape(said)}(?![\w-])", answered)):
+            continue                                     # every value of its field computed and this one's figure
+        #                                                  told: the chat holds it (a query grouped by it whose
+        #                                                  answer never named it holds no figure of it: the flash
+        #                                                  PnL given as the official one, with no query)
         out.append(f"{word} ({field})")
     return out
 

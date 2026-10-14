@@ -97,7 +97,7 @@ def _category(kind: str, name: str, said: Any = None, published: bool = False, n
     category for what the part is (placing: the words next to its name, what the reading knows of it, its name's
     shape), when it has one; else as before."""
     from supagent import settings
-    from supagent.knowledge.datalinks import SERVERISH
+    from supagent.knowledge.catkind import kind_name, serverish
     from supagent.knowledge.facets import editable
     from supagent.knowledge.placing import best_category, choose
 
@@ -108,7 +108,7 @@ def _category(kind: str, name: str, said: Any = None, published: bool = False, n
     own_cats = set(settings.get("categories.custom") or [])
     if kind and kind not in ("part", "host", "group", "vip", "namespace", "cluster") and kind not in INFRA_CATEGORY:
         direct = next((c for c in cats if c in own_cats and   # (0.10.10) the documents say what it
-                       _norm(c) in (_norm(kind), _norm(kind) + "s", _norm(re.sub(r"s$", "", kind)))), None)
+                       _norm(kind_name(c)) in (_norm(kind), _norm(kind) + "s", _norm(re.sub(r"s$", "", kind)))), None)
         if direct:                                         # is ("the following components:", "Domain: x") and the
             return direct                                  # person has a category of that very name
     if kind == "environment":                              # (0.10.10) an inventory's environment: the person's
@@ -123,16 +123,17 @@ def _category(kind: str, name: str, said: Any = None, published: bool = False, n
         if top and (len(top) == 1 or top[0][1] > top[1][1]) and top[0][0] in cats:
             c = top[0][0]
             a = affinity(c, about.get(c, ""))
-            place = bool(SERVERISH.search(c)) or (a.most_common(1)[0][0] in HOSTISH if a else False)
+            place = serverish(c) or (a.most_common(1)[0][0] in HOSTISH if a else False)
             if place == (kind in ("host", "vip", "group", "namespace", "cluster")):
                 return c
     if kind in ("host", "vip", "group", "namespace", "cluster"):   # (0.10.4) a VIP: an address, with the servers
-        hosts = [c for c in cats if SERVERISH.search(c)]
+        hosts = [c for c in cats if serverish(c)]
         base = next((c for c in hosts if re.fullmatch(r"(servers?|hosts?|vms?|virtual machines?|machines?|nodes?)",
-                                                      c.strip(), re.I)), hosts[0] if hosts else None)
+                                                      kind_name(c).strip(), re.I)), hosts[0] if hosts else None)
         return choose(base, kind, name, said, [c for c in cats if c != "subject"], about, published)
     if kind in INFRA_CATEGORY:                             # (0.10.9) a power supply, a switch port, a team: the
-        return next((c for c in cats if INFRA_CATEGORY[kind].search(c)), None)   # deployment's category, else none
+        return next((c for c in cats if INFRA_CATEGORY[kind].search(kind_name(c))), None)   # deployment's category,
+    #                                                                                                  else none
     if kind in ("database", "cache", "object", "topic", "queue", "stream", "job") or TECHNICAL.search(name):
         base = "component" if "component" in cats else None   # (data and jobs: no application)
     else:
@@ -157,15 +158,25 @@ def _category(kind: str, name: str, said: Any = None, published: bool = False, n
         from supagent.knowledge.facets import inside
 
         wholes = set(inside().values())                    # a category holding categories is a whole (a system of
-        services = [c for c in cats if c in own_cats and SERVICE_CATEGORY.search(c) and not SERVERISH.search(c)
-                    and not NOT_OWN_SERVICE.search(c) and c not in wholes]   # microservices): its parts find their
-        #                                                                     own category through the nesting
+        #                                                    microservices): its parts find their own category through
+        #                                                    the nesting; a place's "site": none; (0.10.9.2) each
+        #                                                    category by its name or what its description says
+        services = [c for c in cats if c in own_cats and SERVICE_CATEGORY.search(kind_name(c)) and
+                    not serverish(c) and not NOT_OWN_SERVICE.search(kind_name(c)) and c not in wholes and
+                    (not BARE_SITE.search(kind_name(c)) or WEB_WORDS.search(about.get(c) or ""))]
         if len(services) == 1 and not _person_uses("application"):
             return services[0]                             # (0.10.10) the person files the system's applications
-    return own or to                                       # in their one category of services ("platform service")
+        #                                                    in their one category of services ("platform service")
+        mine = best_category("application", services, about) if len(services) > 1 else None
+        if mine and not _person_uses("application"):       # (0.10.9.2) several: the one its name or description
+            return mine                                    # says is for what users use ("product": "what the
+    return own or to                                       # community uses: a web application, ...")
 
 
-SERVICE_CATEGORY = re.compile(r"\b(services?|applications?|apps?|systems?|platforms?|products?)$", re.I)   # its
+SERVICE_CATEGORY = re.compile(r"\b(services?|applications?|apps?|systems?|platforms?|products?|sites?|websites?|"
+                              r"portals?)$", re.I)   # (0.10.9.2) a site, a portal: what users use; its
+BARE_SITE = re.compile(r"(?<!web)(?<!web )\bsites?$", re.I)   # (0.10.9.2) "site" alone: a web site only when its
+WEB_WORDS = re.compile(r"(?i)\b(?:web|website|portal|api|application|app|users?|public|online|internet)\b")   # say so
 #                                       head noun ("platform service"; a "service area" is an area)
 # (0.10.10) a category of services that are not the system's own: never where its applications go
 NOT_OWN_SERVICE = re.compile(r"\b(external|third[- ]?part(?:y|ies)|partners?|vendors?|providers?|suppliers?|saas|"
@@ -436,9 +447,9 @@ def propose(dry_run: bool = False) -> dict[str, Any]:
     partish = {_norm(r["from"]) for r in rels if r["kind"] not in ("in_group", "alias") and r["kind"] not in WORDED} | \
         {_norm(r["to"]) for r in rels if r["kind"] in LINK_OF and r["kind"] not in ("in_group", "runs_on") and
          r["kind"] not in WORDED}
-    from supagent.knowledge.datalinks import SERVERISH
+    from supagent.knowledge.catkind import serverish
 
-    servers = {_norm(f.value) for f in values.values() if f.status == "approved" and SERVERISH.search(f.facet or "")}
+    servers = {_norm(f.value) for f in values.values() if f.status == "approved" and serverish(f.facet)}
     vips = {_norm(r["from"]) for r in rels if r["kind"] == "routes_to"}
     kept_topics = {k for k, fs in topics.items() if not all(_llm_proposal(f) for f in fs)}
     env_levels = {_norm(re.sub(r"^.*\(([^()]+)\)\s*$", r"\1", str(r["from"]))) for r in rels   # (0.10.10) what an
@@ -581,7 +592,7 @@ def propose(dry_run: bool = False) -> dict[str, Any]:
         """(0.10.6) The subjects the AI proposed with the name of a part the code, a configuration or a page names
         (it read the name before they did): that part, with what they were given; a person's subject stays, and a
         server is no topic's twin."""
-        if dry_run or key in kept_topics or SERVERISH.search(part.facet or ""):
+        if dry_run or key in kept_topics or serverish(part.facet):
             return
         for t in topics.pop(key, []):
             if t.id in merged:                            # (one of its other names merged it already)
@@ -621,7 +632,7 @@ def propose(dry_run: bool = False) -> dict[str, Any]:
     written: dict[str, Facet] = {}                        # or a group's name as written (db, databases: two groups)
     for key, f in values.items():
         for nm in {key, f.value, *[str(x) for x in (f.synonyms or [])]}:   # (0.10.10) as written: ConsentManager is
-            k = written_key(nm, bool(SERVERISH.search(f.facet or "")))      # "consent manager", not "consentmanager"
+            k = written_key(nm, serverish(f.facet))      # "consent manager", not "consentmanager"
             if k not in written or _rank(f) < _rank(written[k]):
                 written[k] = f
 
@@ -729,7 +740,7 @@ def propose(dry_run: bool = False) -> dict[str, Any]:
                         only_end=bare in published and bare not in acting and key not in acting)
         if role == "whole":                               # (0.10.10) a whole: the category its sentence says, else
             cat = prefer if prefer and prefer in cats else cat   # the chooser's, never a place's
-            if cat and (SERVERISH.search(cat) or concept(cat) in HOSTISH):
+            if cat and (serverish(cat) or concept(cat) in HOSTISH):
                 return None
         if cat is None:
             from supagent.knowledge.naming import kind_of as what_part
@@ -770,7 +781,7 @@ def propose(dry_run: bool = False) -> dict[str, Any]:
         if not other_thing and (values.get(_norm(shown)) is None or role != "whole"):
             values[_norm(shown)] = f
         for x in ((name,) if other_thing else (shown, name)):
-            written.setdefault(written_key(x, bool(SERVERISH.search(cat or ""))), f)
+            written.setdefault(written_key(x, serverish(cat)), f)
         out["values"] += 1
         return f
 
@@ -835,7 +846,7 @@ def propose(dry_run: bool = False) -> dict[str, Any]:
         if (r["kind"] in ("calls", "sends_to", "reads_from", "uses", "runs_on")) and _norm(b.value) in vips:
             out["to a VIP: its service"] = out.get("to a VIP: its service", 0) + 1   # (0.10.6) a VIP is an address:
             continue                                       # the service behind it gets the link (the reading adds it)
-        if r["kind"] in ("calls", "sends_to", "reads_from", "uses") and SERVERISH.search(a.facet or "") and \
+        if r["kind"] in ("calls", "sends_to", "reads_from", "uses") and serverish(a.facet) and \
                 a.status == "approved":                    # (a VIP's routes_to is no flow: it stays)
             out["a server is no flow's subject"] = out.get("a server is no flow's subject", 0) + 1
             continue                                       # (0.10.6) a server or a group: where parts run

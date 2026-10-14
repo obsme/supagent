@@ -101,13 +101,19 @@ def words(name: str, literal: bool = False) -> list[str]:
     return out
 
 
-@lru_cache(maxsize=1024)
 def _literal(category: str) -> bool:
     """(0.10.10) A category of places an inventory names (servers, hosts, groups, VIPs, namespaces, clusters): its
-    names are identities, compared as written (web and web-prod, uat_app (ops uat) and ops uat are two)."""
+    names are identities, compared as written (web and web-prod, uat_app (ops uat) and ops uat are two); (0.10.9.2)
+    what the category holds, by its name or its description (catkind)."""
+    from supagent.knowledge.catkind import kind_name
+
+    return _literal_kind(kind_name(category))
+
+
+@lru_cache(maxsize=1024)
+def _literal_kind(c: str) -> bool:
     from supagent.knowledge.placing import HOSTISH, phrases
 
-    c = str(category or "")
     return bool(SERVERISH.search(c)) or bool(set(phrases(c)) & (HOSTISH | {"messaging"}))   # (and the streams,
     #                                                       topics, queues: orders.created and orders.rated are two)
 
@@ -115,13 +121,19 @@ def _literal(category: str) -> bool:
 INSTANCES = {"store", "cache", "object", "messaging", "broker", "job", "dns", "certificate"}
 
 
-@lru_cache(maxsize=1024)
 def _instances(category: str) -> bool:
     """(0.10.10) A category of things made once per environment (databases, caches, buckets, topics, jobs, DNS names,
     certificates): an environment's word in a name makes another one."""
+    from supagent.knowledge.catkind import kind_name
+
+    return _instances_kind(kind_name(category))
+
+
+@lru_cache(maxsize=1024)
+def _instances_kind(c: str) -> bool:
     from supagent.knowledge.placing import phrases
 
-    return bool(set(phrases(str(category or ""))) & INSTANCES)
+    return bool(set(phrases(c)) & INSTANCES)
 
 
 QUALIFIED = re.compile(r"^(.+?)\s*\(([^()]+)\)\s*$")
@@ -209,6 +221,28 @@ def _typo_words(a: list[str], b: list[str]) -> str:
     return _typo(*diff[0]) if len(diff) == 1 else ""
 
 
+# (0.10.9.2) a team's word in the languages a wiki is written in ("the Security team", "l'équipe Sécurité")
+TEAM_WORDS = {"team", "equipe", "equipo", "squad", "squadra", "crew", "tribe", "mannschaft"}
+TEAM_GLUE = {"of", "de", "du", "des", "d", "del", "der", "des"}
+
+
+@lru_cache(maxsize=1 << 14)
+def team_core(name: str) -> tuple[str, ...] | None:
+    """(0.10.9.2) A team's name without its team word and its articles ("l'équipe Plateforme": ("plateforme",)),
+    None for a name with no team word."""
+    ws = words(name)
+    if not any(w in TEAM_WORDS for w in ws):
+        return None
+    core = tuple(w for w in ws if w not in TEAM_WORDS and w not in ARTICLES and w not in TEAM_GLUE)
+    return core or None
+
+
+def _cognate(x: str, y: str) -> bool:
+    """(0.10.9.2) One word in two languages: sécurité and security, plateforme and platform, méthodes and methods
+    (5 letters or more, the same start, near the same letters)."""
+    return min(len(x), len(y)) >= 5 and x[:2] == y[:2] and SequenceMatcher(None, x, y).ratio() >= 0.85
+
+
 def same(a: str, b: str, category: str = "") -> str:
     """How sure two names are one thing: "strong", "noenv", "typo", "doubt" (a looser key) or "" (two things)."""
     if digits(a, category) != digits(b, category):
@@ -216,6 +250,12 @@ def same(a: str, b: str, category: str = "") -> str:
     ka, kb = keys(a, category), keys(b, category)
     if ka["folded"] == kb["folded"] or ka["written"] == kb["written"] or ka["compact"] == kb["compact"]:
         return "strong"
+    ta, tb = team_core(a), team_core(b)                   # (0.10.9.2) a team named in two languages: the Security
+    if ta and tb and not _literal(category):              # team and l'équipe Sécurité
+        if ta == tb:
+            return "strong"
+        if len(ta) == len(tb) and all(x == y or _cognate(x, y) for x, y in zip(ta, tb)):
+            return "typo"
     if _literal(category):
         return ""                                         # a host's name is its identity: srv-a-1 is not srv-01
     if _qualifier(a, b, category) or _qualifier(b, a, category):
@@ -306,6 +346,9 @@ def _blocks(values: list[Any]) -> dict[str, list[Any]]:
                 if ("acr", acr) not in seen:                  # OMS meets order management system
                     seen.add(("acr", acr))
                     out[f"{_family(f.facet)}|a:{acr}"].append(f)
+            if team_core(n) and ("team", "") not in seen:   # (0.10.9.2) the teams: compared together (their
+                seen.add(("team", ""))                        # names in two languages share no key)
+                out[f"{_family(f.facet)}|team"].append(f)
             comp = ks["compact"]
             if len(comp) >= TYPO_MIN:                     # a typo keeps either half of a long name
                 for part in (comp[: len(comp) // 2], comp[len(comp) // 2:]):

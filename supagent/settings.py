@@ -720,6 +720,9 @@ def explicit(key: str) -> Any:
     return _coerce(spec, env) if env is not None else None
 
 
+CHANGED = [0]                              # (0.10.9.2) settings this process wrote (what caches of them are keyed on)
+
+
 def set_value(key: str, value: Any, by: str = "") -> None:
     """Store a setting (value None: back to the default)."""
     spec = BY_KEY.get(key)
@@ -738,6 +741,7 @@ def set_value(key: str, value: Any, by: str = "") -> None:
     stored = (row.value, row.secret)
     db.session.merge(row)
     db.session.commit()
+    CHANGED[0] += 1
     rows = _memo()
     if rows is not None:                       # a page's request that also writes one: read as written
         rows[key] = stored

@@ -150,6 +150,17 @@ then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with t
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
 
+## Upgrade from 0.10.9.1 to 0.10.9.2
+
+No table change and no new setting: pip install the wheel on every host and restart. The learning reads the team's
+categories by their descriptions when their names are not the usual ones, and reads real infrastructure repositories
+and their wikis better; a subcategory on the System map moves up and down its column like a value and takes values
+dropped on it while empty, its values set in a little; an answer that writes out its query has it run at once.
+Measured: main open set 159/162, observability 29/29; unit tests 2033; upgrade from 0.10.9.1 checked; learning not
+below 0.10.9.1 on ten development corpora; on a real repository read once after the build was frozen, 63 % of the
+proposed values in the right category (0.10.9.1: 49 %) and 87 % of the links right (71 %); categories renamed but
+described: filed as under their own names.
+
 ## Upgrade from 0.10.9 to 0.10.9.1
 
 No table change: pip install the wheel on every host and restart. What the agent gives the LLM is now settable for the
