@@ -138,8 +138,8 @@
         var desc = el("td", { class: "desc" });
         desc.innerHTML = (o.description ? esc(o.description.length > 220 ? o.description.slice(0, 220) + "…" : o.description) + " " : '<span class="muted">no description</span> ') +
                          S.sourceBadge(o.description_source, o.verified) + (o.gone ? ' <span class="badge gone">gone</span>' : "") +
-                         (o.deactivated ? ' <span class="badge gone">deactivated</span>' : "");
-        tb.appendChild(el("tr", { class: "link", tabindex: "0", onclick: function () { detail(o.id); },
+                         (o.deactivated ? ' <span class="badge gone deact">deactivated</span>' : "");
+        tb.appendChild(el("tr", { class: "link", tabindex: "0", "data-id": String(o.id), onclick: function () { detail(o.id); },
                                   onkeydown: function (ev) { if (ev.key === "Enter") detail(o.id); } }, [
           nameCell(o), el("td", { text: KIND[o.kind] || o.kind }),
           el("td", { text: o.metric_type || o.data_type || "" }), el("td", { text: o.unit || "" }), desc,
@@ -237,6 +237,16 @@
     });
   }
 
+  /* (0.10.9.2) a row of the list marked deactivated or not, in place */
+  function markRow(id, off) {
+    var tr = $("objects").querySelector('tr[data-id="' + id + '"]');
+    var td = tr && tr.querySelector("td.desc");
+    if (!td) return;
+    var b = td.querySelector(".badge.deact");
+    if (off && !b) td.appendChild(el("span", { class: "badge gone deact", text: "deactivated" }));
+    if (!off && b) b.remove();
+  }
+
   function editor(o, after) {
     var ta = el("textarea", { rows: "3", "aria-label": "Description" });
     ta.value = o.description || "";
@@ -272,7 +282,18 @@
       text: o.deactivated ? "Activate" : "Deactivate",
       title: o.deactivated ? "The agent and the search use it again" :
         "The agent and the search never see it nor use it (an index or a metric: with its fields or labels)",
-      onclick: function () { S.dict("POST", "objects/" + o.id, { active: !!o.deactivated }).then(done); } }));
+      onclick: function (ev) {
+        /* (0.10.9.2) shown at once: the drawer and the rows of this page change in place, no list read again */
+        var b = ev.currentTarget, off = !o.deactivated;
+        b.disabled = true; res.textContent = off ? "deactivating…" : "activating…"; res.className = "result";
+        S.dict("POST", "objects/" + o.id, { active: !off }).then(function (r) {
+          b.disabled = false;
+          if (r.error) { res.textContent = r.error; res.className = "result bad"; return; }
+          (r.changed || [o.id]).forEach(function (id) { markRow(id, off); });
+          detail(o.id, after);
+          if (after) after();
+        });
+      } }));
     kids[kids.length - 1].appendChild(res);
     return el("div", { class: "edit section" }, kids);
   }

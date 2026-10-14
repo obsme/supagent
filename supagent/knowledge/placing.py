@@ -41,11 +41,14 @@ CONCEPTS: dict[str, tuple[str, ...]] = {
                  "external system", "external systems", "external api", "external apis", "provider",
                  "providers", "vendor", "vendors", "partner", "partners", "supplier", "saas"),
     "team": ("squad", "squads", "team", "teams", "crew", "tribe"),
-    "domain": ("business line", "business lines", "line of business", "business domain", "business area",
+    "domain": ("business line", "business lines", "line of business", "product line", "product lines",
+               "business domain", "business area",
                "business areas", "business unit", "business units", "domain", "domains", "service area",
                "service areas", "functional area", "functional areas", "area", "areas"),   # (0.10.9.3) areas
     "service": ("microservice", "microservices", "micro-service", "api", "apis", "worker", "workers", "consumer"),
-    "application": ("application", "applications", "app", "apps", "system", "systems"),
+    "application": ("application", "applications", "app", "apps", "system", "systems", "website", "websites",
+                    "web site", "web sites", "web application", "web applications", "webapp", "webapps", "portal",
+                    "portals", "product", "products"),   # (0.10.9.1) what its users use, by another name
     "environment": ("environment", "environments", "stage", "stages"),
     "dashboard": ("dashboard", "dashboards"),
     "alert": ("alerting rule", "alert rule", "alert rules", "alert", "alerts"),
@@ -104,7 +107,9 @@ def best_category(concept: str, cats: Iterable[str], about: dict[str, str] | Non
     """The deployment's category for a concept: the one whose NAME says it (the description breaks a tie), else
     none."""
     about = about or {}
-    scored = []
+    if concept != "external":                  # (0.10.9.1) a category for another company's things ("partner api",
+        cats = [c for c in cats if "external" not in phrases(c.replace("_", " "))]   # "vendor apps"): never for
+    scored = []                                #   the system's own
     for c in cats:
         a = affinity(c, about.get(c, ""))
         named = phrases(c.replace("_", " ")).get(concept, 0)
@@ -138,8 +143,9 @@ def defining(text: str) -> Counter:
     return out
 
 
-AFTER = ("job", "team", "domain", "group", "store", "messaging", "object", "cluster", "namespace", "broker",
-         "external")                             # a noun after a name says what it is ("X cron job", "X squad")
+AFTER = ("job", "team", "domain", "group", "messaging", "object", "cluster", "namespace", "broker",
+         "external")                             # a noun after a name says what it is ("X cron job", "X squad");
+#   (0.10.9.1) never a store: "the Galaxy database", "the payments DB" is the application's database
 PHRASE_OF = {p: c for p, c in PHRASES}
 
 
@@ -215,6 +221,10 @@ def choose(base: str | None, kind: str | None, name: str, said: Counter | None, 
     return own or base
 
 
+COPULA = ("is", "are", "was", "est", "sont", "ist", "sind", "es")   # (0.10.9.1) "X is a ...", "X est un ..."
+ARTICLE = ("a", "an", "the", "one", "un", "une", "le", "la", "ein", "eine", "der", "die", "das", "el")
+
+
 def named_categories(quote: str, name: str, cats: list[str]) -> Counter:
     """(0.10.10) A category of the deployment written right next to a name in a sentence ("the X platform service",
     "the stream X", "le service X"): the page says it; the strongest evidence of all."""
@@ -226,7 +236,10 @@ def named_categories(quote: str, name: str, cats: list[str]) -> Counter:
         return Counter()
     m = found[0]
     before = re.findall(r"[a-z0-9-]+", re.split(r"[^a-z0-9\s-]", low[:m.start()])[-1])[-3:]
-    after = re.findall(r"[a-z0-9-]+", re.split(r"[^a-z0-9\s-]", low[m.end():])[0])[:3]
+    after = re.findall(r"[a-z0-9-]+", re.split(r"[^a-z0-9\s-]", low[m.end():])[0])[:5]
+    if len(after) > 2 and after[0] in COPULA and after[1] in ARTICLE:
+        after = after[2:]                        # (0.10.9.1) "X is a platform service of ...": its category
+    after = after[:3]
     forms = {}
     for c in cats:
         if c in ("subject", "aspect"):

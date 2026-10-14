@@ -143,14 +143,16 @@ SPECS: list[Spec] = [
          "with something never said (\"show me the late ones\") is asked back with the candidates, not guessed"),
     Spec("agent.compact_at", 24000, "int", "Prompt tokens of an answer's conversation from which the older tool "
          "results are cut to their first lines (then again at half as much more), the work plan given again: models "
-         "read long contexts worse well before their limit (0: only when the context is full)"),
+         "read long contexts worse well before their limit (0: only when the context is full). Set here, it applies "
+         "to both context profiles; budget.short.compact_at / budget.long.compact_at set one profile's and win"),
     Spec("agent.context_profile", "auto", "choice", "(0.10.9.1) How much of the model's context the agent fills: "
          "short (a model of 32k-64k tokens per request: the knowledge given with a question, the tool results, the "
          "earlier messages and the Context in their short sizes; older results cut from 24,000 prompt tokens), long (a "
          "model of 128k or 256k: sizes grown with its window, the Context's sections given whole, older results cut "
-         "from 60 % of the window), auto (long when the LLM's server says 100,000 tokens per request or more, or "
-         "agent.context_tokens does). A size set here (agent.compact_at, search.prompt_chars, memory.prompt_chars) "
-         "wins over the profile's", choices=("auto", "short", "long")),
+         "from 60 % of the window), auto (long when the LLM's server says budget.long_from_tokens tokens per request "
+         "or more, 100,000 by default, or agent.context_tokens does). Each profile's sizes are settings of their own "
+         "(budget.short.*, budget.long.*); agent.compact_at and search.prompt_chars, set, apply to both",
+         choices=("auto", "short", "long")),
     Spec("agent.llm_context", True, "bool", "(0.10.9.1) Give the LLM context the learning writes (the Context's "
          "pages \"LLM context (full)\" and \"(light)\": the catalog's rules, glossary, formulas and facts, the main "
          "data with its meaning and fields, the links between the databases, the questions answered well before) with "
@@ -534,8 +536,8 @@ SPECS: list[Spec] = [
     Spec("memory.enabled", True, "bool", "Learn preferences, rules and facts from the chats"),
     Spec("memory.team_approval", True, "bool", "Team memories need an admin's approval before they are used "
          "(personal ones are used at once)"),
-    Spec("memory.prompt_chars", 2000, "int", "Characters of memories given with every question at most (rules, "
-         "then preferences, then facts; the facts left out are still found by the knowledge search)"),
+    Spec("memory.prompt_chars", 2000, "int", "No longer used (0.10.9): every memory is given whole, first, on top "
+         "of the knowledge found for the question"),
     # ---- other agents (MCP server mode)
     Spec("mcp.user", "", "str", "Superset user the MCP server mode (`superset supagent mcp`, for other agents) "
          "acts as; empty: MCP_DEV_USERNAME of superset_config.py"),
@@ -556,6 +558,41 @@ SPECS: list[Spec] = [
     Spec("agent.queue_keep_days", 90, "int", "With Celery's queue in Superset's database (broker_url \"sqla+...\"): "
          "delivered messages are deleted after this many days (0: never; Celery itself never deletes them)"),
 ]
+
+
+def _budget_specs() -> list[Spec]:
+    """(0.10.9.1) What the agent gives the LLM, settable for each context profile: budget.short.<size> (a model of
+    32k-64k tokens per request) and budget.long.<size> (128k or more), empty for the profile's own size; and when the
+    big model's profile applies (supagent.budget)."""
+    from supagent import budget as b
+
+    def own(name: str) -> str:
+        unit = b.UNIT.get(name, "characters")
+        if name == "compact_at":
+            big = f"{b.COMPACT_SHARE:.0%} of the model's window"
+        else:
+            big = (f"{b.LONG[name]:,} at a window of 128k tokens, grown or shrunk with the window (half at 64k, one "
+                   f"and a half at 256k)")
+        return f"small model {b.SHORT[name]:,} {unit}; big model {big}"
+
+    out = [
+        Spec("budget.long_from_tokens", b.LONG_AT, "int", "agent.context_profile auto: a model whose server states "
+             "this many tokens per request or more gets the big model's sizes, a smaller one the small model's"),
+        Spec("budget.long_cut_share", b.COMPACT_SHARE, "float", "Big model: the share of its window from which the "
+             "older tool results of an answer are cut (unless budget.long.compact_at is set)"),
+        Spec("budget.long_assumed_tokens", b.ASSUMED_LONG, "int", "Big model's profile forced (agent.context_profile "
+             "long) on a server that states no window: the window its sizes are made for"),
+    ]
+    for prof, who in (("short", "Small model (32k-64k tokens per request)"), ("long", "Big model (128k or more)")):
+        for name in b.NAMES:
+            both = (f". Set here, it wins over {b.SETTING[name]}, which applies to both profiles"
+                    if name in b.SETTING else "")
+            out.append(Spec(f"budget.{prof}.{name}", None, "int",
+                            f"{who}: {b.ABOUT[name]}. Empty: the profile's own ({own(name)}){both}"))
+    return out
+
+
+SPECS += _budget_specs()
 BY_KEY = {s.key: s for s in SPECS}
 
 

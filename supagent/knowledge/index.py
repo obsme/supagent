@@ -21,6 +21,7 @@ import re
 import threading
 from typing import Any, Iterator
 
+from sqlalchemy import or_
 from superset import db
 
 from supagent import settings
@@ -326,10 +327,14 @@ def _doc_pages(d: Doc) -> list[tuple[str, str, str]] | None:
     return out
 
 
-def _doc_pieces() -> Iterator[dict[str, Any]]:
+def _doc_pieces(only: set[int] | None = None) -> Iterator[dict[str, Any]]:
     """The parts of the documents: page by page (a part never mixes two pages), each named after its document
-    and its page and starting with the page's address, for the agent to say where it read it."""
-    for d in db.session.query(Doc).filter(Doc.enabled.is_(True), Doc.content.isnot(None)):
+    and its page and starting with the page's address, for the agent to say where it read it. (0.10.9.2) `only`:
+    these documents' alone (a page removed, a document saved: never every document read again)."""
+    q = db.session.query(Doc).filter(Doc.enabled.is_(True), Doc.content.isnot(None))
+    if only is not None:
+        q = q.filter(Doc.id.in_(sorted(only) or [-1]))
+    for d in q:
         name = d.title or d.url or f"document {d.id}"
         category = f" ({d.category})" if d.category else ""
         pages = _doc_pages(d)
@@ -661,11 +666,18 @@ KINDS = (("object:", _object_pieces), ("entry:", _entry_pieces), ("recipe:", _re
          ("superset:", _superset_pieces), ("mcp:", _mcp_pieces), ("note:", _note_pieces), ("map:", _map_pieces))
 
 
+ONE_DOC = re.compile(r"^doc:(\d+)#$")   # (0.10.9.2) the refs of one document's pieces
+
+
 def pieces(prefixes: tuple[str, ...] | None = None) -> Iterator[dict[str, Any]]:
     """Every piece (`prefixes`: only the kinds of these refs: a memory saved does not read the
-    whole dictionary again)."""
+    whole dictionary again; (0.10.9.2) "doc:<id>#": that document's pieces only)."""
     for prefix, make in KINDS:
         if prefixes is None or any(p.startswith(prefix) or prefix.startswith(p) for p in prefixes):
+            docs = [p for p in prefixes or () if p.startswith("doc:")]
+            if prefix == "doc:" and docs and all(ONE_DOC.match(p) for p in docs):
+                yield from _doc_pieces({int(ONE_DOC.match(p).group(1)) for p in docs})
+                continue
             yield from make()
 
 
@@ -676,8 +688,11 @@ def sync(prefixes: tuple[str, ...] | None = None, dry_run: bool = False) -> dict
     """Write the pieces that changed, remove the ones whose origin is gone. `prefixes` limits
     the work to some kinds of refs (e.g. ("recipe:",) after an answer); `dry_run`: only count
     (and name a few of) what would be written (the knowledge check)."""
-    existing = {c.ref: c for c in db.session.query(Chunk)
-                if prefixes is None or c.ref.startswith(prefixes)}
+    q = db.session.query(Chunk)
+    if prefixes is not None:                             # (0.10.9.2) only those pieces read from the database
+        q = q.filter(or_(*[Chunk.ref.like(p.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%",
+                                          escape="\\") for p in prefixes]))
+    existing = {c.ref: c for c in q if prefixes is None or c.ref.startswith(prefixes)}
     wanted = (p for p in pieces(prefixes) if prefixes is None or p["ref"].startswith(prefixes))
     return _write(existing, wanted, dry_run)
 

@@ -102,3 +102,14 @@ def test_a_step_announced_at_the_end_does_not_replace_the_answer(ctx, monkeypatc
     a, ran = agent_with(monkeypatch, replies, results=lambda n, args: rows)
     answer, _trace = a.ask("zq warns every night about its cache. Was that related to the morning's problem?", [])
     assert answer.startswith("No: the nightly warnings") and "Let me also get" not in answer
+
+
+def test_a_gib_that_is_neither_conversion_of_the_one_result_is_a_slip():
+    """(0.10.9.1) "1.67 GiB (2,749,366,272 bytes)": the one result's bytes are 2.56 GiB (and 2.75 GB): sent back."""
+    rows = json.dumps({"success": True, "rows": [{"min_mem_bytes": 2749366272.0}], "row_count": 1})
+    trace = [{"tool": "execute_sql", "called": "execute_sql", "status": "done", "result": rows}]
+    why = binary_misread("The lowest available memory was **1.67 GiB** (2,749,366,272 bytes).", trace)
+    assert why and "2.56 GiB" in why and "1073741824" in why
+    assert binary_misread("The lowest available memory was **2.56 GiB**.", trace) is None
+    two = _trace(2749366272.0, 3221225472.0)                                   # several results: no guess
+    assert binary_misread("The lowest available memory was **1.67 GiB**.", two) is None

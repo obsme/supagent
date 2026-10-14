@@ -90,10 +90,28 @@
     return node;
   }
 
+  /* (0.10.9.1) what the agent gives the LLM, per context profile: budget.short.<size>, budget.long.<size> */
+  var SIZE_LABELS = {
+    compact_at: "Cut older results from (prompt tokens)", search_chars: "Knowledge per question",
+    piece_chars: "Each piece of knowledge", context_chars: "Each Context section", llm_context_chars: "LLM context",
+    tool_chars: "A tool's result", describe_chars: "A description of the data", compare_chars: "A comparison of groups",
+    history_chars: "Each earlier message", rules_near_chars: "The team's rules in full", rule_chars: "One rule",
+    group_chars: "A comparison of logs", shrunk_first: "An older result after the first cut",
+    shrunk_second: "An older result after the second cut"
+  };
+  LABELS["budget.long_from_tokens"] = "Big model's sizes from (tokens per request)";
+  LABELS["budget.long_cut_share"] = "Big model: cut older results from (share of the window)";
+  LABELS["budget.long_assumed_tokens"] = "Big model forced on an unknown window: window assumed (tokens)";
+
+  function labelOf(key) {
+    var m = /^budget\.(short|long)\.(.+)$/.exec(key);
+    return LABELS[key] || (m && SIZE_LABELS[m[2]]) || key;
+  }
+
   /* a setting: its name, an "i" with what it does (shown on demand), its box */
   function fieldRow(spec) {
     var inp = input(spec);
-    var name = LABELS[spec.key] || spec.key;
+    var name = labelOf(spec.key);
     var label = el("label", { for: inp.id }, [document.createTextNode(name), el("span", { class: "key", text: spec.key })]);
     var head = el("span", { class: "field-head" }, [label, spec.help ? S.info(spec.help, name) : null]);
     if (spec.kind === "bool") {
@@ -102,17 +120,45 @@
     return el("div", { class: "field", "data-key": spec.key }, [head, inp]);
   }
 
-  function renderSettings(list) {
+  function renderSettings(list, budget) {
     specs = {};
     list.forEach(function (s) { specs[s.key] = s; });
     document.querySelectorAll(".fields[data-group]").forEach(function (box) {
-      var groups = box.dataset.group.split(" ");
+      var groups = box.dataset.group.split(" "), pre = box.dataset.prefix || "";
       box.innerHTML = "";
       list.forEach(function (s) {
-        if (groups.indexOf(s.key.split(".")[0]) >= 0) box.appendChild(fieldRow(s));
+        if (groups.indexOf(s.key.split(".")[0]) >= 0 && s.key.indexOf(pre) === 0) box.appendChild(fieldRow(s));
       });
     });
     authVisibility();
+    renderBudget(budget);
+  }
+
+  /* (0.10.9.1) the profile in use, the model's window, the estimate and its warnings; each size box shows its
+     profile's own size in grey, and what is in use when a setting for both profiles decides it */
+  function renderBudget(b) {
+    var now = $("budget-now");
+    if (!now || !b) return;
+    now.innerHTML = "";
+    var est = b.estimate || {};
+    now.appendChild(document.createTextNode("In use: the " + (b.profile === "long" ? "big" : "small") + " model's sizes (" +
+      b.profile + "); the model reads " + (b.window ? S.num(b.window) + " tokens per request" : "a number of tokens its server does not state") +
+      "; an answer starts with about " + S.num(est.start_tokens || 0) + " tokens, of which " + S.num(est.instructions_tokens || 0) +
+      " for the instructions and the tools (an estimate)."));
+    (est.warnings || []).forEach(function (t) { now.appendChild(el("span", { class: "warn", text: " Warning: " + t + "." })); });
+    ["short", "long"].forEach(function (p) {
+      var head = $("budget-h-" + p);
+      if (head) head.textContent = (p === "short" ? "Small model (short)" : "Big model (long)") + (p === b.profile ? ": in use" : "");
+      (b.names || []).forEach(function (n) {
+        var key = "budget." + p + "." + n;
+        var node = document.querySelector('[data-key="' + key + '"]:not(.field)');
+        var row = document.querySelector('.field[data-key="' + key + '"]');
+        if (!node || !row) return;
+        node.placeholder = S.num(b.defaults[p][n]);
+        var from = b.set[p][n];
+        if (from && from !== key) row.appendChild(el("span", { class: "in-use", text: "in use: " + S.num(b.sizes[p][n]) + " (set in " + from + ")" }));
+      });
+    });
   }
 
   function authVisibility() {
@@ -135,13 +181,14 @@
       else if (spec.kind === "json") { try { v = JSON.parse(node.value || "{}"); } catch (e) { v = node.value; } }
       else v = node.value;
       if (spec.secret && !v) return;
+      if (!spec.secret && (spec.value === null || spec.value === undefined) && v === "") return;   // empty left empty
       if (!spec.secret && JSON.stringify(v) === JSON.stringify(spec.kind === "int" || spec.kind === "float" ? String(spec.value) : spec.value)) return;
       out[k] = v;
     });
     return out;
   }
 
-  function loadSettings() { return S.admin("GET", "settings").then(function (d) { renderSettings(d.settings || []); }); }
+  function loadSettings() { return S.admin("GET", "settings").then(function (d) { renderSettings(d.settings || [], d.budget); }); }
 
   var STEP_WORDS = { listed: "listed", "new": "new", due: "due", profiled: "profiled", not_due: "not due", metrics: "metrics",
     indices: "indices", labels: "labels", fields: "fields", families: "families", requests: "requests", errors: "errors",
@@ -274,7 +321,7 @@
         var errs = Object.keys(r.errors || {}).map(function (k) { return k + ": " + r.errors[k]; });
         res.textContent = errs.length ? errs.join("; ") : "saved " + (r.saved || []).length + " setting(s)";
         res.className = "result " + (errs.length ? "bad" : "good");
-        if (r.settings) renderSettings(r.settings);
+        if (r.settings) renderSettings(r.settings, r.budget);
       });
     });
   });

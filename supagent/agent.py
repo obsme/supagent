@@ -1673,6 +1673,8 @@ def latent_unexplained(question: str, answer: str, year: int) -> tuple[str, str,
     return None
 
 
+# (0.10.9.1) a column bounded by a date in a query ("ORDER_DATE" >= '2026-09-01', "day" BETWEEN DATE '2026-09-01' ...)
+DATE_BOUND = re.compile(r'"([^"]+)"\s*(?:>=|>|<=|<|=|BETWEEN)\s*(?:TIMESTAMP\s*|DATE\s*)?\'\d{4}-\d{2}-\d{2}', re.I)
 TIME_LITERAL = re.compile(r"\bTIMESTAMP\s*'|'\d{4}-\d{2}-\d{2}|\b1[5-9]\d{8,14}\b|\bDATE_TRUNC\b|\bNOW\(\)|"
                           r"\bCURRENT_(?:DATE|TIMESTAMP)\b", re.I)
 PERIOD_KEPT_NUDGE = ("(Check before answering: this message goes on from the chat, which asked about a period this "
@@ -2251,6 +2253,12 @@ ABSENT_ZERO_NUDGE = ("(Your answer gives a zero for something it also says the d
 BINARY_SAID = re.compile(r"(?<![\d.,])(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*(KiB|MiB|GiB|TiB)\b")
 BINARY_POWER = {"KiB": 1, "MiB": 2, "GiB": 3, "TiB": 4}
 NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?")
+# (0.10.9.1) a size whose conversion slipped: the query gave one number of bytes, the answer a binary size that is
+# neither it / 1024^k nor it / 1000^k ("1.67 GiB" for 2,749,366,272 bytes, 2.56 GiB)
+SLIP_NUDGE = ("(Check before answering: your answer says {said}, but the query gave {raw:,.0f} bytes, which are "
+              "{right:.2f} {unit} (bytes / 1024^{k}). Give the size from the result, best converted in the query itself "
+              "(divided by {div}). Then write the whole answer again for the user, as if for the first time, with all it "
+              "had found: they see neither the text above nor this check.)")
 BINARY_NUDGE = ("(Check before answering: {said} is {raw:,.0f} bytes divided by 1000^{k}, a decimal unit ({dec}). One "
                 "{unit} is 1024^{k} bytes: {raw:,.0f} bytes are {right:.2f} {unit}. Give each size in {unit} divided by "
                 "1024^{k} (or say {dec} if you keep 1000^{k}). Then write the whole answer again for the user, as if "
@@ -2280,10 +2288,15 @@ def binary_misread(answer: str, trace: list[dict]) -> str | None:
         k = BINARY_POWER[unit]
         near = lambda b, f: abs(b / f - x) <= max(0.006 * x, 0.006)   # noqa: E731
         decimal = [b for b in found if near(b, 1000 ** k)]
-        if decimal and not any(near(b, 1024 ** k) for b in found):
+        binary = [b for b in found if near(b, 1024 ** k)]
+        if decimal and not binary:
             raw = decimal[0]
             return BINARY_NUDGE.format(said=text, raw=raw, k=k, dec=unit.replace("i", ""), unit=unit,
                                        right=raw / 1024 ** k)
+        if not decimal and not binary and len(found) == 1:   # (0.10.9.1) one number of bytes, neither conversion:
+            raw = next(iter(found))                           # a slip of the arithmetic
+            if raw / 1024 ** k >= 0.01:
+                return SLIP_NUDGE.format(said=text, raw=raw, k=k, unit=unit, right=raw / 1024 ** k, div=1024 ** k)
     return None
 
 
@@ -2311,6 +2324,46 @@ UNFOUND_ZERO_NUDGE = ("(Your answer gives a zero, but '{value}' is no value of \
                       "records, it may only show that this source holds none of them. Find where its records are (its "
                       "name with describe_data or search_knowledge, the other tables of its kind); if no source holds "
                       "them, say that first, with where you looked, and give no 0 and no \"no errors\" for it.)")
+
+
+# (0.10.9.1) a real 0 in the result called "no data": "How many orders failed on the 25th?", the one query's row
+# total_failed = 0.0, the answer "the metric had no data collected for that date ... Would you like me to ...?"
+NO_DATA_SAID = re.compile(r"(?i)\b(?:no (?:data|samples?|records?|rows?|results?|values?)\b(?:[^.]{0,40}?\b(?:collected|"
+                          r"recorded|found|returned|available|stored))?|(?:had|has|have) no data|(?:can ?not|can't|"
+                          r"unable to) (?:provide|give|compute|report) (?:a |the )?(?:count|number|total|figure|value))")
+ZERO_TOLD = re.compile(r"(?i)\*\*0\*\*|(?<![\w.,])0(?:\.0+)?(?![\w.,%])|\bzero\b|\bnone\b")
+EMPTY_ZERO_NUDGE = ("(Check before answering: your answer says \"{said}\", but the query returned a row with {col} = 0: "
+                    "the data was read and the figure is a real zero. Answer with that zero for what was asked, without "
+                    "a question back, unless another query shows the measure is not recorded at all. Then write the "
+                    "whole answer for the user as if for the first time: they see neither the one above nor this "
+                    "check.)")
+
+
+def zero_called_empty(answer: str, trace: list[dict]) -> tuple[str, str] | None:
+    """(0.10.9.1) (what the answer says, the column) when it says there is no data while the last query that ran gave
+    one row whose figures are all 0 (no empty value), and it writes no zero itself; else None."""
+    m = NO_DATA_SAID.search(answer or "")
+    if not m or ZERO_TOLD.search(answer or ""):
+        return None
+    for t in reversed(trace or []):
+        if t.get("tool") != "execute_sql" or t.get("status") != "done":
+            continue
+        res = t.get("result")
+        if isinstance(res, str):
+            try:
+                res = json.loads(res)
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(res, dict) or res.get("success") is False:
+            return None
+        rows = res.get("rows") or []
+        if len(rows) != 1 or not isinstance(rows[0], dict) or not rows[0]:
+            return None
+        figures = [(k, v) for k, v in rows[0].items() if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if figures and all(v == 0 for _k, v in figures) and all(v is not None for v in rows[0].values()):
+            return m.group(0), figures[0][0]
+        return None
+    return None
 
 
 def unfound_zero(answer: str, trace: list[dict], question: str = "") -> tuple[str, str, str] | None:
@@ -3975,6 +4028,13 @@ class Agent:
                     if not forced and settings.get("agent.force_tool"):
                         forced = force_tool = True     # the next step counts with that field
                     continue
+                emptied = None if zero_asked else zero_called_empty(answer, trace)
+                if emptied:                            # (0.10.9.1) once: a real 0 in the result called "no data"
+                    zero_asked = True                  # (asked back or not: asking back is how it shows)
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (a zero result called no data: %s)", emptied[0])
+                    messages.append({"role": "user", "content": EMPTY_ZERO_NUDGE.format(said=emptied[0], col=emptied[1])})
+                    continue
                 if not zero_asked and absent_zero(answer):
                     zero_asked = True                  # (0.10.7) once: "0 errors" for a service whose logs no index
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1   # holds, said in the same answer
@@ -5011,7 +5071,8 @@ class Agent:
                 for table in re.findall(r'\bfrom\s+"([^"]+)"', sql, re.I):
                     ix = db.session.query(KObject).filter(KObject.kind == "index", KObject.name == table,
                                                           KObject.gone_at.is_(None)).first()
-                    tf = ((ix.stats or {}).get("time_field") if ix is not None else None)
+                    tf = ((ix.stats or {}).get("time_field") if ix is not None else None) or \
+                        self._chat_time_column(table)    # (0.10.9.1) a date column the chat itself bounded
                     if not tf:
                         continue
                     if TIME_LITERAL.search(sql) or f'"{tf}"' in sql:
@@ -5025,6 +5086,16 @@ class Agent:
         except Exception:  # pylint: disable=broad-except   (never an answer lost for a check)
             log.warning("supagent: the check of the chat's period failed", exc_info=True)
             return None
+
+    def _chat_time_column(self, table: str) -> str | None:
+        """(0.10.9.1) The column the chat's earlier queries on a table bounded by a date ("ORDER_DATE" >=
+        '2026-09-01'), for a table the data dictionary knows no time field of (a date kept as text): the one column,
+        else None."""
+        cols = set()
+        for q in getattr(self, "prev_queries", None) or []:
+            if f'"{table}"' in q:
+                cols.update(m.group(1) for m in DATE_BOUND.finditer(q))
+        return next(iter(cols)) if len(cols) == 1 else None
 
     def _claims_period(self, answer: str, trace: list[dict]) -> bool:
         """(0.10.7) Sent back for the chat's period, the model ran no query since and wrote that its figures are for

@@ -87,6 +87,10 @@ URL = re.compile(r"\b((?:https?|grpcs?|tcp|wss?|postgres(?:ql)?|mysql|mariadb|sq
 USERINFO_TPL = re.compile(r"(://[^\s/@:'\"]*:)(\{\{.*?\}\}|\$\{[^}\s]*\}|%\([^)\s]*\)s|<[^>@\s]*>)(?=@)")
 UPSTREAM_SUFFIX = re.compile(r"(?i)[_.-](backends?|upstreams?|servers|pool|cluster|svc)$")
 HOSTPORT = re.compile(r"(?<![\w./@:-])([a-zA-Z][a-zA-Z0-9-]*(?:\.[a-zA-Z0-9-]+)*):(\d{2,5})(?![\w.])")
+# (0.10.9.1) a line naming the DNS servers a program asks (nginx's "resolver a:8600 b:8600", resolv.conf's
+# "nameserver", "dns_servers:"): where names are looked up, no service the program calls
+RESOLVER_LINE = re.compile(r"(?i)^\s*[-\"']*\s*(?:resolver|nameservers?|dns[_-]?(?:servers?|resolvers?)|upstream[_-]dns|"
+                           r"forwarders?)\b")
 ENDPOINT_KEY = re.compile(r"(url|uri|endpoint|host|hosts|server|servers|destination|target|targets|upstream|address|"
                           r"addr|dsn|broker|brokers|bootstrap)", re.I)
 DB_SCHEMES = ("postgres", "postgresql", "mysql", "mariadb", "sqlserver", "oracle", "mongodb", "jdbc")
@@ -119,7 +123,8 @@ PACKAGE_FILES = re.compile(r"(^|[/_])(composer\.(json|lock)|package(-lock)?\.jso
                            r"go\.(mod|sum)|Cargo\.(toml|lock)|[\w.-]+\.csproj|packages\.config|setup\.(py|cfg)|"
                            r"pyproject\.toml|bower\.json|\.gitmodules)$", re.I)   # (0.10.4) where code comes from, not
 #                                                                                     what it calls when it runs
-NOT_ENDPOINT = re.compile(r"/licen[cs]es?\b|//(www\.)?(opensource|creativecommons|gnu|spdx|w3|schema|json-schema|"
+NOT_ENDPOINT = re.compile(r"\.git(?:$|[/#?\s'\"])|/licen[cs]es?\b|//(www\.)?(opensource|creativecommons|gnu|spdx|w3|"
+                          r"schema|json-schema|"
                           r"apache)\.org\b|\.(dtd|xsd)\b|//[^/\s]+/(docs?|documentation|manual|wiki|help|blog|books|"
                           r"guides?|tutorials?|fwlink|terms|privacy|policies)\b|"
                           r"\.(?:txt|gz|bz2|xz|zip|tgz|7z|fa|fasta|2bit|bed|gtf|gff3?|vcf|csv|tsv|pdf|png|jpe?g|gif|svg|"
@@ -238,6 +243,10 @@ class Names:
         self.indices: dict[str, str] = {}           # norm(name or pattern) -> name
         self.metrics: dict[str, str] = {}           # name -> name (a family by its base too)
         self.homes: dict[str, set] = {}             # (0.10.4) norm(part) -> the documents that declare it
+        self.own_sites: set[str] = set()            # (0.10.9.1) the sites that are the system's own (run())
+        self.groups: set[str] = set()               # (0.10.9.1) norm(a group's bare name) mapped in hosts (run())
+        self.placement: dict[str, Any] = {}        # (0.10.9.1) the repository being read: {"groups_of": {norm(host):
+        #                                             its groups}, "runs_on": {part: its groups}} (run(), per document)
 
     def add_part(self, name: str, *others: str) -> None:
         n = norm(name)
@@ -550,6 +559,52 @@ def _host_part(host: str, names: Names) -> str:
 
 
 
+# (0.10.9.1) a load balancer's upstream in its own file (nginx): its name and its servers
+UPSTREAM_BLOCK = re.compile(r"(?ms)^[ \t]*upstream[ \t]+([\w.-]+)[ \t]*\{(.*?)^[ \t]*\}")
+UPSTREAM_SERVER = re.compile(r"(?m)^[ \t]*server[ \t]+([A-Za-z0-9][\w.-]*)")
+
+
+def upstreams(text: str) -> dict[str, list[str]]:
+    """(0.10.9.1) {upstream name: its servers' hosts} of a web server's configuration (nginx's "upstream x { server
+    h1; server h2:8080; }"); a server found through service discovery (service.consul) is none."""
+    out: dict[str, list[str]] = {}
+    if "upstream" not in (text or ""):
+        return out
+    for m in UPSTREAM_BLOCK.finditer(text):
+        out[m.group(1).lower()] = [h for h in UPSTREAM_SERVER.findall(m.group(2)) if not h.endswith(".consul")]
+    return out
+
+
+def upstream_part(name: str, servers: list[str], names: "Names") -> str | None:
+    """(0.10.9.1) The application an upstream sends to when every one of its servers is a host of the inventories:
+    the one part the plays deploy on a group of each of them (an application before the hosts' software, a store or
+    an agent; between applications, the one the upstream's name carries); else None (nothing guessed)."""
+    from supagent.knowledge.naming import kind_of
+
+    pl = names.placement or {}
+    groups_of, runs_on = pl.get("groups_of") or {}, pl.get("runs_on") or {}
+    hosts = []
+    for s in servers:
+        h = names.hosts.get(norm(s)) or (names.hosts.get(norm(s.split(".")[0])) if "." in s else None)
+        if not h:
+            return None                                    # a server the inventories do not hold: not known here
+        hosts.append(norm(h))
+    if not hosts or not runs_on:
+        return None
+    cands = [p for p, gs in runs_on.items() if all(gs & groups_of.get(h, set()) for h in hosts)]
+    kinds = {p: kind_of(p) for p in cands}
+    apps = [p for p in cands if kinds[p] is None]
+    if len(apps) > 1:                                      # an application and its own processes named after it
+        base = [p for p in apps if all(q == p or norm(q).startswith(norm(p) + "-") for q in apps)]   # (x, x-workers)
+        apps = base or [p for p in apps if norm(p) in norm(name)] or apps
+    if len(apps) == 1:
+        return apps[0]
+    if apps:
+        return None
+    stores = [p for p in cands if kinds[p] in ("database", "infrastructure")]
+    return stores[0] if len(stores) == 1 else None
+
+
 VIP_WORD = re.compile(r"(?i)(?:^|[.\-_])vips?(?:[.\-_]|$)")   # (0.10.4) orders-vip.example.com, vip-orders, x.vip.y
 VIP_KEY = re.compile(r"(?i)(?:^|_)(?:vips?|virtual_ip(?:address)?(?:es)?|vip_(?:address|addr|ip|fqdn|host|url)s?)$")
 VIP_TEXT = re.compile(r"(?i)\bVIPs?\b|\bvirtual IPs?\b")
@@ -597,6 +652,47 @@ def _site(host: str) -> str:
     labels = [x for x in host.lower().split(".") if x]
     n = 3 if len(labels) >= 3 and labels[-2] in ("co", "com", "org", "net", "gov", "gouv", "ac", "edu") else 2
     return ".".join(labels[-n:])
+
+
+# (0.10.9.1) the names a network keeps for itself: never another company's site
+PRIVATE_TLDS = {"internal", "local", "lan", "corp", "intra", "intranet", "home", "localdomain", "private", "priv",
+                "svc", "cluster", "consul", "test", "invalid", "localhost", "arpa", "int", "loc", "dmz"}
+OWN_SITE_HOSTS = 3   # (0.10.9.1) a site the documents name this many hosts of is the system's own
+
+
+def _any_site(host: str) -> str:
+    """(0.10.9.1) The site of a host named with its domain, whatever its ending (api.vendor.example: vendor.example);
+    "" for a host of a private network's names (db.internal, x.svc.cluster.local), an address or a bare name."""
+    h = host.split("@")[-1].split(":")[0].strip("[]").lower()
+    labels = [x for x in h.split(".") if x]
+    if len(labels) < 2 or not labels[-1].isalpha() or labels[-1] in PRIVATE_TLDS or re.fullmatch(r"[\d.]+", h):
+        return ""
+    return _site(h)
+
+
+def _foreign(host: str, names: "Names") -> bool:
+    """(0.10.9.1) A host on another company's site: a domain of its own that the documents name few hosts of
+    (api.vendor.example once), that no server of the inventories is on and that is no private network's."""
+    s = _any_site(host)
+    return bool(s) and bool(names.own_sites) and s not in names.own_sites
+
+
+def _docstring_lines(text: str) -> set[int]:
+    """(0.10.9.1) The lines of a Python file's docstrings (module, classes, functions): what they show are examples."""
+    import ast
+
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return set()
+    out: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(getattr(first, "value", None), ast.Constant) and \
+                    isinstance(first.value.value, str):
+                out.update(range(first.lineno, (first.end_lineno or first.lineno) + 1))
+    return out
 
 
 def _url_parts(url: str) -> tuple[str, str, int | None, str]:
@@ -1153,6 +1249,7 @@ AREA_COL = re.compile(r"(?i)^\s*(?:(?:service|business|functional|platform)\s+)?
                       r"dominios?|bereiche?|domänen?)\s*$")
 PART_OF_HEAD = re.compile(r"^\s*(?:apps?|applications?|services?|platform\s+services?|systems?|products?|parent|"
                           r"part\s+of|belongs\s+to)\s*$", re.I)   # (0.10.10) a module's whole, in a table of modules
+STORE_COLUMN = re.compile(r"(?i)^\s*(?:dbs?|databases?|datastores?|data\s+stores?|stores?|bases?\s+de\s+donn[ée]es)\s*$")
 COLUMNS = [   # what a table's column says of its row's part (its header)
     ("runs_on", re.compile(r"\b(runs?\s+on|hosts?|servers?|nodes?|machines?|vms?|platform|cluster|located|hosting|"
                            r"hosted\s+on|deployed\s+(?:to|on))\b|"
@@ -1165,8 +1262,8 @@ COLUMNS = [   # what a table's column says of its row's part (its header)
     ("reads_from", re.compile(r"^\s*(?:reads?|reads?\s+from|consumes?|subscribes?(?:\s+to)?|inputs?|in)\s*$", re.I)),
     ("sends_to", re.compile(r"^\s*(?:writes?|writes?\s+(?:to|into)|publishes|publishes\s+to|produces?|outputs?|"
                             r"out)\s*$", re.I)),     # (0.10.10) a table of jobs or modules: what each reads, writes
-    ("uses", re.compile(r"\b(depends?\s+on|dependencies|dependency|requires)\b|^\s*(?:dbs?|databases?|datastores?|"
-                        r"data\s+stores?)\s*$", re.I)),   # (0.10.9) what it needs:
+    ("uses", re.compile(r"\b(depends?\s+on|dependencies|dependency|requires|d[ée]pend\s+de)\b|^\s*(?:dbs?|databases?|"
+                        r"datastores?|data\s+stores?|bases?\s+de\s+donn[ée]es)\s*$", re.I)),   # (0.10.9) what it needs:
     #                         a dependency, written from the dependent's side, not a call ("Depends on: prometheus")
     ("calls", re.compile(r"\b(calls|upstreams?|uses|clients?\s+of)\b", re.I)),
     ("logs_to", re.compile(r"\b(logs?|log\s+index|indices|indexes)\b", re.I)),
@@ -1406,7 +1503,9 @@ def _span_name(span: str, at: int, found: list[tuple[int, str, str]], kind_said:
     if inside:
         return inside[-1][2]
     text = re.sub(r"\s*\([^)]*\)", "", span).strip(" *`'\"")
-    text = re.sub(r"(?i)^(?:the|a|an|our|their|its|le|la|les|l['’]|un|une)\s+", "", text).strip()
+    text = re.sub(r"(?i)^(?:(?:the|a|an|our|their|its|of|le|la|les|un|une|de|du|des|au|aux|son|sa|ses|leur|leurs|"
+                  r"notre|nos|votre|vos)\s+|(?:l|d)['’]\s*)+", "", text).strip()   # (0.10.9.1) "de son RabbitMQ",
+    #                                                                              "d'Alma": the name after them
     text = re.sub(r"(?i)^(?:service|application|système|domaine|ligne|plateforme|environnement|domäne|anwendung|"
                   r"dienst|plattform|umgebung|bereich)\s+(?:de\s+|d['’])?", "", text).strip()
     text = CONTAINER_NOUN.sub("", text).strip()   # (the French noun comes first: "du service Paiement")
@@ -1568,10 +1667,44 @@ def introduced_names(text: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+ADDRESSED = re.compile(r"(?<![\w.@/-])(?P<name>[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*)[ \t]*\([ \t]*"
+                       r"(?:(?:https?|wss?|grpcs?)://)?(?P<host>[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+                       r"(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+)(?::\d{2,5})?(?:/[^\s()]*)?[ \t]*\)")
+FILE_ENDING = re.compile(r"(?i)(ya?ml|json|py|sh|conf|cfg|ini|txt|md|rst|log|xml|toml|j2|tf|tfvars|sql|csv|html?|js|"
+                         r"ts|go|rb|java|properties|env|service|timer|socket|pem|crt|key|jar|war|zip|gz|tgz|rpm|deb|"
+                         r"exe|dll|so|lock|pid|sock|bak|tmp|pdf|png|jpe?g|svg|gif)")
+
+
+def addressed_names(text: str) -> list[tuple[str, str, int]]:
+    """(0.10.9.1) A name a page writes with its address in brackets: "rates-api (api.vendor-x.example)",
+    "the ledger (ledger.int.example.net:8443)": (name, host, position). An IP address, a version (1.2.3), a file
+    (config.yaml) or a bare word in brackets is no address."""
+    out = []
+    for m in ADDRESSED.finditer(text or ""):
+        name, host = m.group("name"), m.group("host").lower()
+        last = host.rsplit(".", 1)[-1]
+        if not last.isalpha() or len(last) < 2 or FILE_ENDING.fullmatch(last) or \
+                name.lower() in TINY_WORDS or name.lower() in GENERIC_LABELS or len(name) < 3:
+            continue
+        out.append((name, host, m.start()))
+    return out
+
+
 STORAGE_CMD = re.compile(r"\baz\s+storage\s+(?:blob|file|fs)\s+(?P<az>upload(?:-batch)?|download(?:-batch)?|copy\s+start|sync)"
                          r"\b(?P<azargs>[^\n]*)|\b(?:aws\s+s3|gsutil(?:\s+-m)?|mc)\s+(?:cp|sync|mv|rsync)\s+"
                          r"(?:--?[\w-]+(?:\s+[^\s-]\S*)?\s+)*(?P<src>\S+)\s+(?P<dst>\S+)")
 STORAGE_URL = re.compile(r"^(?:s3|gs|az|abfss?|wasbs?)://(?P<b>[\w.-]+)|^(?P<alias>[\w-]+)/(?P<mb>[\w.-]+)")
+# (0.10.9.1) a database's client in a script ("psql -h orders-db -d orders", "cqlsh ledger-cass", "redis-cli -h x"):
+# the script's part uses that database; never in a test or a CI pipeline's steps
+DB_CLIENT = re.compile(r"(?<![\w/.-])(?P<cli>psql|pg_dump(?:all)?|pg_restore|pg_basebackup|pgbench|mysql|mysqldump|"
+                       r"mysqladmin|mariadb(?:-dump)?|clickhouse-client|clickhouse\s+client|cqlsh|mongosh|mongo|"
+                       r"mongodump|mongorestore|mongoexport|mongoimport|redis-cli|sqlplus|sqlcmd)(?![\w-])"
+                       r"(?P<args>[^\n|;&]*)")
+DB_HOST_ARG = re.compile(r"(?:^|\s)(?:-h|--host(?:name)?|-S)(?:=|\s*)[\"']?(?P<h>[A-Za-z0-9][\w.-]*)|"
+                         r"\bhost=(?P<kv>[A-Za-z0-9][\w.-]*)|@/{0,2}(?P<at>[A-Za-z][\w.-]*)(?=[:/\s\"']|$)")
+DB_NAME_ARG = re.compile(r"(?:^|\s)(?:-d|--dbname|--database)(?:=|\s*)[\"']?(?P<d>[A-Za-z_][\w-]*)|\bdbname=(?P<kv>[A-Za-z_][\w-]*)")
+CI_FILE = re.compile(r"(?i)(?:^|/)(?:\.gitlab-ci\.ya?ml|jenkinsfile[^/]*|azure-pipelines[^/]*|bitbucket-pipelines\.ya?ml|"
+                     r"\.drone\.ya?ml|\.travis\.ya?ml|tox\.ini|noxfile\.py|makefile)$|(?:^|/)\.(?:github|circleci)/")
 
 
 def _storage_ends(m: Any) -> list[tuple[str, str]]:
@@ -1591,6 +1724,7 @@ def _storage_ends(m: Any) -> list[tuple[str, str]]:
 JOB_FILE = re.compile(r"(?i)(?:^|/)(?:tasks?|jobs?|cron(?:jobs?)?|batch(?:es)?)/(?P<stem>[\w.-]+?)\.(?:sh|bash|py|ps1)$")
 
 
+STORE_KINDS = ("database", "cache", "object", "topic", "queue", "stream")   # (0.10.9.1) what a table of stores lists
 TABLE_KIND = {"task": "job", "scheduled task": "job", "batch task": "job", "job": "job", "cron job": "job",
               "cronjob": "job", "event topic": "topic", "batch": "job", "external system": "external", "partner": "external",
               "third party": "external", "vendor": "external", "supplier": "external", "external api": "external",
@@ -1853,6 +1987,13 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
     for other in unit["found"]["names"]:
         if me and norm(other) != norm(me):
             fact(me, "alias", other, "part", max(0, text.find(other)), conf=0.8)
+    # (0.10.9.1) a part a page writes with another company's address ("calls rates-api (api.vendor-x.example)"):
+    # a service of that company, not one of the system's own
+    if source in ("wiki", "doc"):
+        for nm, h, pos in addressed_names(text):
+            who = names.service(nm) or own.get(norm(nm)) or names.service(h)
+            if who and _foreign(h, names) and not names.hosts.get(norm(who)) and norm(who) not in names.homes:
+                fact(who, "is_a", "external", "kind", pos, conf=0.7)
     # (0.10.10) a Helm chart's values: the namespace it is installed in (a top-level "namespace:")
     if me and HELM_VALUES.search(path):
         hm = re.search(r"(?m)^namespace:[ \t]*[\"']?([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)[\"']?[ \t]*(?:#.*)?$", text)
@@ -1872,7 +2013,11 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
             if _is_public(h):
                 sites[_site(h)] += 1
         catalogue = len(sites) >= CATALOGUE_SITES
+        docs_at = _docstring_lines(text) if lang == "python" else set()   # (0.10.9.1) an example in a docstring
+        ups_of = upstreams(text)                          # (0.10.9.1) a load balancer's upstreams in this file
         for m in URL.finditer(scan):                                                   # }}@mq-01": mq-01
+            if docs_at and text.count("\n", 0, m.start()) + 1 in docs_at:
+                continue                                  # ("it accepts http://home_server"): no address it calls
             scheme, host, port, first = _url_parts(m.group(1))
             line = _line_of(scan, m.start())[1]           # (the line as scanned: the address is found in it)
             ph = PLACEHOLDER_HOST.match(host)
@@ -1903,7 +2048,8 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                 else:
                     fact(me, verb, host.lower(), "vip", m.start())
                 continue
-            part = _host_part(host, names)
+            ups = ups_of.get(host.lower()) if "." not in host else None
+            part = (upstream_part(host, ups, names) if ups else None) or _host_part(host, names)
             served = names.parts.get(norm(part)) or names.alias.get(norm(part)) or own.get(norm(part)) \
                 if not names.hosts.get(norm(part)) else None   # the host is a part (a workload, a service), no server
             if what == "database" and served:
@@ -1921,6 +2067,9 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                      host, "host", m.start(), conf=0.7)
             else:
                 fact(me, verb, part, what if what in ("database", "cache") else "part", m.start())
+                if what not in ("database", "cache", "logs") and part and not served and _foreign(host, names) and \
+                        not names.hosts.get(norm(part)) and norm(part) not in names.homes:
+                    fact(part, "is_a", "external", "kind", m.start(), conf=0.7)   # (0.10.9.1) another company's
         if job_script and (STORAGE_CMD.search(text) or URL.search(text)):
             fact(me, "is_a", "job", "kind", 0, conf=0.8)  # (0.10.10) a job's script that touches something: a job
         for m in STORAGE_CMD.finditer(text):              # (0.10.10) "az storage blob upload -c x", "aws s3 cp f
@@ -1930,10 +2079,37 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                 if target and not re.search(r"[{}$<>%]", target):
                     fact(me, verb, names.part(target) or own.get(norm(target)) or target, "object", m.start(),
                          conf=0.8)
+        if source == "code" and me and DB_CLIENT.search(text) and not CI_FILE.search(path):
+            from supagent.knowledge.projects import test_file
+
+            for m in DB_CLIENT.finditer(text) if not test_file(path) else ():
+                if COMMENT.match(_line_of(text, m.start())[1]):
+                    continue
+                args = m.group("args") or ""
+                hm = DB_HOST_ARG.search(args)
+                host = (hm.group("h") or hm.group("kv") or hm.group("at")) if hm else None
+                if not host and m.group("cli") == "cqlsh":   # cqlsh's host is its first argument
+                    pm = re.match(r"\s+(?!-)([A-Za-z0-9][\w.-]*)", args)
+                    host = pm.group(1) if pm else None
+                if not host or host.lower() in ("localhost", "127.0.0.1", "0.0.0.0") or re.fullmatch(r"[\d.]+", host):
+                    continue
+                what = "cache" if m.group("cli") == "redis-cli" else "database"
+                server = names.hosts.get(norm(host)) or (names.hosts.get(norm(host.split(".")[0])) if "." in host else None)
+                dm = DB_NAME_ARG.search(args)
+                dbname = (dm.group("d") or dm.group("kv")) if dm else None
+                if server:                                   # a server: the database the client names on it, if any
+                    if dbname and not GENERIC_DB_NAME.match(dbname) and what == "database":
+                        db_part = names.part(dbname) or own.get(norm(dbname)) or dbname
+                        fact(me, "uses", db_part, "database", m.start(), conf=0.75)
+                        fact(db_part, "runs_on", server, "host", m.start(), conf=0.7)
+                    continue
+                part = _host_part(host, names)
+                if part and norm(part) != norm(me):
+                    fact(me, "uses", names.part(part) or own.get(norm(part)) or part, what, m.start(), conf=0.75)
         for m in HOSTPORT.finditer(text):
             line = _line_of(text, m.start())[1]
             if URL.search(line) or me == "" or not (ENDPOINT_KEY.search(line) or LOG_WORDS.search(line)) or \
-                    COMMENT.match(line) or m.group(1).isupper():
+                    COMMENT.match(line) or m.group(1).isupper() or RESOLVER_LINE.match(line):
                 continue
             host, port = m.group(1), int(m.group(2))
             if host.lower() in ("localhost", "0.0.0.0"):
@@ -2216,8 +2392,10 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                             continue
                         for value in _cell_values(cell)[:12]:
                             value = re.sub(r"\s*\(.*?\)", "", value).strip()
-                            if names.hosts.get(norm(value)) or (HOST_SHAPE.fullmatch(value) and not
-                                                                 (names.part(value) or own.get(norm(value)))):
+                            if norm(value) in names.groups:      # (0.10.9.1) a group of servers: the VIP sends to it
+                                fact(vip.lower(), "routes_to", names.hosts[norm(value)], "group", r0, conf=0.75)
+                            elif names.hosts.get(norm(value)) or (HOST_SHAPE.fullmatch(value) and not
+                                                                   (names.part(value) or own.get(norm(value)))):
                                 fact(names.hosts.get(norm(value)) or value, "in_group", vip.lower(), "vip", r0, conf=0.75)
                             elif names.part(value) or own.get(norm(value)):
                                 fact(vip.lower(), "routes_to", names.part(value) or own.get(norm(value)), "part", r0,
@@ -2278,8 +2456,10 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                 store_table = bool(header) and bool(STORE_HEAD.fullmatch(header[0].strip(" *`")))
                 row_kind = TABLE_KIND.get(re.sub(r"(?i)\s+names?$", "", header[0].strip(" *`").lower()).rstrip("s")) \
                     if header else None
-                if row_kind and new_part:                 # (0.10.10) "Task | When | ...", "Datastore | Engine": what
-                    fact(part, "is_a", row_kind, "kind", r0, conf=0.75)   # its new rows are
+                if row_kind and (new_part or not head_kind and row_kind in STORE_KINDS):   # (0.10.10) "Task | When",
+                    fact(part, "is_a", row_kind, "kind", r0, conf=0.75 if new_part else 0.7)   # "Datastore | Engine":
+                    #   what its rows are; (0.10.9.1) a store's known rows too (never a job's: a scrape job is named
+                    #   after what it scrapes)
                 for h, cell in zip(header[1:], cells[1:]) if store_table else []:
                     if USED_BY_HEAD.match(h.strip(" *`")):        # (0.10.10) "Datastore | Engine | Host | Service":
                         for value in _cell_values(cell)[:6]:   # the service uses its store
@@ -2294,7 +2474,7 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                         if (known or ID_TOKEN.fullmatch(value)) and not names.hosts.get(norm(value)) and \
                                 norm(known or value) != norm(part):
                             fact(known or value, verb, part, "part", r0, conf=0.7)
-                for role, cell in zip(roles[1:], cells[1:]):
+                for h, role, cell in zip(header[1:], roles[1:], cells[1:]):
                     for value in _cell_values(cell)[:6]:
                         if not role or not re.search(r"\w", value):
                             continue
@@ -2326,7 +2506,9 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                                     not names.hosts.get(norm(value))):
                                 continue                  # (0.10.9) a new part's calls: to parts known, nothing invented;
                                 #   (0.10.10) a job's input and output named as names: what it reads and writes
-                            fact(part, role, names.part(value) or own.get(norm(value)) or value, "part", r0, conf=0.7)
+                            fact(part, role, names.part(value) or own.get(norm(value)) or value,
+                                 "database" if role == "uses" and STORE_COLUMN.match(h.strip(" *`")) else "part", r0,
+                                 conf=0.7)               # (0.10.9.1) a "Datastores" column: its databases
                         elif role == "monitors":                  # (0.10.4) "Scrapes: ceph-mgr (port 9283)": a known part
                             target = names.part(re.sub(r"\s*\(.*?\)", "", value).strip()) or \
                                 own.get(norm(re.sub(r"\s*\(.*?\)", "", value)))
@@ -2595,7 +2777,9 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                     for at, w, p in outside:
                         if norm(w) == norm(vip) or norm(p) == norm(vip):
                             continue
-                        if names.hosts.get(norm(w)):
+                        if names.hosts.get(norm(w)) and norm(w) in names.groups:   # (0.10.9.1) a group of servers
+                            fact(vip.lower(), "routes_to", names.hosts[norm(w)], "group", start + at, conf=0.65)
+                        elif names.hosts.get(norm(w)):
                             fact(names.hosts[norm(w)], "in_group", vip.lower(), "vip", start + at, conf=0.65)
                         else:
                             fact(vip.lower(), "routes_to", p, "part", start + at, conf=0.65)
@@ -2815,9 +2999,12 @@ def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
     if settings.get("knowledge.understand_catalog"):
         docs.append(_Catalog())                       # the catalog's entries (doc_id NULL, ukey entry:<id>)
     per_doc: dict[int, list[dict[str, Any]]] = {}
+    placement: dict[int, dict[str, Any]] = {}          # (0.10.9.1) per repository: its hosts' groups, its plays' groups
     kinds_of: dict[int, dict[str, Any]] = {}
     own: dict[str, str] = {}                        # the documents' own parts (owners, workloads, tools, aliases)
     late_aliases: list[tuple[str, str]] = []
+    group_bases: dict[str, set[str]] = defaultdict(set)  # (0.10.9.1) a group's bare name -> its groups per environment
+    addressed: list[tuple[str, str]] = []                # (0.10.9.1) a name the pages write with its address
     doc_owner: dict[int, str | None] = {}
     stored = {(r.doc_id, r.ukey): (r.chash, (r.outline or {}).get("found"))
               for r in db.session.query(KUnit.doc_id, KUnit.ukey, KUnit.chash, KUnit.outline)}
@@ -2842,6 +3029,15 @@ def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
                 kinds_of[d.id] = declared["kinds"]
             speaks = declared.get("owners") or {}
             built = declared.get("built") or {}
+            groups_of: dict[str, set] = defaultdict(set)   # (0.10.9.1) where each host is, what runs on which group
+            runs_on: dict[str, set] = defaultdict(set)
+            for fs in across.values():
+                for f in fs:
+                    if f.get("verb") == "in_group":
+                        groups_of[norm(f["subject"])].add(f["obj"])
+                    elif f.get("verb") == "runs_on" and f.get("obj_kind") == "group":
+                        runs_on[f["subject"]].add(f["obj"])
+            placement[d.id] = {"groups_of": dict(groups_of), "runs_on": dict(runs_on)}
             for u in us:
                 u["across"] = across.get(u["path"] or "", []) if u["path"] else []
                 if u["path"] and u["path"] in speaks:
@@ -2856,8 +3052,13 @@ def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
             for h in declared.get("hosts", []):
                 names.hosts.setdefault(norm(h), h)
                 names.homes.setdefault(norm(h), set()).add(d.id)        # (0.10.4) a host's repository too
+            for g in declared.get("groups", []):           # (0.10.9.1) an inventory's group kept per environment
+                bare = re.sub(r"\s*\([^)]*\)$", "", g)    # ("web (orders PRD)"): a page's "runs on web" is it
+                if bare != g:                              # when only one environment has a group so named
+                    group_bases[norm(bare)].add(g)
         for u in us:                                      # (0.10.10) the names a page introduces by what they are
             if u.get("kind") == "page":                   # ("the blob container x", "x: an API of a partner")
+                addressed.extend((nm, h) for nm, h, _p in addressed_names(u["text"] or ""))   # (0.10.9.1)
                 for nm in introduced_names(u["text"] or ""):
                     if not names.hosts.get(norm(nm)):
                         own.setdefault(norm(nm), names.part(nm) or nm)
@@ -2895,9 +3096,33 @@ def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
     for n, shown in own.items():
         if not names.part(n):
             names.add_part(shown)
+    for bare, groups in group_bases.items():             # (0.10.9.1) "runs on prod_web": the one "prod_web (prod)"
+        if len(groups) == 1 and bare not in names.hosts and not names.part(bare) and bare not in own and \
+                re.search(r"[-_\d]", bare):              # an identifier (prod_web), never a word (billing, web)
+            names.hosts[bare] = next(iter(groups))
+            names.groups.add(bare)
+    by_site: dict[str, set[str]] = defaultdict(set)      # (0.10.9.1) the system's own sites: one the documents name
+    for d in docs:                                       # several hosts of, the inventories' servers' and the
+        for u in per_doc[d.id]:                          # documents' own (a wiki's, a Bitbucket's)
+            for m in URL.finditer(u["text"] or ""):
+                h = _url_parts(m.group(1))[1].lower()
+                if _any_site(h):
+                    by_site[_any_site(h)].add(h)
+    for _nm, h in addressed:
+        if _any_site(h):
+            by_site[_any_site(h)].add(h)
+    names.own_sites = {s for s, hs in by_site.items() if len(hs) >= OWN_SITE_HOSTS} | \
+        {_any_site(h) for h in names.hosts.values() if _any_site(h)} | \
+        {_any_site(_url_parts(str(getattr(d, "url", "") or ""))[1]) for d in docs
+         if _any_site(_url_parts(str(getattr(d, "url", "") or ""))[1])}
+    for nm, h in addressed:                              # (0.10.9.1) "rates-api (api.vendor-x.example)": an
+        shown = names.service(nm) or own.get(norm(nm)) or (nm if re.search(r"[-_]", nm) else None)   # address
+        if shown and not names.part(h) and not names.hosts.get(norm(h)) and norm(shown) != norm(h) and \
+                not names.hosts.get(norm(shown)):        # of that host in a configuration is that part, not a
+            names.alias.setdefault(norm(h), shown)       # second one named after the host's label
     names_hash = _hash(json.dumps([READER, sorted(names.parts), sorted(names.alias), sorted(names.hosts),
                                    sorted(names.indices),
-                                   sorted(names.metrics), sorted(own.items())]))
+                                   sorted(names.metrics), sorted(own.items()), sorted(names.own_sites)]))
     meta = db.session.get(Meta, "understand_names")
     everything = meta is None or meta.value != names_hash
     stats: dict[str, Any] = defaultdict(int)
@@ -2948,6 +3173,7 @@ def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
             stats["llm_facts"] += 1
     for d in docs:
         have = {u.ukey: u for u in db.session.query(KUnit).filter(KUnit.doc_id == d.id)}
+        names.placement = placement.get(d.id) or {}      # (0.10.9.1) this repository's hosts and groups
         keep = set()
         for u in per_doc[d.id]:
             keep.add(u["ukey"][:512])

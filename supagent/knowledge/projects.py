@@ -59,11 +59,11 @@ BASE_ROLES = {
     "apt", "updates", "update", "upgrade", "reboot", "cron", "logrotate", "certificates", "certs", "ca", "tls",
     "vault", "copy", "files", "templates", "finish", "cleanup", "network", "networking", "interfaces", "environment",
     "java", "openjdk", "jdk", "jre", "python", "python3", "pip", "git", "nodejs", "node", "npm", "ruby", "rbenv",
-    "rvm", "php", "golang", "go", "dotnet", "docker", "containerd", "podman",
+    "rvm", "php", "golang", "go", "dotnet", "docker", "containerd", "podman", "rust", "rustup", "cargo",
     # an operation on the hosts, not a service: what a play does once
     "download", "downloads", "reset", "remove", "uninstall", "install", "preinstall", "postinstall", "configure",
     "deploy-finish", "post-deploy", "pre-deploy", "migrate", "migration", "backup-config", "gather-facts"}
-LANGUAGES = ("java", "python", "pip", "nodejs", "node", "ruby", "php", "golang", "dotnet")
+LANGUAGES = ("java", "python", "pip", "nodejs", "node", "ruby", "php", "golang", "dotnet", "rust")
 # (0.10.10) the words of a role that sets the hosts up rather than runs a service (os_setup, ssh_hardening, admin-tools,
 # yum-cron, motd, bashrc, autofs, aws-cli, certbot, disable-overcommit): every word one of these, no part
 CONFIG_WORDS = BASE_ROLES | {"os", "admin", "tools", "tool", "utils", "autofs", "nfs", "automount", "autoupdates", "auto",
@@ -91,8 +91,9 @@ SERVICE_REST = re.compile(r"(?:prometheus-)?exporter|server|agent|daemon|proxy|g
 CONFIG_SUFFIX = re.compile(r"[_-](users|user|databases|database|dbs|schemas|privs|privileges|extensions|config|"
                            r"configure|configuration|settings|tuning|maintenance|index[_-]maintenance|setup|install|"
                            r"vars|defaults|common|repo|repository|manifests?|deploy|deployments?|provision|"
-                           r"provisioning|apply|systemd|modules?|plugins?)$", re.I)   # (0.10.4) k8s_manifests: what
-#                         applies others, no part; (0.10.9.3) x_systemd, x_upload_module, x-plugins: x's units, x's own
+                           r"provisioning|apply|systemd|modules?|plugins?|clients?|shares?|paths?)$", re.I)   # (0.10.4) k8s_manifests: what
+#                         applies others, no part; (0.10.9.3) x_systemd, x_upload_module, x-plugins: x's units, x's own;
+#                         (0.10.9.1) psql-client, hr_share, extra_path: a client tool, a share mounted, a path set
 # (0.10.9.3) a role named after a job it runs on its hosts (x-importer, x_auto_lint, x-cleanup): no service of its own
 JOB_SUFFIX = re.compile(r"[_-](importer|lint|linter|cleanup|cleaner)$", re.I)
 # the services of the system itself: a role starting only these configures the system
@@ -719,6 +720,9 @@ SERVICE_ROLE = "@service:"                        # (0.10.10) a role's instance 
 SERVICE_VAR = re.compile(r"(?i)(?:service|app|application|component|svc|microservice)(?:[_-]?name)?")
 LISTED_KEY = re.compile(r"(?i)(?:services?|apps?|applications?|components?|modules?|micro-?services?|workloads?|"
                         r"deployed[_-]\w+|\w+[_-](?:services|apps|applications|components|modules))")
+# (0.10.9.1) the last word of a process an application runs beside itself (x-workers, x-realtime-workers, x-sneakers)
+WORKER_TAIL = re.compile(r"(?i)[-_](?:workers?|consumers?|pollers?|sneakers|sidekiq|listeners?|subscribers?|"
+                         r"schedulers?)$")
 # (0.10.10) the services a firewall opens (firewall_public_services: [http, https]): ports, no deployed services
 FIREWALL_KEY = re.compile(r"(?i)(?:^|[_-])(?:firewall|firewalld|fw|ufw|iptables|nftables|selinux|ports?)(?:[_-]|$)")
 PROTOCOL_NAMES = {"http", "https", "ssh", "amqp", "amqps", "dns", "ntp", "smtp", "smtps", "imap", "imaps", "pop3",
@@ -784,6 +788,33 @@ def hosts_pattern(pattern: str, scopes: list[dict[str, Any]], defaults: dict[str
         val = (defaults or {}).get(v.group(1))
         return str(val) if isinstance(val, (str, int)) and "{{" not in str(val) else m.group(0)
     return re.sub(r"\{\{(.*?)\}\}", one, pattern or "")
+
+
+JINJA_VAR = re.compile(r"\{\{\s*([A-Za-z_]\w*)\s*(?:\|\s*(?:default|d)\([^)]*\)\s*)?\}\}")
+
+
+def env_places(raw: str, scopes: list[dict[str, Any]], inv: "Inventory | None",
+               known: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """(0.10.9.1) A play whose hosts take a part from a variable left to its default ("app_{{ runtime_env |
+    default('staging') }}") is run for each environment: the inventory's groups of that shape whose varying part is an
+    environment's name (app_production, app_qa) are its places too; a variable the play or the inventory sets keeps
+    its one value."""
+    raw = (raw or "").strip()
+    if not inv or "{{" not in raw or re.search(r"[:,]", JINJA_VAR.sub("", raw)):
+        return []
+    found = list(JINJA_VAR.finditer(raw))
+    if len(found) != 1 or "{{" in raw[:found[0].start()] + raw[found[0].end():]:
+        return []
+    m = found[0]
+    if any(isinstance(sc, dict) and m.group(1) in sc for sc in scopes):
+        return []
+    rx = re.compile("^" + re.escape(raw[:m.start()]) + r"([\w-]+)" + re.escape(raw[m.end():]) + "$")
+    out = []
+    for g in inv.groups:
+        mm = rx.match(g)
+        if mm and ENV_WORDS.match(mm.group(1)) and ("group", g) not in known:
+            out.append(("group", g))
+    return out
 
 
 def _places(pattern: str, inv: Inventory | None, named: frozenset[str] | set[str] = frozenset()) -> list[tuple[str, str]]:
@@ -1000,6 +1031,7 @@ def ansible(units: list[dict[str, Any]], named: frozenset[str] | set[str] = froz
         pattern = hosts_pattern(p["pattern"], [play_vars, vfiles.get("group:all", {})], defaults)
         inv = _inventory_for(p["file"], invs, pattern)
         places = [x for x in _places(pattern, inv, named) if not (x[0] == "group" and x[1] in runtime)]
+        places += env_places(p["pattern"], [play_vars, vfiles.get("group:all", {})], inv, places)   # (0.10.9.1)
         if not places:
             continue
         groups_vars = [vfiles.get(f"group:{g}", {}) for kind, g in places if kind == "group"] + [vfiles.get("group:all", {})]
@@ -1052,6 +1084,7 @@ def ansible(units: list[dict[str, Any]], named: frozenset[str] | set[str] = froz
     # (0.10.4) a role the plays apply to most of the project's groups, starting no service of its own (the container
     # engine, the common settings, the handlers of the other roles' daemons): configuration, not a part of the system
     prefix = _role_prefix(roles)
+    worker_aliases: dict[str, str] = {}                  # (0.10.9.1) an application's own processes
     groups_of: dict[str, set[str]] = defaultdict(set)
     role_of: dict[str, Role] = {}
     for p, _inv, places, parts, kept in plays_seen:
@@ -1072,6 +1105,11 @@ def ansible(units: list[dict[str, Any]], named: frozenset[str] | set[str] = froz
         part_scopes.pop(part, None)
     for p, inv, places, parts, kept in plays_seen:
         parts = [x for x in parts if x not in everywhere]
+        for x in list(parts):                            # (0.10.9.1) a role named after another part of the play and
+            base = next((y for y in parts if y != x and _norm(x).startswith(_norm(y) + "-")), None)   # a process
+            if base and WORKER_TAIL.search(x):           # word (x_sqs_poller beside x): that part's own process,
+                worker_aliases.setdefault(x, base)       # another of its names
+                parts = [y for y in parts if y != x]
         for part in dict.fromkeys(parts):
             names["parts"].append(part)
             for kind, place in kept.get(part, places):
@@ -1093,7 +1131,11 @@ def ansible(units: list[dict[str, Any]], named: frozenset[str] | set[str] = froz
             continue
         text = by_path[path]["text"] or ""
         homes = [ip for ip, inv in invs.items() if g in inv.groups] or [None]
+        app = next((x for x in names["parts"] if _norm(x) == _norm(g)), None)   # a group named as its application
         for name in listed:
+            if app and _norm(name).startswith(_norm(app) + "-") and WORKER_TAIL.search(name):
+                worker_aliases.setdefault(name, app)     # (0.10.9.1) the application's own process (x-workers,
+                continue                                 # x-sneakers): another of its names, no part
             names["parts"].append(name)
             ln = next((i + 1 for i, line in enumerate(text.splitlines()) if re.search(r"(?<![\w.-])" + re.escape(name)
                                                                                      + r"(?![\w.-])", line)), None)
@@ -1231,6 +1273,8 @@ def ansible(units: list[dict[str, Any]], named: frozenset[str] | set[str] = froz
                             base != _norm(role.part):              # a system's mail relay too)
                         starters[base].add(role.part)
     names["aliases"] = {b: next(iter(ps)) for b, ps in starters.items() if len(ps) == 1}
+    for other, app in worker_aliases.items():
+        names["aliases"].setdefault(other, app)
     names = {k: (list(dict.fromkeys(v)) if isinstance(v, list) else v) for k, v in names.items()}
     speaks: dict[str, str] = {}                            # a file's own part: its role's (none for a base role)
     for path in by_path:

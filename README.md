@@ -150,6 +150,17 @@ then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with t
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
 
+## Upgrade from 0.10.9 to 0.10.9.1
+
+No table change: pip install the wheel on every host and restart. What the agent gives the LLM is now settable for the
+small model (32k-64k) and for the big one (128k+) in Settings ("What the agent gives the LLM"), each size empty for
+the profile's own; the map-wide questions and the knowledge search find an environment's group by its plain name and
+read "which team runs X" as an owner question; the learning files applications in a category named site, portal or
+product, and reads more of Ansible repositories; deactivating in the Data dictionary and removing a document's page
+answer at once. Measured: main open set 159/162, observability 28/29 (small model's profile); big model's profile (a
+128k slot): observability 28/29, main slice 36/36; unit tests 1948; upgrade from 0.10.9 checked; learning not below
+0.10.9 on ten development corpora and two fresh real repositories.
+
 ## Upgrade from 0.10.8.1 to 0.10.9
 
 pip install the 0.10.9 wheel on every host and restart (no table change, v18; osagg 0.2.15 or 0.2.16). The AI is given

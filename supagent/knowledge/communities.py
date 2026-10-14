@@ -317,7 +317,8 @@ def pages() -> list[dict[str, Any]]:
 INTENTS = [   # (intent, words of the question)
     ("impact", re.compile(r"\b(down|fails?|failure|outage|breaks?|affected|impact|impacted)\b", re.I)),
     ("owner", re.compile(r"\b(own|owns|owned|ownership|owners?|maintains?|maintained|maintainers?|accountable|"
-                         r"responsible|in\s+charge)\b", re.I)),   # (0.10.10) "who maintains X", "what is T accountable for"
+                         r"responsible|in\s+charge|looks?\s+after|looking\s+after|takes?\s+care\s+of|run\s+by|"
+                         r"operated\s+by)\b", re.I)),   # (0.10.10) "who maintains X", "what is T accountable for"
     ("readers", re.compile(r"\b(read|reads|consume|consumes|consumers?|subscribe|subscribes|listens?|listeners?)\b",
                            re.I)),
     ("writers", re.compile(r"\b(write|writes|publish|publishes|producers?)\b", re.I)),
@@ -325,6 +326,41 @@ INTENTS = [   # (intent, words of the question)
     ("placement", re.compile(r"\b(where|run|runs|hosted|deployed)\b", re.I)),
     ("members", re.compile(r"\b(make up|made of|consists?|belong|in the)\b", re.I)),
 ]
+
+
+# (0.10.9.1) a team is what the question asks for: "which team runs X", "who looks after X"
+TEAM_ASKED = re.compile(r"\b(?:which|what)\s+teams?\b|\bwho\s+(?:runs?|looks?\s+after|maintains?|takes?\s+care\s+of|"
+                        r"is\s+in\s+charge\s+of|supports?|manages?|operates?)\b", re.I)
+
+
+def intent_of(question: str) -> str:
+    """The kind of a map-wide question (INTENTS, the first that matches; else what something holds). (0.10.9.1) A
+    question asking for a team is about owners whatever its verb ("which team looks after X", "who runs X")."""
+    intent = next((name for name, rx in INTENTS if rx.search(question or "")), "members")
+    if intent in ("placement", "members", "callers") and TEAM_ASKED.search(question or ""):
+        return "owner"
+    return intent
+
+
+def _env_pick(ids: list[int], question: str, values: dict[int, Any]) -> list[int]:
+    """(0.10.9.1) Of the groups one name gives in several environments ("pool-a (production)", "pool-a (staging)"):
+    the one of the environment the question names ("pool-a in production"), else all of them."""
+    from supagent.knowledge.brief import QUALIFIED
+    from supagent.knowledge.consolidate import ENV, words
+
+    asked = {w for w in words(question or "") if w in ENV}
+    if not asked:
+        return ids
+    by_base: dict[str, list[int]] = defaultdict(list)
+    for i in ids:
+        m = QUALIFIED.match(str(values.get(i, {}).get("name", "")).lower())
+        by_base[m.group(1) if m else f"#{i}"].append(i)
+    out: list[int] = []
+    for group in by_base.values():
+        keep = [i for i in group if len(group) > 1 and asked & set(
+            words(QUALIFIED.match(str(values[i]["name"]).lower()).group(2)))]
+        out += keep or group
+    return out
 
 
 def _anchors(question: str, g: dict[str, Any]) -> list[int]:
@@ -369,8 +405,10 @@ def overview(question: str) -> dict[str, Any]:
     c = build(g)
     values = g["values"]
     anchors = _anchors(question, g)
-    intent = next((name for name, rx in INTENTS if rx.search(question or "")), "members")
-    anchors = _which(anchors, question, intent, g, c)
+    intent = intent_of(question)
+    anchors = _env_pick(_which(anchors, question, intent, g, c), question, values)
+    if intent in ("placement", "members") and anchors and all(a in c["teams"] for a in anchors):
+        intent = "owner"                                  # (0.10.9.1) "what does the data team run": what it owns
     systems_asked = bool(re.search(r"\b(systems?|services?|applications?|platform)\b", question or "", re.I))
     out: set[int] = set()
     why = ""

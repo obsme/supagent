@@ -1,14 +1,14 @@
-supagent 0.10.9 - the AI agent inside Apache Superset
-=====================================================
+supagent 0.10.9.1 - the AI agent inside Apache Superset
+=======================================================
 
 What is in this folder
-  supagent-0.10.9-py3-none-any.whl    the package for Superset 6.1 (pure Python; nothing else to install)
+  supagent-0.10.9.1-py3-none-any.whl  the package for Superset 6.1 (pure Python; nothing else to install)
   supagent-guide.html / .pdf          the guide (install, LLM middleware, learning, screens)
   catalog.example.yaml                an example catalog, to adapt
   SHA256SUMS                          checksums
 
-Upgrading? From 0.10.8.1: pip install this wheel on every host (osagg 0.2.15 or 0.2.16), restart; nothing to run:
-"From 0.10.8.1 to 0.10.9" below. From 0.10.8: the same with osagg 0.2.15, and "From 0.10.8 to 0.10.8.1" below. From 0.10.7: the same, and "From 0.10.7 to 0.10.8" below. From 0.10.6.2, 0.10.6.1 or 0.10.6: the same, and "From 0.10.6.2 to 0.10.7" below (and "From 0.10.6.1 to
+Upgrading? From 0.10.9: pip install this wheel on every host, restart; nothing to run: "From 0.10.9 to 0.10.9.1"
+below. From 0.10.8.1: the same (osagg 0.2.15 or 0.2.16), and "From 0.10.8.1 to 0.10.9" below. From 0.10.8: the same with osagg 0.2.15, and "From 0.10.8 to 0.10.8.1" below. From 0.10.7: the same, and "From 0.10.7 to 0.10.8" below. From 0.10.6.2, 0.10.6.1 or 0.10.6: the same, and "From 0.10.6.2 to 0.10.7" below (and "From 0.10.6.1 to
 0.10.6.2", "From 0.10.6 to 0.10.6.1" for what they brought, in this wheel too). From 0.10.0: pip install this wheel on every host,
 superset supagent init once (no table changes: v18), restart: "From 0.10.0 to 0.10.6" below (0.10.4 and 0.10.5 were not released: "What 0.10.5 brings" and "What 0.10.4 brings" too). From 0.9.6.9,
 0.9.6.8, ... 0.9.6.1 or 0.9.6: pip install this wheel on every host, superset supagent init once (tables v17 to v18:
@@ -134,6 +134,29 @@ role): three packages must be pinned, or Superset itself does not start (none is
    supagent_store). Then:
      superset supagent init          builds it (the first time it finds the extensions)
      superset supagent store status  extensions, versions, size, warnings
+
+From 0.10.9 to 0.10.9.1
+=======================
+  - No table change (v18). pip install the wheel on every host, restart the web servers, the workers and beat.
+  - What the agent gives the LLM is settable for each context profile, in Settings, section "What the agent gives the
+    LLM: small model (32k-64k) / big model (128k+)", or on the command line:
+        superset supagent settings --set budget.long.search_chars=12000
+    budget.short.<size> for the small model, budget.long.<size> for the big one: compact_at (prompt tokens from which
+    older tool results are cut; 0: only when the context is full), search_chars, piece_chars, context_chars,
+    llm_context_chars, tool_chars, describe_chars, compare_chars, history_chars, rules_near_chars, rule_chars,
+    group_chars, shrunk_first, shrunk_second. Empty: the profile's own size (shown in grey in the page; the big
+    model's grows with the window, from half at 64k to one and a half at 256k). A big-model size you type is used as
+    typed.
+  - When the big model's sizes apply: budget.long_from_tokens (100,000: a model whose server states this many tokens
+    per request or more, with agent.context_profile auto), budget.long_cut_share (0.6), budget.long_assumed_tokens
+    (131,072: the window of a big profile forced with agent.context_profile long on a server that states none).
+  - Which setting wins: a size set for the profile in use, else agent.compact_at or search.prompt_chars when set (as in
+    0.10.9 they apply to both profiles), else the profile's own size. Stopgaps set before 0.10.9 can go:
+        superset supagent settings --unset agent.compact_at --unset search.prompt_chars --unset memory.prompt_chars
+  - To keep exactly the small model's sizes on any model: agent.context_profile = short.
+  - Measured: main open set 159/162, observability 28/29 (small model's profile); big model's profile (a 128k slot):
+    observability 28/29, main slice 36/36; unit tests 1948; upgrade from 0.10.9 checked; learning not below 0.10.9 on
+    ten development corpora and two fresh real repositories.
 
 From 0.10.8.1 to 0.10.9
 =======================

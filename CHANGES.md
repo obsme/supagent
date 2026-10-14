@@ -1,5 +1,97 @@
 # Changes
 
+## 0.10.9.1 — 2026-10-14
+
+The team's requests of 14 October: what the agent gives the LLM settable in Settings, for the small model and for the
+big one; the System map followed better by the map-wide questions and the knowledge search; the learning again, on
+real repositories it never saw. No table change (v18); 31 new settings, all empty (each size is the profile's own,
+0.10.9's).
+
+Measured before the release under a rule written before any result, on the frozen build e4e6339 (0.10.9.1 is that
+build with the fix of the saves alone, checked by the unit tests, the upgrade and a first conversation) with
+Qwen3.6-35B-A3B (llama.cpp, its server restarted first), one round of each open set on the small model's profile (the
+lab's model reads 64k tokens per request): the main open set 159 of 162 right (the rule: 158), 3 wrong without a mark;
+the observability open set 28 of 29 right (the rule: 26), 1 wrong without a mark. The big model's profile, on the same
+model given one 128k slot (auto chose the big profile): the observability open set 28 of 29 (the rule: 26; 0.10.9 got
+28 there the same way), the first five chats and ten single questions of the main open set 36 of 36 (the rule: at most
+2 not right, none wrong without a mark). The unit tests: 1948 passed. The upgrade from 0.10.9 on a copy of a lab:
+tables unchanged (v18), every setting kept, the System map's 289 values and 2,224 links kept, health 200, the
+knowledge search answering. The learning: on ten development corpora no figure lower than 0.10.9's; on two corpora
+built from real Ansible repositories after the release of 0.10.9 and frozen before the build was (a government
+open-data program's 2020 deployment, a Linux distribution's infrastructure, each with a wiki in English and French),
+one reading each, no LLM: 86.2 % and 75.6 % of the proposed values in the right category (0.10.9: 85.3 % and 75.2 %),
+0.992 and 0.997 of the links right; the map-wide questions on their maps 1 and 2 of 28, as 0.10.9 (see the known
+gaps). Not measured: gpt-oss-120b.
+
+What the AI is given
+* **What the agent gives the LLM, settable for each context profile**: every size of the small model's profile (a
+  model of 32k-64k tokens per request) and of the big model's (128k or more) is a setting of its own, budget.short.* and
+  budget.long.*: the prompt tokens from which an answer's older tool results are cut, the knowledge given with a
+  question and each of its pieces, each Context section, the LLM context, a tool's result, a description of the data,
+  a comparison of groups, of logs, each earlier message, the team's rules, an older result after each cut. Empty: the
+  profile's own size (the big model's grows with its window). Three more say when the big model's sizes apply
+  (budget.long_from_tokens, 100,000), the share of its window from which older results are cut
+  (budget.long_cut_share, 0.6) and the window assumed for a big profile forced on a server that states none
+  (budget.long_assumed_tokens, 131,072). A size you type for the big model is used as typed. agent.compact_at and
+  search.prompt_chars still apply to both profiles when set; a profile's own setting wins over them.
+* **Settings, "What the agent gives the LLM: small model (32k-64k) / big model (128k+)"**: both profiles side by side,
+  the profile in use and the model's window, each profile's own size in grey, an estimate of the tokens an answer
+  starts with, and a warning when the sizes may not fit the window. `superset supagent test-llm --profile` prints the
+  same.
+
+The System map and the knowledge search
+* **A group of one environment, asked by its plain name**: a map value named "pool-a (production)" or "web (ops prod)"
+  (an inventory group of one environment) is found when a question names pool-a or web: every environment's group of
+  that name, or the one of the environment the question names ("what runs on pool-a in production?"). A name of the
+  map's own is never taken. The map-wide questions and the agent's knowledge search both find them.
+* **A team asked for is an owner question** whatever its verb: "which team looks after X", "who runs X", "what does the
+  data team run" are answered from who owns what.
+
+The learning
+* **Known software filed where the team keeps it**: application servers, job runners, file and mail daemons,
+  antivirus (passenger, sidekiq, samba, clamav...) go to the team's category for the hosts' software; a key-value store
+  to its stores; coordination and load balancing services to its shared services; a version number or "cloud" after a
+  database's name is the database; roles that only install a client, mount a share or set a path propose nothing.
+* **The team's category for what its users use** may be named or described a website, a web application, a portal or
+  a product; the category for shared services may say internal or backend services ("product line" stays a line of
+  business).
+* **Ansible**: a play for each environment ("app_{{ env | default('staging') }}") runs on every environment's group,
+  not only the default's; an upstream of a load balancer whose servers are inventory hosts is the application the
+  playbooks deploy on their groups; an application's own worker units and roles (app-workers, app_sqs_poller) are its
+  names, not parts of their own.
+* **French pages and configuration**: possessives ("de son X"), DNS resolver lines and git repository URLs read.
+
+Saves that answer at once (the team's report of 14 October)
+* **Deactivating or activating a field, a label, a metric or an index** in the Data dictionary answers at once: the
+  LLM context is written again in the background (it reads the whole dictionary: the request waited for it, seconds
+  on a big dictionary); the drawer and the rows of the list change in place, an index's fields or a metric's labels
+  with it. A query naming what was deactivated is still sent back at once.
+* **Removing a page of a document** answers at once and keeps the list where it was: only that document's search
+  pieces are written again (before: every document's, in the web server's background, slowing every page); a
+  document saved or deleted writes its own pieces only too.
+
+The agent
+* **A real zero is no "no data"**: an answer that calls a query's 0 "no data" (and asks back) is sent back once.
+* **The chat's period kept on a table whose date is text**: a follow-up whose query reads such a table with no bound
+  on time is sent back to keep the period the chat's earlier queries bounded it by.
+* **A size converted by hand**: an answer that turns one number of bytes into a binary size that is neither
+  conversion is sent back with the right value.
+
+Known gaps
+* **Applications and services of a repository the learning never saw** are still found far less often than its hosts
+  and groups: on two real Ansible repositories read after the build was frozen (a government open-data program's, a
+  Linux distribution's infrastructure), the hosts and groups were nearly all right, but only a few of the products,
+  internal services, databases and outside providers were proposed, and almost none of the links between them; the
+  map-wide questions ("what breaks if the database is down", "which team runs X") on those maps were answered for 1-2
+  of 28. What an application's configuration says of its stores (a postgresql://, redis:// or amqp:// URL whose host is
+  a variable) is not yet a link. This is the next release's first work.
+* **The big model's profile** was measured on the lab's 64k-per-request model forced to a 128k window (obs7dev 28/29 for
+  0.10.9; see "Measured") and not on gpt-oss-120b; agent.context_profile = short keeps the small model's sizes.
+* **An answer the model writes without calling its tool** (the query written in the answer) is sent back once; on the
+  lab's model that second request can wait about two minutes before the query it wrote is run (0.10.9 and 0.10.9.1
+  alike, a few times a day on the lab's suites; the answer is right). The next release's first agent work.
+* The rest of 0.10.9's known gaps stand (see 0.10.9).
+
 ## 0.10.9 — 2026-10-14
 
 The team's requests of 12 and 13 October: the AI given as much as the model can read (a 32k-64k model and a 128k-256k

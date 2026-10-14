@@ -146,7 +146,7 @@ def test_memory_signals_approval_and_prompt(clean_knowledge):
 
 def test_memories_given_with_every_question_have_a_budget(clean_knowledge):
     """Statements are learned at once for their author. (0.10.9.1) Every memory is given, whole: rules and preferences
-    before facts; what they take beyond memory.prompt_chars, the knowledge found gives way (none is left out)."""
+    before facts, none left out, on top of the knowledge found (memory.prompt_chars is no longer used)."""
     from superset.extensions import security_manager as sm
 
     from supagent.knowledge.memory import add, prompt_block

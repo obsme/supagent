@@ -80,7 +80,8 @@ def _apply(kind: str, **kw: Any) -> dict:
         return {"applying": True}
     jobs = {"catalog": kw.get("before") if kind == "catalog" else None,
             "prefixes": {kw["prefix"]} if kind == "chunks" else set(),
-            "objects": set(kw.get("ids") or []) if kind == "objects" else set()}
+            "objects": set(kw.get("ids") or []) if kind == "objects" else set(),
+            "llm_context": kind == "llm_context"}
     return apply.run(jobs).get("catalog") or {}
 
 
@@ -249,6 +250,17 @@ BRIEF_VALUES = 5000          # values in a "part of" list at most (names only)
 def _body() -> dict:
     data = request.get_json(silent=True)
     return data if isinstance(data, dict) else {}
+
+
+def _budget_report() -> dict | None:
+    """(0.10.9.1) What the agent gives the LLM in each context profile, for the Settings page (supagent.budget)."""
+    try:
+        from supagent.budget import report
+
+        return report()
+    except Exception:  # pylint: disable=broad-except
+        log.exception("supagent: context sizes not described")
+        return None
 
 
 class ChatView(BaseView):
@@ -1193,15 +1205,13 @@ class KnowledgeView(_RecipesMixin, BaseView):
         except Exception:  # pylint: disable=broad-except
             db.session.rollback()
             log.warning("supagent: search pieces of %s: not written", o.name, exc_info=True)
-        if "active" in body:                     # (0.10.9.1) the LLM context written again without (or with) it
-            try:
-                from supagent.knowledge.llm_context import build as build_llm_context
-
-                build_llm_context()
+        if "active" in body:                     # (0.10.9.1) the LLM context written again without (or with) it:
+            try:                                 # (0.10.9.2) in the background, the save answering at once (it
+                _apply("llm_context")            # reads the whole dictionary: seconds on a big one)
             except Exception:  # pylint: disable=broad-except
                 db.session.rollback()
                 log.warning("supagent: the LLM context: not written again", exc_info=True)
-        return _json(_obj_row(o, self._sources()))
+        return _json({**_obj_row(o, self._sources()), "changed": changed_ids})
 
     @expose("/api/changes", methods=("GET",))
     @has_access_api
@@ -2016,7 +2026,7 @@ class AdminView(BaseView):
 
             dispatch_doc(d.id)
         else:
-            _sync_chunks("doc:")
+            _sync_chunks(f"doc:{d.id}#")                  # (0.10.9.2) this document's pieces only
         return _json({"doc": self._doc_json(d)})
 
     @expose("/api/docs/<int:doc_id>", methods=("POST",))
@@ -2061,7 +2071,7 @@ class AdminView(BaseView):
 
             dispatch_doc(d.id)                             # read again with what changed
         else:
-            _sync_chunks("doc:")
+            _sync_chunks(f"doc:{d.id}#")                  # (0.10.9.2) this document's pieces only
         return _json({"doc": self._doc_json(d, self._doc_pieces())})
 
     @expose("/api/docs/<int:doc_id>/pages", methods=("GET",))
@@ -2110,7 +2120,7 @@ class AdminView(BaseView):
             db.session.rollback()
             return _json({"error": str(ex)}, 400)
         db.session.commit()
-        _sync_chunks("doc:")
+        _sync_chunks(f"doc:{d.id}#")                     # (0.10.9.2) this document's pieces only, never every one
         return _json(out)
 
     @expose("/api/docs/<int:doc_id>/pages/restore", methods=("POST",))
@@ -2161,7 +2171,7 @@ class AdminView(BaseView):
         db.session.query(Meta).filter(Meta.key == READ_LOG_KEY.format(doc_id)).delete(synchronize_session=False)
         db.session.delete(d)
         db.session.commit()
-        _sync_chunks("doc:")
+        _sync_chunks(f"doc:{doc_id}#")                   # (0.10.9.2) this document's pieces only
         return _json({"deleted": doc_id})
     template_folder = os.path.join(HERE, "templates")
 
@@ -2203,7 +2213,8 @@ class AdminView(BaseView):
     def get_settings(self) -> Response:
         from supagent import settings
 
-        return _json({"settings": settings.describe()})
+        with settings.memo():                          # (0.10.9.1) the stored settings read once
+            return _json({"settings": settings.describe(), "budget": _budget_report()})
 
     @expose("/api/settings", methods=("POST",))
     @has_access_api
@@ -2225,8 +2236,9 @@ class AdminView(BaseView):
                 saved.append(key)
             except (ValueError, TypeError) as ex:
                 errors[key] = str(ex)
-        return _json({"saved": saved, "errors": errors, "settings": settings.describe()},
-                     400 if errors and not saved else 200)
+        with settings.memo():
+            return _json({"saved": saved, "errors": errors, "settings": settings.describe(),
+                          "budget": _budget_report()}, 400 if errors and not saved else 200)
 
     @expose("/api/test-llm", methods=("POST",))
     @has_access_api

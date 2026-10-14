@@ -89,6 +89,8 @@ def _graph() -> dict[str, Any]:
         synonyms[f.id] = [str(x) for x in (f.synonyms or [])]
     for alias, ids in _host_aliases(values, synonyms).items():   # (0.10.8) a server by its short name too
         names.setdefault(alias, ids)
+    for alias, ids in _qualified_aliases(values, synonyms).items():   # (0.10.9.1) "pool-a (production)" asked as
+        names.setdefault(alias, ids)                                  # pool-a
     for v in values.values():
         v["parents"] = [p for p in v["parents"] if p in values and p != v["id"]]
         for p in v["parents"]:
@@ -164,6 +166,29 @@ def named(text: str, g: dict[str, Any] | None = None, loose: bool = False) -> li
             break
         i += hit or 1
     return found
+
+
+QUALIFIED = re.compile(r"^(.+?)\s+\(([^()]+)\)$")       # "pool-a (production)", "web (ops prod)", "billing (group)"
+
+
+def _qualified_aliases(values: dict[int, dict[str, Any]], synonyms: dict[int, list[str]]) -> dict[str, list[int]]:
+    """(0.10.9.1) A value named with an environment or "group" between brackets ("pool-a (production)", "web (ops
+    prod)": an inventory group of one environment) is asked without it ("what runs on pool-a?"): the name without
+    the brackets names every value written so (the group of each environment). A name of the map's own is never
+    taken, nor a word of every question."""
+    from supagent.knowledge.consolidate import ENV, GENERIC, words
+    from supagent.knowledge.describe import STOP
+
+    out: dict[str, list[int]] = {}
+    for v in values.values():
+        for n in [v["name"]] + synonyms.get(v["id"], []):
+            m = QUALIFIED.match(" ".join(str(n).lower().split()))
+            if not m or len(m.group(1)) < 3 or m.group(1) in STOP or m.group(1) in GENERIC:
+                continue
+            said = set(words(m.group(2)))
+            if (said & ENV or said <= {"group", "groupe", "groups"}) and v["id"] not in out.setdefault(m.group(1), []):
+                out[m.group(1)].append(v["id"])
+    return {a: ids for a, ids in out.items() if ids}
 
 
 def _host_aliases(values: dict[int, dict[str, Any]], synonyms: dict[int, list[str]]) -> dict[str, list[int]]:

@@ -1140,6 +1140,7 @@
     var cell = el("td", { colspan: "8" }, [el("div", { class: "muted", text: "Reading the list of pages…" })]);
     var box = el("tr", { class: "doc-pages" }, [cell]);
     row.after(box); btn.textContent = "Hide pages";
+    var shown = null;                               /* (0.10.9.2) the list as last shown */
     var read = function () { return S.admin("GET", "docs/" + x.id + "/pages").then(render); };
     /* (0.10.9.1) a page removed by an admin: not read again, its text, its search pieces and what was learned from
        it deleted at once; given back from the list of the removed pages */
@@ -1156,7 +1157,16 @@
           yes.disabled = no.disabled = true;
           S.admin("POST", "docs/" + x.id + "/pages/remove", { page_id: p.page_id || "", path: p.path || "", url: p.url || "" }).then(function (r) {
             if (!r || r.error) { res.textContent = (r && r.error) || "not removed"; res.className = "result bad"; yes.disabled = no.disabled = false; return; }
-            read();
+            /* (0.10.9.2) the list changed in place (never read again from the server, the place kept) */
+            if (shown) {
+              shown.pages = (shown.pages || []).filter(function (q) { return q !== p; });
+              (shown.excluded = shown.excluded || []).push({ key: r.removed, title: r.title || p.title || "", url: p.url || "",
+                                                             by: "you", at: new Date().toISOString() });
+              var wrap = cell.querySelector(".table-wrap"), top = wrap ? wrap.scrollTop : 0;
+              render(shown);
+              wrap = cell.querySelector(".table-wrap");
+              if (wrap) wrap.scrollTop = top;
+            } else { read(); }
           });
         });
       });
@@ -1165,6 +1175,7 @@
     function render(d) {
       cell.innerHTML = "";
       if (d.error) { cell.appendChild(el("div", { class: "result bad", text: d.error })); return; }
+      shown = d;
       var last = d.last_reading || {}, pages = d.pages || [], gone = d.excluded || [], can = !!d.can_remove;
       var said = S.num(pages.length) + " page" + (pages.length === 1 ? "" : "s") + " read";
       if (last.not_read) said += " · " + S.num(last.not_read) + " not read (listed below)";

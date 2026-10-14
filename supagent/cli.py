@@ -331,6 +331,12 @@ def test_llm(profile: bool) -> None:
         click.echo("adapted to the LLM:")
         for line in said:
             click.echo(f"  - {line}")
+    if profile:                                       # (0.10.9.1) both context profiles' sizes (Settings: budget.*)
+        from supagent.budget import table
+
+        click.echo("what the agent gives the LLM:")
+        for line in table():
+            click.echo(f"  - {line}")
 
 
 @supagent.command(help="Learn now: metrics (promagg) and indices (osagg), relations, catalog, LLM descriptions")

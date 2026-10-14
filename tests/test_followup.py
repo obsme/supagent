@@ -705,3 +705,22 @@ def test_a_follow_up_that_reads_wider_on_purpose_is_left_alone(monkeypatch):
               "Give me a two-line summary for the ticket."):
         assert a._period_widened(q, wide) is None, q
     assert a._period_widened("Which hosts did those requests run on?", wide) == "2030-01-10 00:00"
+
+
+def test_a_follow_up_keeps_the_chats_period_on_a_table_with_a_date_kept_as_text(world):  # noqa: F811
+    """(0.10.9.1) "Which country brought the most revenue?" after "...in September?" on a table whose date is text
+    (no time field learned): the chat bounded it by ORDER_DATE; a follow-up with no such bound lost the period."""
+    from supagent.agent import Agent
+
+    a = Agent.__new__(Agent)
+    a.chat_period = "How many different customers bought something in September?"
+    a.prev_queries = ['SELECT COUNT(*) FROM "shop-orders" WHERE "STATUS" = \'PAID\' AND "ORDER_DATE" >= \'2026-09-01\' '
+                      'AND "ORDER_DATE" < \'2026-10-01\'']
+    every = [{"tool": "execute_sql", "status": "done", "args": {"request": {
+        "sql": 'SELECT "COUNTRY", SUM("AMOUNT") FROM "shop-orders" WHERE "STATUS" = \'PAID\' GROUP BY 1'}}}]
+    assert a._period_lost(every) == ["shop-orders"]
+    kept = [{"tool": "execute_sql", "status": "done", "args": {"request": {
+        "sql": 'SELECT "COUNTRY", SUM("AMOUNT") FROM "shop-orders" WHERE "ORDER_DATE" >= \'2026-09-01\' GROUP BY 1'}}}]
+    assert a._period_lost(kept) is None
+    a.prev_queries = []
+    assert a._period_lost(every) is None                    # nothing known of its time: no check

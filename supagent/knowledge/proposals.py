@@ -552,6 +552,9 @@ def propose(dry_run: bool = False) -> dict[str, Any]:
     for k, v in word_kind.items():                        # (a database of a URL stays one, listed as a component;
         if kind_of.get(k) in (None, "part") or (kind_of.get(k) == "host" and v in PLACE_WORD_KINDS):   # a "server
             kind_of[k] = v                                # pool" its list says over a plain "runs on" place)
+    for r in rels:                                        # (0.10.9.1) a part that runs on a place of the system is
+        if r["kind"] == "runs_on" and kind_of.get(_norm(r["from"])) == "external":   # its own, whatever address a
+            kind_of[_norm(r["from"])] = "part"            # page gives it
 
     if not dry_run and not shrunk:                         # (0.10.9.2) what waits from an older reading and one page
         from supagent.knowledge.naming import withdraw    # says once: withdrawn (it comes back if more say it)

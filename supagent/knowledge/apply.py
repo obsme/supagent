@@ -18,14 +18,15 @@ log = logging.getLogger(__name__)
 
 KEY = "knowledge_apply"
 _LOCK = threading.Lock()
-_JOBS: dict[str, Any] = {"catalog": None, "prefixes": set(), "objects": set()}
+_JOBS: dict[str, Any] = {"catalog": None, "prefixes": set(), "objects": set(), "llm_context": False}
 _WORKER: dict[str, Any] = {"thread": None}
 DELAY = 0.3                 # seconds a worker waits for the saves that follow (merged into one run)
 
 
 def later(kind: str, before: dict | None = None, prefix: str | None = None, ids: list[int] | None = None) -> None:
     """Queue the work that follows a save: kind catalog (with the catalog's texts before it), chunks (a kind of
-    refs: memory:, doc:, context:, entry:), objects (dictionary objects whose pieces change)."""
+    refs: memory:, doc:, context:, entry:; or one document's, doc:<id>#), objects (dictionary objects whose pieces
+    change), llm_context (the LLM context written again: (0.10.9.2) never in the request that changed it)."""
     from flask import current_app
 
     with _LOCK:
@@ -36,6 +37,8 @@ def later(kind: str, before: dict | None = None, prefix: str | None = None, ids:
             _JOBS["prefixes"].add(prefix)
         elif kind == "objects" and ids:
             _JOBS["objects"].update(ids)
+        elif kind == "llm_context":
+            _JOBS["llm_context"] = True
         _state(pending=True, queued_at=_now())
         t = _WORKER["thread"]
         if t is None or not t.is_alive():
@@ -47,11 +50,12 @@ def later(kind: str, before: dict | None = None, prefix: str | None = None, ids:
 
 def _take() -> dict[str, Any] | None:
     with _LOCK:
-        if _JOBS["catalog"] is None and not _JOBS["prefixes"] and not _JOBS["objects"]:
+        if _JOBS["catalog"] is None and not _JOBS["prefixes"] and not _JOBS["objects"] and not _JOBS["llm_context"]:
             _WORKER["thread"] = None
             return None
-        jobs = {"catalog": _JOBS["catalog"], "prefixes": set(_JOBS["prefixes"]), "objects": set(_JOBS["objects"])}
-        _JOBS.update(catalog=None, prefixes=set(), objects=set())
+        jobs = {"catalog": _JOBS["catalog"], "prefixes": set(_JOBS["prefixes"]), "objects": set(_JOBS["objects"]),
+                "llm_context": _JOBS["llm_context"]}
+        _JOBS.update(catalog=None, prefixes=set(), objects=set(), llm_context=False)
         return jobs
 
 
@@ -74,7 +78,8 @@ def _work(app: Any) -> None:
                 error = f"{type(ex).__name__}: {str(ex)[:300]}"
                 log.warning("supagent: applying the knowledge: %s", error, exc_info=True)
             with _LOCK:
-                more = bool(_JOBS["catalog"] is not None or _JOBS["prefixes"] or _JOBS["objects"])
+                more = bool(_JOBS["catalog"] is not None or _JOBS["prefixes"] or _JOBS["objects"] or
+                            _JOBS["llm_context"])
             _state(pending=more, done_at=_now(), seconds=round(time.time() - t0, 2), error=error)
             db.session.remove()
 
@@ -98,6 +103,10 @@ def run(jobs: dict[str, Any]) -> dict[str, Any]:
         embed_few(sync((prefix,)))
     if jobs.get("objects"):
         embed_few(sync_objects(sorted(jobs["objects"])))
+    if jobs.get("llm_context"):                          # (0.10.9.2) after the pieces: what it reads is in step
+        from supagent.knowledge.llm_context import build
+
+        build()
     return out
 
 

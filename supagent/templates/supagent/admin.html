@@ -49,6 +49,25 @@
     <div class="fields" data-group="agent usage"></div>
     <div class="actions"><button type="button" class="btn primary" data-save="agent">Save</button></div>
   </section>
+  <section class="card" id="sec-budget">
+    <div class="sec-head"><h2>What the agent gives the LLM: small model (32k-64k) / big model (128k+)</h2><button type="button" class="info" aria-controls="x-budget" aria-label="About what the agent gives the LLM">i</button></div>
+    <div class="explain" id="x-budget">Each question goes to the LLM with the instructions, the tools, the knowledge found
+      for it, the team's rules, the LLM context the learning writes, the earlier messages of the chat and the results
+      of the tools it calls. How much of each depends on the model: a small model (32k to 64k tokens per request) gets
+      the small sizes, a big one (128k, 256k) the big sizes, grown with its window. The profile in use is chosen by
+      agent.context_profile (auto: by the window the LLM's server states; Test the LLM reads it again). Leave a box
+      empty for the profile's own size, shown in grey; a size set here wins over agent.compact_at and
+      search.prompt_chars, which apply to both profiles. Sizes are in characters, the cut of older results in prompt
+      tokens (about four characters a token).</div>
+    <p class="muted" id="budget-now" role="status" aria-live="polite"></p>
+    <div class="budget-cols">
+      <div><h3 id="budget-h-short">Small model (short)</h3><div class="fields one" data-group="budget" data-prefix="budget.short."></div></div>
+      <div><h3 id="budget-h-long">Big model (long)</h3><div class="fields one" data-group="budget" data-prefix="budget.long."></div></div>
+    </div>
+    <h3>When the big model's sizes apply</h3>
+    <div class="fields" data-group="budget" data-prefix="budget.long_"></div>
+    <div class="actions"><button type="button" class="btn primary" data-save="budget">Save</button></div>
+  </section>
   <section class="card" id="sec-tools">
     <h2>Files, e-mails and other agents</h2>
     <div class="fields" data-group="tools mcp chats"></div>

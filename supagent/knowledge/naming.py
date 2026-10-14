@@ -88,20 +88,22 @@ MONITORING = re.compile(
     r"new-?relic|dynatrace|appdynamics|splunk|sumo-?logic|sentry|pagerduty|opsgenie|uptime-?kuma|blackbox|cadvisor|"
     r"kube-state-metrics|pushgateway|graylog|elastalert|cloudwatch|instana|wavefront|signalfx|honeycomb|"
     r"lightstep|solarwinds|netdata|munin|cacti|observium|librenms|smokeping|nxlog|syslog-ng|apm|monitoring|"
-    r"observability|exporter|grafana-agent)($|[\W_])", re.I)
+    r"observability|exporter|grafana-agent|beyla|alloy)($|[\W_])", re.I)   # (0.10.9.1) beyla, alloy: Grafana's agents
 MONITORING_SAID = re.compile(r"\b(monitor(?:ing|s)?|observability|metrics? (?:collector|server|store)|alerting|"
                              r"dashboards? tool|log (?:shipper|collector|aggregator))\b", re.I)
 DATABASE = re.compile(
     r"(^|[\W_])(postgres(?:ql)?|pg|mysql|mariadb|oracle-?db|mssql|sql-?server|db2|mongo(?:db)?|cassandra|"
     r"scylla(?:db)?|couchbase|couchdb|neo4j|clickhouse|timescale(?:db)?|influx(?:db)?|elasticsearch|opensearch|solr|"
     r"sybase|informix|teradata|snowflake|bigquery|redshift|hbase|druid|cockroach(?:db)?|yugabyte(?:db)?|tidb|"
-    r"sqlite|db|database|pgbouncer|patroni|valkey|keydb|dragonfly(?:db)?)($|[\W_])", re.I)
+    r"sqlite|db|database|pgbouncer|patroni|valkey|keydb|dragonfly(?:db)?)(?:\d+(?:\.\d+)?)?(?:-?cloud)?($|[\W_])",
+    re.I)                                          # (0.10.9.1) its version or "cloud" after it: solr9cloud, postgresql18
 INFRASTRUCTURE = re.compile(
     r"(^|[\W_])(dns|bind9|unbound|coredns|powerdns|ntp|chrony|ldap|openldap|active-?directory|kerberos|keycloak|"
     r"freeipa|vault|consul|etcd|zookeeper|nomad|kubernetes|k8s|openshift|rancher|harbor|nexus|artifactory|jenkins|"
     r"gitlab(?:-runner)?|bamboo|teamcity|sonarqube|argo-?cd|ansible|awx|terraform|puppet(?:server)?|saltstack|"
     r"vmware|vsphere|esxi|vcenter|proxmox|openstack|ceph|nfs|glusterfs|minio|s3|nginx|haproxy|envoy|traefik|istio|"
-    r"linkerd|f5|bigip|httpd|squid|load-?balancer|firewall|vpn|bastion|jump-?host|smtp|postfix|exim|sendmail|"
+    r"linkerd|f5|bigip|nginx-?plus|httpd|squid|load-?balancer|firewall|vpn|bastion|jump-?host|smtp|postfix|exim|"
+    r"sendmail|"
     r"mail-?relay|kafka|rabbitmq|activemq|artemis|ibm-?mq|mqseries|nats|pulsar|redis|memcached|veeam|bacula|"
     r"commvault|netbackup|control-?m|autosys|rundeck|dhcp|cobbler|netbox|tomcat\d*|apache2?|jboss|wildfly|weblogic|websphere|"
     r"jetty|ingress(?:-nginx)?|cert-?manager|external-dns|docker-registry|gitea|cache|queue|broker|proxy)($|[\W_])",
@@ -110,6 +112,18 @@ INFRASTRUCTURE = re.compile(
 RUNTIME = re.compile(r"^(miniconda\d*|anaconda\d*|conda|mamba|micromamba|pyenv|openjdk(?:-?\d+)?|jdk(?:-?\d+)?|"
                      r"jre(?:-?\d+)?|nodejs(?:-?\d+)?|php-?fpm|rbenv|rvm)$", re.I)
 BROKER_NAME = re.compile(r"(^|[\W_])(kafka|rabbitmq|activemq|artemis|ibm-?mq|mqseries|nats|pulsar|broker)($|[\W_])", re.I)
+# (0.10.9.1) the software a host runs for the applications, named by itself (a role "passenger", "sidekiq_worker",
+# "samba"): web and application servers, the runners of workers, file, mail and time daemons, an antivirus: the
+# deployment's category for its hosts' software before a platform's ("passenger-info" is no such name)
+HOSTED = re.compile(
+    r"^(nginx(?!-?plus)|httpd|apache2?|apache-httpd|tomcat|jetty|jboss|wildfly|weblogic|websphere|squid|bind9?|"
+    r"unbound|chronyd?|ntpd?|postfix|exim4?|sendmail|dhcpd?|passenger|puma|unicorn|gunicorn|uwsgi|sidekiq|sneakers|"
+    r"resque|samba|smbd|clamav|clamd|mailcatcher|subversion|svn|supervisord?|pm2)(?:\d+(?:\.\d+)*)?"
+    r"(?:[-_](?:worker|workers|server|daemon|service|client))?$", re.I)
+# (0.10.9.1) a key-value store by its name (an application's own one too: "x_redis", "x-valkey"): the deployment's
+# category for caches, else for its datastores (a key-value store is a datastore, no host's software)
+CACHE_NAME = re.compile(r"(^|[\W_])(redis|valkey|memcached?|keydb)\d*(?:[-_](?:server|cluster|cache|\d+|prod|"
+                        r"production|staging|stage|qa|dev|test))*$", re.I)
 INFRASTRUCTURE_SAID = re.compile(r"\b(infrastructure|middleware|message broker|load balancer|reverse proxy|"
                                  r"directory service|application server|ci server|backup (?:server|tool))\b", re.I)
 # the deployment's own categories for them (a name of its own; none: a component)
@@ -117,8 +131,10 @@ OWN = {"library": re.compile(r"^(librar(?:y|ies)|frameworks?|dependenc(?:y|ies))
        "monitoring": re.compile(r"^(monitoring|observability|supervision)(?: (?:tools?|systems?|stack|platform|"
                                 r"solutions?))?$|^(?:monitoring |observability )?tools?$", re.I),
        "infrastructure": re.compile(r"^(infra|infrastructure|platform|middleware)(?: (?:services?|components?|"
-                                    r"tools?))?$|^(?:technical|shared|core) services?$", re.I),
+                                    r"tools?))?$|^(?:technical|shared|core|internal|backend|back-end) services?$",
+                                    re.I),   # (0.10.9.1) internal, backend services
        "database": re.compile(r"^(databases?|data ?stores?|datastores?)$", re.I),
+       "cache": re.compile(r"^(caches?|key[- ]?value stores?|in-memory stores?)$", re.I),   # (0.10.9.1)
        # (0.10.10) the software installed on the hosts (web servers, agents, runtimes): "host software", "tools"
        "software": re.compile(r"^(?:(?:host|server|installed|system|base|shared|infrastructure) )?(?:software|"
                               r"packages?|utilities)$", re.I),
@@ -325,6 +341,8 @@ def kind_of(name: Any, description: str | None = None) -> str | None:
     if MONITORING.search(n) or (said and (MONITORING_SAID.search(said) or MONITORING.search(head))
                                 and not DATABASE.search(n)):
         return "monitoring"
+    if HOSTED.match(n):
+        return "hosted"                                  # (0.10.9.1) a host's software (nginx, passenger, samba)
     if DATABASE.search(n):
         return "database"
     if INFRASTRUCTURE.search(n) or (said and INFRASTRUCTURE_SAID.search(said)):
@@ -357,6 +375,17 @@ def filed(category: str, name: Any, description: str | None = None, cats: list[s
     broker = next((c for c in cats if OWN["broker"].match(c)), None)
     if kind == "infrastructure" and BROKER_NAME.search(str(name or "")) and broker:
         return broker, kind
+    if kind in ("infrastructure", "database") and CACHE_NAME.search(str(name or "").strip()):
+        store = next((c for c in cats if OWN["cache"].match(c)), None) or \
+            next((c for c in cats if OWN["database"].match(c)), None)
+        if store:                                        # (0.10.9.1) redis, valkey: a key-value store
+            return store, "database"
+    platform = next((c for c in cats if OWN["infrastructure"].match(c)), None)
+    if kind == "hosted":                                 # (0.10.9.1) the hosts' software, else as infrastructure
+        return (soft or platform or ("component" if "component" in cats else category)), kind
+    if kind == "infrastructure" and platform and not BROKER_NAME.search(str(name or "")):
+        return platform, kind                            # (0.10.9.1) a coordination, code, directory or load
+    #                                                      balancing service: the deployment's platform services
     if soft and (kind == "runtime" or kind == "infrastructure" and not BROKER_NAME.search(str(name or "")) or
                  kind == "monitoring" and not own):
         return soft, kind

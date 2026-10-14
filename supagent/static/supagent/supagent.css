@@ -338,6 +338,11 @@ details.sql summary { cursor: pointer; color: var(--ink-2); }
 
 /* catalog entries */
 .fields.two { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.fields.one { grid-template-columns: 1fr; }
+.budget-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px 24px; }
+.budget-cols > div { min-width: 0; }
+.field .in-use { color: var(--muted); font-size: 12px; }
+#budget-now .warn { color: var(--bad, #b42318); font-weight: 600; }
 .edit .field > span { font-weight: 600; font-size: 13px; }
 .edit .field.check { display: flex; gap: 8px; align-items: center; }
 #e-content, #import-text { width: 100%; font-family: var(--mono); font-size: 12.5px; }
