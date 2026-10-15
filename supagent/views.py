@@ -1873,7 +1873,7 @@ class AdminView(BaseView):
     # (0.9.6) write: the settings (an admin's); read: the knowledge the dictionary's pages read (an editor's too);
     # edit: the knowledge written (an editor's); delete: the knowledge deleted (an admin's)
     method_permission_name = {
-        "index": "write", "get_settings": "write", "put_settings": "write", "test_llm": "write", "learn": "write",
+        "index": "write", "get_settings": "write", "put_settings": "write", "test_llm": "write", "test_source": "write", "learn": "write",
         "classify_now": "write", "backups": "write", "backup_file": "write", "backup_restore": "write",
         "stop_learning": "write", "runs": "write", "status": "write", "usage": "write", "usage_data": "write",
         "entries": "read", "entry_history": "read", "export_catalog": "read", "team_memory": "read", "docs": "read",
@@ -2362,6 +2362,27 @@ class AdminView(BaseView):
                 return _json({"ok": True, **LLM().check()})
         except Exception as ex:  # pylint: disable=broad-except
             return _json({"ok": False, "error": f"{type(ex).__name__}: {str(ex)[:800]}"})
+
+    @expose("/api/test-source/<source>", methods=("POST",))
+    @has_access_api
+    def test_source(self, source: str) -> Response:
+        """(0.10.11) The Settings page's test of Grafana (its MCP server) or OpenSearch Dashboards, with the settings
+        saved: whether it answers, and what is wrong when not."""
+        if not _is_admin():
+            return _json({"error": "only an admin tests the sources"}, 403)
+        if source == "grafana":
+            from supagent import grafana as module
+        elif source == "osd":
+            from supagent import osd as module  # type: ignore[no-redef]
+        else:
+            return _json({"error": "grafana or osd"}, 404)
+        if not module.configured():
+            key = "grafana.mcp_url" if source == "grafana" else "osd.url"
+            return _json({"ok": False, "said": f"not set up: save {key} first"})
+        try:
+            return _json(module.check())
+        except Exception as ex:  # pylint: disable=broad-except
+            return _json({"ok": False, "said": f"{type(ex).__name__}: {str(ex)[:500]}"})
 
     @expose("/api/learn", methods=("POST",))
     @has_access_api

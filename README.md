@@ -107,7 +107,7 @@ Content-Security-Policy (Talisman nonces).
 ```bash
 # the Python of Superset's virtualenv
 PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-$PY -m pip install supagent-0.9.1-py3-none-any.whl          # Superset 6.1: nothing else to install
+$PY -m pip install supagent-0.10.11-py3-none-any.whl        # Superset 6.1: nothing else to install
 ```
 
 One line in `superset_config.py` registers it. It holds no logic:
@@ -149,6 +149,17 @@ row level security filters and dashboards keep them), the AI roles' users moved 
 then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with the knowledge written) and Viewer
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
+## Upgrade from 0.10.10 to 0.10.11
+
+pip install the wheel on every host and restart (tables unchanged, v20). Grafana and OpenSearch Dashboards are now set
+up in *Settings → Chat settings*, each section with **Test the connection**. Answers: a tool call the model writes as
+text is run as the call it is, sizes are given in the units asked, a time of day asked is given, a question back ends
+on its question, a drafted alert rule has the labels its team rule says, and in long investigations the model is told
+the user's question again. Measured: main open set 320/324 over two rounds (2 wrong without a mark), observability
+57/58 over two rounds; Grafana questions 13/13 (every change request refused, only the approved rule created),
+OpenSearch Dashboards questions 8/9, change requests 2/2 refused; Chat settings and Test the connection checked in the
+lab; unit tests 2176; upgrade from 0.10.10 checked.
 
 ## Upgrade from 0.10.9.2 to 0.10.10
 

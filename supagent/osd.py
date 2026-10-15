@@ -46,6 +46,19 @@ def configured() -> bool:
     return bool(str(_setting("osd.url", "") or "").strip())
 
 
+def check() -> dict[str, Any]:
+    """(0.10.11) The Settings page's test: the saved objects API answers with the sign-in set (one page of
+    dashboards). {"ok": ..., "said": ...}; never raises."""
+    try:
+        got = _get("/api/saved_objects/_find", [("type", "dashboard"), ("per_page", 1)])
+    except OSDError as ex:
+        return {"ok": False, "said": str(ex)}
+    total = int((got or {}).get("total") or 0) if isinstance(got, dict) else 0
+    tenant = str(_setting("osd.tenant", "") or "").strip()
+    return {"ok": True, "said": f"OpenSearch Dashboards answers: {total} dashboard{'' if total == 1 else 's'}" +
+            (f" in the tenant {tenant}" if tenant else "")}
+
+
 def allowed(user: Any = None) -> bool:
     """Whether this Superset user may read OpenSearch Dashboards through the agent (osd.roles; empty: every user)."""
     roles = {str(r).strip() for r in (_setting("osd.roles", []) or []) if str(r).strip()}

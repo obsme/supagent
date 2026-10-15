@@ -236,6 +236,69 @@ def harmony_read(msg: dict) -> dict:
     return out
 
 
+# (0.10.11) a tool call the model wrote in its text in its chat template's own form, the server not having read it
+# (llama.cpp and Qwen3.6: "<tool_call>\n<function=describe_data>\n<parameter=index>\nx\n</parameter>\n</function>\n
+# </tool_call>" came back as the answer, and the user was shown it); or its JSON form ({"name": ..., "arguments": ...})
+MARKUP_START = re.compile(r"<tool_call>|<function=[A-Za-z_]")
+MARKUP_FUNCTION = re.compile(r"<function=([A-Za-z_][\w.-]*)>(.*?)</function>", re.S)
+MARKUP_PARAMETER = re.compile(r"<parameter=([A-Za-z_][\w.-]*)>\n?(.*?)\n?</parameter>", re.S)
+MARKUP_JSON = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
+
+
+def markup_read(msg: dict, tools: list[dict] | None) -> dict:
+    """(0.10.11) An answer whose text holds whole tool calls written in the model's template (the server did not read
+    them): those calls, when every one names a tool offered, as tool calls, the text before them as the content.
+    Anything else comes back as it was: no tool offered, a name not offered, a call cut before its end."""
+    text = msg.get("content")
+    if not tools or msg.get("tool_calls") or not isinstance(text, str):
+        return msg
+    start = MARKUP_START.search(text)
+    if not start:
+        return msg
+    offered = {(t.get("function") or {}).get("name"): ((t.get("function") or {}).get("parameters") or {})
+               .get("properties") or {} for t in tools}
+    rest = text[start.start():]
+    found: list[tuple[str, dict]] = []
+    for name, body in MARKUP_FUNCTION.findall(rest):
+        if name not in offered:
+            return msg
+        args: dict[str, Any] = {}
+        for key, value in MARKUP_PARAMETER.findall(body):
+            kind = (offered[name].get(key) or {}).get("type")
+            if kind and kind != "string":          # a number, a list, an object: written as JSON
+                try:
+                    args[key] = json.loads(value)
+                    continue
+                except ValueError:
+                    pass
+            args[key] = value
+        found.append((name, args))
+    if not found:
+        for raw in MARKUP_JSON.findall(rest):
+            try:
+                call = json.loads(raw)
+            except ValueError:
+                return msg
+            args = call.get("arguments") if isinstance(call, dict) else None
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except ValueError:
+                    return msg
+            if not isinstance(call, dict) or call.get("name") not in offered or not isinstance(args, dict):
+                return msg
+            found.append((call["name"], args))
+    if not found:
+        return msg                                     # a call cut before its end: left as it was
+    out = dict(msg)
+    out["content"] = text[:start.start()].strip()
+    out["tool_calls"] = [{"id": f"markup-{i}", "type": "function",
+                          "function": {"name": name, "arguments": json.dumps(args)}}
+                         for i, (name, args) in enumerate(found)]
+    log.info("supagent: a tool call written as text read as a call: %s", ", ".join(n for n, _ in found))
+    return out
+
+
 # (0.10.7) the typography of gpt-oss: names written with a non-breaking hyphen ("orders\u2011db"), numbers with a narrow
 # no-break space, quotes curled: a name that matches nothing (in a query's value, in the checks that compare the
 # answer with what the tools gave, in what the user copies); quotes are left as written
@@ -603,7 +666,7 @@ class LLM:
             _record(body.get("model") or "", one, time.time() - t0, len(tools or []), None)
             self.last_usage = add_usage(self.last_usage or {}, one)
             self.last_finish = (data["choices"][0] or {}).get("finish_reason")    # "length": cut by max_tokens
-            msg = plain_typography(harmony_read(msg))
+            msg = plain_typography(markup_read(harmony_read(msg), None if tool_choice == "none" else tools))
             if reasoned(data, msg) and not _REASONING.get(self._key()):
                 _REASONING[self._key()] = True           # (0.10.7) the next calls give its reasoning room
                 if not self.cfg.thinking:                # (a model that reasons with thinking off: kept for all)

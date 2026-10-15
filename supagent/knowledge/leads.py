@@ -223,19 +223,43 @@ def _reached(item: dict[str, Any]) -> list[tuple[str, str]]:
     return out
 
 
+# (0.10.11) a question that names the kinds of parts it asks for ("which data stores go down with it, and which
+# applications depend on them?") asks no part that only watches, shows, owns or deploys another: a log collector, a
+# dashboard, an alert rule, a DNS name, a team or a scrape job demanded too, the answer listed every one through every
+# part, went round in circles and was cut before the second data store ("applications" alone still takes a database
+# or a VM that runs there: people mean what runs there)
+KINDS_NAMED = re.compile(r"\b(?:data ?stores?|databases?|dbs?|caches?|queues?|brokers?|applications?|apps?|services?|"
+                         r"micro-?services?|apis?|servers?|hosts?|nodes?|machines?|bases de donn[ée]es|serveurs?)\b",
+                         re.I)
+KIND_OF_LINE = re.compile(r"^[^(]+\(([^)]{1,40})\)")
+WATCHER_KINDS = ("dashboard", "panel", "alert", "rule", "team", "person", "owner", "dns", "component", "collector")
+WATCHER_VERB = re.compile(r"\b(?:monitors|shows|owns|scrapes|watches|deploys|deployed by|receives (?:traces|logs|"
+                          r"metrics)|reads logs|ships logs|resolves to)\b", re.I)
+
+
+def _watcher(line: str) -> bool:
+    kind = KIND_OF_LINE.match(line)
+    return bool(kind and any(w in kind.group(1).lower() for w in WATCHER_KINDS)) or bool(WATCHER_VERB.search(line))
+
+
 def reach_unsaid(question: str, answer: str, reach: dict[str, Any] | None) -> list[str]:
     """(0.10.7) "If cache-01 goes down, what is affected?": system_links said what its failure reaches (the cache on
     it, the application that depends on the cache, the one that calls that application); the answer named the first
     two (obs7dev-j). The lines of the parts reached that the answer does not name; [] when the question asks no
-    failure's reach or no system_links of the answer said one (`reach`: its if_it_fails, by place)."""
+    failure's reach or no system_links of the answer said one (`reach`: its if_it_fails, by place). (0.10.11) A
+    question that names the kinds of parts it asks for (data stores, applications, servers) is not asked the parts
+    that only watch, show, own or deploy another."""
     if not reach or not answer or not IMPACT_ASKED.search(question or ""):
         return []
     text = answer.lower()
+    named = bool(KINDS_NAMED.search(question or ""))
     out: list[str] = []
     for item in reach.values():
         if not isinstance(item, dict):
             continue
         for name, line in _reached(item):
+            if named and _watcher(line):
+                continue                               # a watcher the question does not ask for
             if line not in out and not re.search(r"(?<![\w-])" + re.escape(name.lower()) + r"(?![\w-])", text):
                 out.append(line)
     return out

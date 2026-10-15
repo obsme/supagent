@@ -73,6 +73,28 @@
     <div class="fields" data-group="tools mcp chats"></div>
     <div class="actions"><button type="button" class="btn primary" data-save="tools mcp chats">Save</button></div>
   </section>
+  <section class="card" id="sec-grafana">
+    <div class="sec-head"><h2>Grafana</h2><button type="button" class="info" aria-controls="x-grafana" aria-label="About Grafana">i</button></div>
+    <div class="explain" id="x-grafana">The team's Grafana, read through its MCP server (mcp-grafana run with -t streamable-http, on a host
+      that reaches Grafana; the Python package mcp where Superset runs, from the delivery's grafana-wheels folder). Off
+      until the MCP server's address is set. The agent reads the dashboards, the alert rules and who they reach, explains
+      them in the learning and watches them in investigations; it drafts alert rules and dashboards only when writes are
+      on, and an admin approves each one in To review. Which dashboards it reads: Data dictionary, Documents and sites.</div>
+    <div class="fields" data-group="grafana"></div>
+    <div class="actions"><button type="button" class="btn primary" data-save="grafana">Save</button>
+      <button type="button" class="btn" data-test-source="grafana">Test the connection</button><span id="grafana-result" class="result"></span></div>
+  </section>
+  <section class="card" id="sec-osd">
+    <div class="sec-head"><h2>OpenSearch Dashboards</h2><button type="button" class="info" aria-controls="x-osd" aria-label="About OpenSearch Dashboards">i</button></div>
+    <div class="explain" id="x-osd">OpenSearch Dashboards 2.19 or 3.8, read through its saved objects API (GET requests only): its address
+      with its base path, a user that may read the saved objects of the tenant. Off until the address is set. The
+      agent reads each dashboard's visualizations (what they compute, on which index pattern), explains them in the
+      learning and computes the same on the index with its SQL tools. Which dashboards it reads: Data dictionary,
+      Documents and sites.</div>
+    <div class="fields" data-group="osd"></div>
+    <div class="actions"><button type="button" class="btn primary" data-save="osd">Save</button>
+      <button type="button" class="btn" data-test-source="osd">Test the connection</button><span id="osd-result" class="result"></span></div>
+  </section>
   <section class="card" id="sec-search">
     <div class="sec-head"><h2>Knowledge search and memory</h2><button type="button" class="info" aria-controls="x-search" aria-label="About the knowledge search">i</button></div>
     <div class="explain" id="x-search">With each question the agent gets the knowledge that looks relevant: the dictionary, the catalog's

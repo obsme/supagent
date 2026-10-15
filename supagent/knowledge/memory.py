@@ -278,10 +278,12 @@ def prompt_block(user_id: int | None, shown: set[str] | None = None, asked: str 
     from supagent.knowledge.resolve import gone_names, mentions_gone
 
     gone = gone_names()
-    lines = ["\n\nWhat this user and the team asked to remember (follow it unless the question says otherwise: a "
-             "unit or a format the question asks for (\"in seconds\", \"as a table\") is the one to answer in, "
-             "whatever a memory prefers; one that says when it applies (\"when the user says X\", \"for the desk "
-             "Y\") applies only then: it is no filter for a question that does not say X):"]
+    lines = ["\n\nWhat this user and the team asked to remember (follow it unless the chat says otherwise: a unit or "
+             "a format the question or an earlier message of this chat asks for (\"in seconds\", \"in hours, please\", "
+             "\"as a table\") is the one to answer in, whatever a memory prefers; a memory about one kind of figure "
+             "(how long something took, a size, an amount) is about that kind only, and one that does not apply to "
+             "this answer is left unsaid; one that says when it applies (\"when the user says X\", \"for the desk Y\") applies only then: it "
+             "is no filter for a question that does not say X):"]
     for m in sorted(items, key=lambda m: KIND_ORDER.get(m.kind, 3)):     # stable: mine, then the team's
         if asked is not None and not triggered(m.text, asked):
             continue                                   # (0.10.7) "when the user says X" and X not said: it applies

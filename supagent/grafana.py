@@ -63,6 +63,27 @@ def configured() -> bool:
     return bool(str(_setting("grafana.mcp_url", "") or "").strip())
 
 
+def check() -> dict[str, Any]:
+    """(0.10.11) The Settings page's test: the MCP server answers and reaches Grafana (its datasources), and
+    grafana.datasource is one of them. {"ok": ..., "said": ...}; never raises."""
+    try:
+        got = call("list_datasources", {}, cached=False)
+    except GrafanaError as ex:
+        return {"ok": False, "said": str(ex)}
+    rows = got if isinstance(got, list) else (got.get("datasources") or []) if isinstance(got, dict) else []
+    rows = [r for r in rows if isinstance(r, dict)]
+    said = f"Grafana answers through its MCP server: {len(rows)} datasource{'' if len(rows) == 1 else 's'}"
+    ds = str(_setting("grafana.datasource", "") or "").strip()
+    if not ds:
+        return {"ok": True, "said": said + "; set grafana.datasource (the UID of the Prometheus or Mimir datasource "
+                                           "of the rules and panels)"}
+    one = next((r for r in rows if ds in (str(r.get("uid") or ""), str(r.get("name") or ""))), None)
+    if one is None:
+        return {"ok": False, "said": said + f"; grafana.datasource {ds!r} is none of them (UIDs: "
+                                            f"{', '.join(str(r.get('uid')) for r in rows[:10])})"}
+    return {"ok": True, "said": said + f"; grafana.datasource is {one.get('name')} ({one.get('type')})"}
+
+
 def allowed(user: Any = None) -> bool:
     """Whether this Superset user may read Grafana through the agent (grafana.roles; empty: every user)."""
     roles = {str(r).strip() for r in (_setting("grafana.roles", []) or []) if str(r).strip()}

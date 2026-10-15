@@ -1962,8 +1962,10 @@ FIELD_NAMED_NUDGE = ("(Check before answering: the question's words name the fie
                      "text above nor this check.)")
 REACH_NUDGE = ("(Check before answering: the question asks what a failure reaches, and system_links said it reaches "
                "parts the answer does not name: {lines}. Name every part it reaches, with how (on it, or through which "
-               "part), or say why one is not affected; then write the whole answer for the user as if for the first "
-               "time: they see neither the text above nor this check.)")
+               "part), or say why one is not affected: each part once, in a few words, in one short list or table, the "
+               "parts the question asks about first (no heading per part, no chain written out part by part). Then "
+               "write the whole answer for the user as if for the first time: they see neither the text above nor this "
+               "check.)")
 REACH_SHOWN = 12                  # (0.10.7) parts a failure reaches named in that check, at most
 VERDICT_HEAD = re.compile(r"^\W*(?:\*\*)?(?:no|yes|non|oui|partly|partially|unlikely|probably not|not)\b|"
                           r"\b(?:did not|didn't|was not|wasn't|were not|weren't|is not|isn't|played no|no role|no part|"
@@ -2123,6 +2125,12 @@ UNREADABLE_NO_DATA = ("(Your last reply could not be read: the arguments of its 
                       "long, or cut). Call the tool again with short arguments: one query. No figure of this question "
                       "has been read yet: never write one before a query gives it.)")
 TOOL_MARKUP = ("<tool_call>", "<function=")     # (0.10.7) where a step without tools stops
+REMINDED = "(The user's question, the one this answer is for:"   # (0.10.11) said with each check's note
+REMIND_AFTER = 10                # (0.10.11) messages since the question before a check's note says it again
+MARKUP_TEXT = re.compile(r"<tool_call>.*?(?:</tool_call>|$)|<function=.*?(?:</function>|$)", re.S)
+# (0.10.11) a tool call written in the text that the LLM client could not read as a call (cut, or a name not offered)
+MARKUP_NUDGE = ("(Your last reply wrote a tool call as text, and it was not run: the user would have seen it. Call the "
+                "tool as a tool call, with its arguments, or, if no call is needed, write the answer for the user.)")
 SEARCH_ONCE = ("tool error (not run: the knowledge was searched once already for this answer): use what it gave and "
                "the data block above (it names the metrics and indices that match, with a SQL to adapt); describe_data "
                "for a table's fields, then run the query.")
@@ -2283,6 +2291,10 @@ LEAD_IN = re.compile(r":[*_\s]*$")             # (0.10.9.2) "The sources are:", 
 # (0.10.9.2) "Please specify the part and the day.", "Let me know which one.": the request to choose, after the list
 CHOOSE_LINE = re.compile(r"(?i)^[*_\s]*(?:please\b|kindly\b|let me know\b|tell me\b|just\s+(?:say|tell)\b|"
                          r"(?:could|can|would)\s+you\b|(?:specify|clarify|choose|pick|select|confirm|indicate)\b)")
+# (0.10.11) "...? If you would like a total across all of them, please let me know.": an offer closing a question back
+OFFER_LINE = re.compile(r"(?i)^[*_\s]*(?:or,?\s+)?if you(?:'d| would)?\s+(?:like|want|prefer|need)\b.{0,200}?"
+                        r"\b(?:let me know|tell me|just say|say so|ask)\b")
+MORE_COUNT = re.compile(r"(?i)\b(?:and|plus)\s+\d+\s+(?:more|others?)\b")   # "and 198 more": a list cut, no result
 
 
 QUESTION_LAST_CHARS = 2500       # (0.10.9) a question back with a long list of choices (its parts described) too
@@ -2298,12 +2310,56 @@ def question_last(answer: str) -> str:
         return answer
     lines = text.splitlines()
     q = next((i for i, ln in enumerate(lines) if ln.strip().rstrip("*_ )").endswith("?")), None)
+    if q is None:                                         # (0.10.11) the question inside a line, words after it
+        split = _question_inside(lines, text)
+        if split is None:
+            return answer
+        lines, q = split
     rest = [ln for ln in lines[q + 1:] if ln.strip()] if q is not None else []
     if not rest or not all(OPTION_LINE.match(ln) or ln[:1] in (" ", "\t") or LEAD_IN.search(ln) or
-                           CHOOSE_LINE.match(ln) for ln in rest):
+                           CHOOSE_LINE.match(ln) or OFFER_LINE.match(ln) for ln in rest):
         return answer                                     # (0.10.9.2) a list's lead-in and a closing "Please
     #                                                       specify ..." are the question back's too
     return ("\n".join(lines[:q] + lines[q + 1:]).strip() + "\n\n" + lines[q].strip()).strip()
+
+
+SENTENCE_END = re.compile(r"[.!?:][*_)\"']*\s+")
+ALSO_START = re.compile(r"(?i)^[*_\s]*(?:also|and|additionally|plus)\b[,:]?\s*")
+
+
+def _question_inside(lines: list[str], text: str) -> tuple[list[str], int] | None:
+    """(0.10.11) The two shapes of a question back whose question ends no line: "Could you clarify what you mean? Are
+    you referring to:" then a list (the question, then the list's lead-in, on one line), and "Which application ...
+    for all of them? Also, please specify the period." (the request to choose after it). The question sentence gets a
+    line of its own (the request without its "Also"), the line before which question_last moves it; else None. Not for
+    an answer with figures (a result, then "Would you like ...? Let me know ...")."""
+    from supagent.grounding import answer_numbers
+
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i]
+        p = line.rfind("?")
+        if p < 0:
+            continue
+        while p + 1 < len(line) and line[p + 1] in "*_)\"'":
+            p += 1
+        tail = line[p + 1:].strip()
+        if not tail:
+            return None
+        lead_in = LEAD_IN.search(tail) and "?" not in tail
+        bare = ALSO_START.sub("", tail)
+        choose = (CHOOSE_LINE.match(bare) or OFFER_LINE.match(bare)) and not answer_numbers(MORE_COUNT.sub("", text)) and \
+            not any(ln.strip() for ln in lines[i + 1:])
+        if not (lead_in or choose):
+            return None
+        starts = [m.end() for m in SENTENCE_END.finditer(line[:p])]
+        s = starts[-1] if starts else 0
+        pre, asked = line[:s].strip(), line[s:p + 1].strip()
+        if choose:
+            tail = ALSO_START.sub("", tail)
+            tail = tail[:1].upper() + tail[1:]
+        out = lines[:i] + ([pre] if pre else []) + [asked, tail] + lines[i + 1:]
+        return out, i + (1 if pre else 0)
+    return None
 
 
 CUT_NUDGE = ("(Your answer stopped in the middle of a sentence: the user saw only its start. Write the whole answer "
@@ -2379,6 +2435,79 @@ def binary_misread(answer: str, trace: list[dict]) -> str | None:
             if raw / 1024 ** k >= 0.01:
                 return SLIP_NUDGE.format(said=text, raw=raw, k=k, unit=unit, right=raw / 1024 ** k, div=1024 ** k)
     return None
+
+
+# (0.10.11) "11.00 GB (11,003,281,408 bytes)" for "how low did it go?": a size of the results in decimal units that the
+# question never asked for (sizes are given in binary units: 10.25 GiB), or a binary size labelled GB
+DECIMAL_SAID = re.compile(r"(?<![\d.,])(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*([KMGT]B|[KMGT]o)(?![/\w])")
+DECIMAL_ASKED = re.compile(r"(?i:\b[kmgt]b\b|\b(?:kilo|m[eé]ga|giga|t[eé]ra)-?(?:bytes?|octets?)\b)|\b[KMGT]o\b")
+DECIMAL_NUDGE = ("(Check before answering: your answer gives {said}, a decimal unit the question did not ask for: sizes "
+                 "are given in binary units here. The query gave {raw:,.0f} bytes, which are {right:.2f} {unit} (bytes / "
+                 "1024^{k}). Give each size in {unit}, best converted in the query itself (divided by {div}). Then write "
+                 "the whole answer again for the user, as if for the first time, with all it had found: they see neither "
+                 "the text above nor this check.)")
+
+
+def decimal_unasked(answer: str, trace: list[dict], question: str) -> str | None:
+    """(0.10.11) A result's bytes given in decimal units (or a binary value labelled GB) when the question asks for
+    no decimal unit and the answer gives no binary size for them: the nudge with the size in binary units, else None."""
+    if DECIMAL_ASKED.search(question or ""):
+        return None
+    said = [(m.group(0), float(m.group(1).replace(",", "")), m.group(2)) for m in DECIMAL_SAID.finditer(answer or "")]
+    if not said:
+        return None
+    found = _query_numbers(trace)
+    binary_said = [(float(m.group(1).replace(",", "")), BINARY_POWER[m.group(2)])
+                   for m in BINARY_SAID.finditer(answer or "")]
+    for text, x, unit in said:
+        if x <= 0:
+            continue
+        k = {"K": 1, "M": 2, "G": 3, "T": 4}[unit[0]]
+        near = lambda b, f, v=x: abs(b / f - v) <= max(0.006 * v, 0.006)   # noqa: E731
+        raws = [b for b in found if near(b, 1000 ** k) or near(b, 1024 ** k)]
+        for raw in raws:
+            right = raw / 1024 ** k
+            if any(p == k and abs(v - right) <= max(0.006 * right, 0.006) for v, p in binary_said):
+                continue                               # given in binary units too: nothing to say
+            if raw % 1024 ** k == 0 and x == right and x == int(x):
+                continue                               # a whole configured size as people write it ("maxmemory 4gb",
+                #                                        -Xmx4g: exactly 4 GiB)
+            bunit = {1: "KiB", 2: "MiB", 3: "GiB", 4: "TiB"}[k]
+            return DECIMAL_NUDGE.format(said=text, raw=raw, right=right, unit=bunit, k=k, div=1024 ** k)
+    return None
+
+
+# (0.10.11) "At what time was it?" after the day's highest load, answered with the value again and no time (its query
+# read the highest, not its moment): a time of day asked, none given
+CLOCK_ASKED = re.compile(r"\b(?:at what time|what time|which time|at which (?:hour|minute)|what hour|[àa] quelle heure|"
+                         r"when did (?:it|this|that|the [\w-]+) (?:end|start|stop|begin|recover|finish|resume))\b", re.I)
+CLOCK_SAID = re.compile(r"(?<![\d:])\d{1,2}[:h]\d{2}(?![\d:])|\b\d{1,2}\s*(?:a\.?m\b\.?|p\.?m\b\.?)|\bmidnight\b|\bnoon\b|"
+                        r"\bminuit\b|\bmidi\b", re.I)
+TIME_NUDGE = ("(Check before answering: the question asks at what time; your answer gives no time of day. Run the query "
+              "that returns the moment itself (the time of the row with that value: ordered by the value, the first "
+              "row, with its time field), then write the whole answer again for the user with the time first, as if "
+              "for the first time: they see neither the text above nor this check.)")
+
+
+def time_unsaid(question: str, answer: str) -> bool:
+    """(0.10.11) A time of day asked and no time of day in the answer."""
+    return bool(CLOCK_ASKED.search(question or "")) and bool((answer or "").strip()) and \
+        not CLOCK_SAID.search(answer or "")
+
+
+def _query_numbers(trace: list[dict]) -> set[float]:
+    """The numbers of 1000 or more in the results of the queries run (sizes in bytes among them)."""
+    found: set[float] = set()
+    for t in trace or []:
+        if (t.get("called") or t.get("tool")) in QUERY_TOOLS and t.get("status") == "done":
+            for x in NUMBER.findall(str(t.get("result") or "")):
+                try:
+                    v = float(x)
+                except ValueError:
+                    continue
+                if v >= 1000:
+                    found.add(v)
+    return found
 
 
 # (0.10.7) "Which metrics show it on the database side?": evidence asked; a metric shows it only if its values moved then
@@ -3953,6 +4082,7 @@ class Agent:
         suspect_asked = records_asked = period_kept = map_asked = which_asked = buckets_asked = False
         verdict_asked = cause_records_asked = reach_asked = fields_asked = where_asked = own_asked = False
         blamed_asked = waiter_asked = parts_asked = grafana_asked = change_asked = False
+        markup_asked = time_asked = False
         repeated_asked = recurring_asked = trigger_asked = False
         claimed_asked = False                          # (0.10.7) the chat's period said with no query run with it
         self._period_sent_at = None
@@ -4010,6 +4140,7 @@ class Agent:
                     msg, pending_call = {"role": "assistant", "content": "", "tool_calls": [pending_call]}, None
                 else:                                  # request between (it was asked for the call again, and wrote
                     #                                    the query again, minutes later, before it was run)
+                    self._remind(messages, asked_at)
                     msg = self.llm.chat(messages, tools=specs,
                                         max_tokens=self._answer_tokens(short=bool(unreadable)),
                                         **({"tool_choice": choice} if choice else {}))
@@ -4059,6 +4190,18 @@ class Agent:
                              written["function"]["arguments"][:200])
             if not calls:
                 answer = re.sub(r"<think>.*?</think>", "", msg.get("content") or "", flags=re.S).strip()
+                if any(m in answer for m in TOOL_MARKUP):    # (0.10.11) a tool call written as text that could
+                    bare = MARKUP_TEXT.sub("", answer).strip()   # not be read as one: never shown to the user
+                    if not markup_asked and choice != "none":    # once: asked for as a tool call
+                        markup_asked = True
+                        self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                        log.info("supagent: answer sent back (a tool call written as text: %r)", answer[:120])
+                        messages[-1]["content"] = bare
+                        messages.append({"role": "user", "content": MARKUP_NUDGE})
+                        continue
+                    if not bare:                       # again, or no call allowed: what the results say, without it
+                        return self._out_of_steps(messages[:-1], trace), trace
+                    answer = bare
                 cut = repeating(answer)
                 if cut is not None and not looped:     # once: an answer going round in circles
                     looped = True
@@ -4174,12 +4317,22 @@ class Agent:
                     log.info("supagent: answer sent back (a question of the system's links: the map's tool not read)")
                     messages.append({"role": "user", "content": MAP_UNREAD_NUDGE})
                     continue
-                units = None if units_asked else binary_misread(answer, trace)
-                if units:                              # (0.10.7) once: "53.69 GiB" for bytes / 10^9
-                    units_asked = True
+                units = None if units_asked else (binary_misread(answer, trace) or
+                                                  decimal_unasked(answer, trace, self._asked_words(question)))
+                if units:                              # (0.10.7) once: "53.69 GiB" for bytes / 10^9; (0.10.11)
+                    units_asked = True                 # "11.00 GB" for bytes no one asked in decimal units
                     self.usage["nudges"] = self.usage.get("nudges", 0) + 1
-                    log.info("supagent: answer sent back (a binary unit with decimal factors)")
+                    log.info("supagent: answer sent back (a size in the wrong units)")
                     messages.append({"role": "user", "content": units})
+                    continue
+                if not time_asked and not asks_back(answer) and \
+                        time_unsaid(getattr(self, "raw_question", None) or question, answer):
+                    time_asked = True                  # (0.10.11) once: "At what time was it?" answered with the
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1   # value again, no time
+                    log.info("supagent: answer sent back (a time of day asked, none given)")
+                    messages.append({"role": "user", "content": TIME_NUDGE})
+                    if not forced and settings.get("agent.force_tool"):
+                        forced = force_tool = True     # the next step runs the query of the moment
                     continue
                 if before_check and len(trace) == before_check[1] and CHECK_TALK.search(answer or ""):
                     log.info("supagent: the reply to the no-tool check speaks of the check: the answer before it kept")
@@ -4995,18 +5148,30 @@ class Agent:
         server could not read: the closing summary of an investigation failed so after its unreadable calls). A
         model that reasons first (gpt-oss) keeps its tools declared with tool_choice "none": with its calls in the
         conversation and no tool declared, it began one more call, the server dropped it, and the answer was empty
-        three times (the user got "the model wrote no text" and a raw result)."""
+        three times (the user got "the model wrote no text" and a raw result). (0.10.11) The other way round too: a
+        model that began one more call with no tool declared (cut at its markup: empty, the same each time, after an
+        investigation's 34 calls) is asked once with its tools declared and none to call, the older results shortened."""
         reasons = getattr(self.llm, "reasons", None)
         specs = getattr(self, "_specs", None)
+        tried_none = False
         if specs and callable(reasons) and reasons():
+            tried_none = True
             try:
                 return self.llm.chat(messages, tools=specs, max_tokens=max_tokens, tool_choice="none")
             except EmptyAnswer:
                 log.info("supagent: no text with the tools declared and none to call: asked again without them")
         try:
-            return self.llm.chat(messages, tools=None, max_tokens=max_tokens, stop=list(TOOL_MARKUP))
-        except TypeError:                              # a client without stop
-            return self.llm.chat(messages, tools=None, max_tokens=max_tokens)
+            try:
+                return self.llm.chat(messages, tools=None, max_tokens=max_tokens, stop=list(TOOL_MARKUP))
+            except TypeError:                          # a client without stop
+                return self.llm.chat(messages, tools=None, max_tokens=max_tokens)
+        except EmptyAnswer:
+            if not specs or tried_none:
+                raise
+        n = shortened(messages[:-1], shrunk()[-1], 1)
+        log.info("supagent: no text without tools (a call begun): asked with the tools declared and none to call, "
+                 "%d older tool results shortened", n)
+        return self.llm.chat(messages, tools=specs, max_tokens=max_tokens, tool_choice="none")
 
     def _found_now(self, messages: list[dict]) -> str:
         """(0.10.7) The answer asked once, without tools, from the results above, after a step was announced again:
@@ -5971,6 +6136,13 @@ class Agent:
             log.warning("supagent: the definitions of the answer not checked", exc_info=True)
         return None
 
+    def _asked_words(self, question: str) -> str:
+        """(0.10.11) What the user asked in this chat: the question as written and their last messages before it (a
+        unit asked two questions before, "In hours, please.", is still asked)."""
+        said = [str(m.get("content") or "") for m in (getattr(self, "chat_history", None) or [])
+                if m.get("role") == "user"][-6:]
+        return "\n".join(said + [str(getattr(self, "raw_question", None) or question or "")])
+
     def _time_from_bucket(self, question: str, answer: str, trace: list[dict]) -> tuple[str, str] | None:
         """A time of day asked and given from time buckets (knowledge.sqllint). (0.10.7) A follow-up answered with no
         query of its own reads the queries of the answer before: "At what time was it?" after the day's highest
@@ -6085,6 +6257,20 @@ class Agent:
         except Exception:  # pylint: disable=broad-except   (never a call lost for a check)
             log.warning("supagent: the window of the records not checked", exc_info=True)
             return None
+
+    def _remind(self, messages: list[dict], asked_at: int) -> None:
+        """(0.10.11) A check's note last, before the next step: the user's question said again with it. After long
+        work and a few checks, a model answered the question before ("Which metrics show it on the database side?"
+        got the previous answer again) or a sub-question of its plan ("Did the frontend deployment play a role?" got
+        "No: the PostgreSQL logs held no error"); the question was 30,000 tokens back."""
+        if not messages or len(messages) - asked_at < REMIND_AFTER:
+            return                                     # short work: the question is close enough
+        last = messages[-1]
+        text = str(last.get("content") or "") if last.get("role") == "user" else ""
+        asked = " ".join(str(getattr(self, "raw_question", "") or "").split())
+        if not text.startswith("(") or not asked or REMINDED in text or asked in text:
+            return
+        last["content"] = text + f"\n{REMINDED} \"{asked[:400]}\")"
 
     def _plan_note(self) -> str:
         if getattr(self, "ledger", None) is None or not self.ledger.tasks:

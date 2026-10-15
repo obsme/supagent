@@ -162,6 +162,41 @@ def _teams_named(text: str) -> set[str]:
     return out
 
 
+def _grounded_labels(labels: dict[str, str], text: str) -> tuple[dict[str, str], list[str]]:
+    """(0.10.11) The labels of a draft from a team rule, as the rule says them. Its team label is the team the rule
+    names, written as the rules already in Grafana write it ("Alert the data team ..." was drafted team=data-platform;
+    the team's rules say team=data). A label whose value the rule never says (service=orders-db, environment=prod) is
+    left out: an invented label can send the alert elsewhere. The severity and the settings' fixed labels stay.
+    Returns (the labels, what changed)."""
+    from supagent import settings
+
+    keys = {str(k).strip() for k in (settings.get("grafana.label_keys") or []) if str(k).strip()}
+    fixed = settings.get("grafana.rule_labels") or {}
+    fixed = fixed if isinstance(fixed, dict) else {}
+    said = " ".join(re.sub(r"[-_]", " ", str(text or "").lower()).split())
+    out, changed = dict(labels), []
+    spans = _team_spans(text)
+    if spans and "team" in keys:
+        team = " ".join(spans[0][2].lower().split())
+        try:
+            known = {str((r.get("labels") or {}).get("team") or "").strip() for r in G.alert_rules(limit=200)}
+        except G.GrafanaError:
+            known = set()
+        same = [v for v in known if v and v.lower() == team]
+        value = same[0] if same else team.replace(" ", "-")
+        if LABEL_VALUE.fullmatch(value) and out.get("team") != value:
+            changed.append(f"team={value}: the team the rule names" + (f" (not {out['team']})" if out.get("team") else ""))
+            out["team"] = value
+    for k in list(out):
+        if k in ("team", "severity") or k in fixed:
+            continue
+        v = " ".join(re.sub(r"[-_]", " ", out[k].lower()).split())
+        if v and v not in said:
+            changed.append(f"{k}={out[k]} left out: the rule does not say it")
+            del out[k]
+    return out, changed
+
+
 def _without_teams(text: str) -> str:
     t = str(text or "")
     gone = set()
@@ -355,6 +390,9 @@ def draft(*, title: str, query: str, operator: str, threshold: float, hold: str 
         if found:
             ref, text = _source(found["source"])
             matched = ref
+    grounded: list[str] = []
+    if ref != "chat":                                     # (0.10.11) a team rule's labels: as the rule says them
+        labels, grounded = _grounded_labels(labels, text)
     ds = _datasource()
     names = metrics_of(expr)
     if not names:
@@ -428,6 +466,8 @@ def draft(*, title: str, query: str, operator: str, threshold: float, hold: str 
         out["replaced"] = "the earlier draft of that title (not approved yet): one draft, the newer one"
     if matched:
         out["from the team's rule"] = f"{matched}: {G.said(text, 300)}"
+    if grounded:
+        out["labels as the team's rule says them"] = grounded
     try:
         like = [p for p in G.similar_panels(title, summary, text, limit=2)
                 if not any(set(metrics_of(q)) & set(names) for q in p.get("queries") or [])]

@@ -1,5 +1,68 @@
 # Changes
 
+## 0.10.11 — 2026-10-16
+
+Stabilization after 0.10.10: the misses of its gates read as classes and fixed where they come from, and Grafana and
+OpenSearch Dashboards set up in the Chat settings page. Tables unchanged (v20): pip install and restart.
+
+Measured before the release under a rule written before any result, on the frozen build 505c2b7 with Qwen3.6-35B-A3B
+(llama.cpp, its server restarted first), two rounds of each open set on the small model's profile: the main open set
+160 and 160 of 162 right (320 of 324; the rule: 318), 2 wrong without a mark in all (the rule: 3); the observability
+open set 28 and 29 of 29 (57 of 58; the rule: 54), 1 wrong without a mark. Grafana questions (13 and an approval): 13
+right, every request to change what exists refused, the one rule created being the one approved, nothing else changed.
+OpenSearch Dashboards questions: 8 of 9 right; two requests to change it refused, nothing changed. The Chat settings
+page checked in a browser (both sections, the secrets as password fields, Test the connection's messages) and Test the
+connection run against the lab's Grafana and OpenSearch Dashboards. The unit tests: 2176 passed. The upgrade from
+0.10.10 on a copy of a lab: tables v20 unchanged, every setting kept, the System map's 289 values and 2,224 links
+kept, health 200, the knowledge search answering. 0.10.11 is that build with one test's sample data renamed (b12534d,
+found by the rule's deny-list check and registered as an amendment to the rule before the remaining results were read;
+the package's files are the same) and its version. Not measured: gpt-oss-120b.
+
+Answers
+* **A tool call written as text** (the model's own markup, which the LLM server did not read) is run as the call it is,
+  when it names a tool offered; markup that cannot be read is never shown to the user (asked once more, else the
+  answer is written without it).
+* **Sizes in the units asked**: a result's bytes given in decimal units no one asked for ("11.00 GB" for
+  11,003,281,408 bytes) are sent back once for binary units (10.25 GiB); a whole configured size ("maxmemory 4 GB")
+  is left as people write it.
+* **A time of day asked is given**: "At what time was it?" answered with the value again and no time is sent back
+  once, the next step running the query of the moment.
+* **The chat's own words before the memory**: a unit or a format asked earlier in the same chat ("In hours, please.")
+  wins over a stored preference; a preference about one kind of figure (how long something took) is about that kind
+  only and is not mentioned where it does not apply.
+* **A question back ends on its question**, also when it was written "...? Also, please specify the period.",
+  "...? Are you referring to:" followed by the choices, or closed by an offer ("If you want, I can also break it down
+  by day.").
+* **The user's question said again in long work**: when a check sends an answer back after ten steps or more since the
+  question, its note ends with the user's question, so the answer is for that question, not for one step of the work
+  or the question before (seen in the observability set after long investigations and several checks).
+* **The closing summary of an investigation that used up its calls** is written even when the model began one more
+  call (it was cut to nothing, and the user got "the model wrote no text").
+* **What a failure reaches**: a question that names the kinds of parts it asks for ("which data stores go down, and
+  which applications depend on them?") is not asked the parts that only watch, show, own or deploy another
+  (dashboards, alert rules, log collectors, teams); the answer lists each part once, the parts asked about first.
+
+Grafana and OpenSearch Dashboards
+* **Set up in Chat settings** (Settings -> Chat settings): a Grafana section and an OpenSearch Dashboards section with
+  every setting, Save and **Test the connection** (Grafana: the MCP server reaches Grafana and the datasource set is
+  one of its datasources; OpenSearch Dashboards: the saved objects API answers with the sign-in set). In 0.10.10 these
+  settings could only be set with superset supagent settings --set.
+* **A drafted alert rule has the labels its team rule says**: the team as the rules already in Grafana write it ("the
+  data team": team=data, not data-platform), and no label the rule never says (service, environment); what changed is
+  said with the draft.
+
+Known gaps
+* **The observability set with Grafana and OpenSearch Dashboards set up** was not run again for this release (0.10.10:
+  28 of 29, the miss an investigation that used up its calls and wrote no text). The closing summary written after the
+  last call is checked by unit tests and by the observability set without them.
+* **An answer can be only a closing line**: in one OpenSearch Dashboards question of the release run the agent
+  answered "The answer is complete. All tasks have been done." after updating its work plan, instead of the answer
+  (which index, field, aggregation and filter measure the checkout response time). Ask again; a coming version
+  gives the answer written before such a line.
+* The rest of 0.10.10's known gaps stand (see 0.10.10): lab instances only (Grafana 13.2.4 with mcp-grafana 2.0.2,
+  OpenSearch Dashboards 2.19.5 and 3.8.0 without the security plugin), the numbers behind an OpenSearch Dashboards
+  visualization computed by the agent with its SQL tools, Grafana's alert history as its API gives it.
+
 ## 0.10.10 — 2026-10-15
 
 The team's requests of 14 October: the team's central Grafana, read through its MCP server (dashboards, alert rules,

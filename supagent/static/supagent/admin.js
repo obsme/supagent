@@ -5,6 +5,23 @@
   var $ = function (id) { return document.getElementById(id); };
   var specs = {};
   var LABELS = {
+    /* (0.10.11) Grafana (its MCP server) and OpenSearch Dashboards */
+    "grafana.mcp_url": "MCP server address", "grafana.mcp_token": "MCP server token",
+    "grafana.grafana_token": "Grafana service account token", "grafana.url": "Grafana address (for the links)",
+    "grafana.roles": "Roles that may use it", "grafana.writes": "Drafts may be created (each one approved)",
+    "grafana.alert_folder": "Folder of the alert rules", "grafana.rule_group": "Rule group",
+    "grafana.rule_labels": "Labels of every rule (JSON)", "grafana.label_keys": "Label keys a draft may set",
+    "grafana.datasource": "Datasource UID (Prometheus or Mimir)", "grafana.dashboard_folder": "Folder of new dashboards",
+    "grafana.dashboard_folders": "Folders new dashboards may go to", "grafana.cache_seconds": "Cache (s)",
+    "grafana.timeout": "Timeout (s)", "grafana.context": "Context pages", "grafana.learn": "Explained in the learning",
+    "grafana.max_llm_calls": "LLM calls per learning", "grafana.max_dashboards": "Dashboards read at most",
+    "grafana.read_new": "New dashboards read",
+    "osd.url": "Address (with its base path)", "osd.auth": "Sign-in", "osd.user": "User",
+    "osd.secret": "Password or token", "osd.header": "Header name (sign-in by header)", "osd.tenant": "Tenant",
+    "osd.verify_tls": "Check TLS certificates", "osd.ca_bundle": "CA bundle (PEM file)",
+    "osd.roles": "Roles that may use it", "osd.context": "Context pages", "osd.learn": "Explained in the learning",
+    "osd.max_llm_calls": "LLM calls per learning", "osd.max_objects": "Saved objects read at most",
+    "osd.timeout": "Timeout (s)", "osd.read_new": "New dashboards read",
     "llm.base_url": "API base URL", "llm.model": "Model", "llm.auth": "Authentication", "llm.token": "Access token",
     "llm.middleware.token_url": "Middleware token URL", "llm.middleware.consumer_key": "Consumer key",
     "llm.middleware.consumer_secret": "Consumer secret", "llm.middleware.cert_path": "Client certificate (PEM file)",
@@ -322,6 +339,18 @@
         res.textContent = errs.length ? errs.join("; ") : "saved " + (r.saved || []).length + " setting(s)";
         res.className = "result " + (errs.length ? "bad" : "good");
         if (r.settings) renderSettings(r.settings, r.budget);
+      });
+    });
+  });
+  /* (0.10.11) Grafana's MCP server and OpenSearch Dashboards, tested with the settings saved */
+  document.querySelectorAll("[data-test-source]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var source = btn.dataset.testSource, res = $(source + "-result");
+      res.textContent = "testing…";
+      res.className = "result";
+      S.admin("POST", "test-source/" + source, {}).then(function (r) {
+        res.textContent = (r.ok ? "OK: " : "") + (r.said || r.error || "failed");
+        res.className = "result " + (r.ok ? "good" : "bad");
       });
     });
   });
