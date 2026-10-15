@@ -649,10 +649,13 @@ def drop_pages(keep: set[tuple[str, str]]) -> int:
     context.review proposed for removal (a person validates it)."""
     n = 0
     review = settings.get("context.review")
+    from supagent import dashlist
+
+    unread = dashlist.unread_slugs()                    # (0.10.10) a dashboard not read (Documents and sites)
     for p in db.session.query(ContextPage).filter(ContextPage.author == "agent"):
         if (p.section, p.slug) not in keep:
-            if p.kind == REJECTED:                      # refused and hidden already: nothing to review
-                db.session.delete(p)
+            if p.kind == REJECTED or p.slug in unread:  # refused and hidden already: nothing to review; a dashboard
+                db.session.delete(p)                    # not read: deleted, never proposed
                 n += 1
             elif review:
                 if not p.proposed_drop:
@@ -708,10 +711,16 @@ def review(page_id: int, action: str, by: str, content: str | None = None) -> di
 def proposals() -> list[dict[str, Any]]:
     """The pages with a change or a removal waiting, and the new pages nobody reviewed yet (for To review)."""
     out = []
+    grafana_ok = _grafana_readable()
+    osd_ok = _osd_readable()
     for p in db.session.query(ContextPage).order_by(ContextPage.section, ContextPage.title):
         refused = p.kind == REJECTED
         if p.slug in LLM_CONTEXT_SLUGS:                  # (0.10.9.1) written from the rest at every learning: its
             continue                                     # page shows it, a person may edit it, nothing to validate
+        if not grafana_ok and (p.slug or "").startswith("grafana-"):
+            continue                                     # (0.10.10) not for this user's roles (grafana.roles)
+        if not osd_ok and (p.slug or "").startswith("osd-"):
+            continue                                     # (0.10.10) nor osd.roles
         if p.proposed_content or p.proposed_drop or (not refused and not p.reviewed_by and
                                                      (p.author or "agent") == "agent"):
             c = p.compared or {}
@@ -781,7 +790,54 @@ def build_context(reason: str = "manual", llm: bool = True, force: bool = False)
                 except Exception:  # pylint: disable=broad-except
                     db.session.rollback()
                     log.warning("supagent context: dashboard pages", exc_info=True)
-            keep: set[tuple[str, str]] = set()
+            grafana: list[dict[str, Any]] = []
+            grafana_keep: set[tuple[str, str]] = set()
+            from supagent.knowledge import grafana_pages as GP
+
+            if GP.enabled():                             # (0.10.10) the team's Grafana: its dashboards, its alert rules
+                steps.begin("Grafana: dashboards and alert rules" + ("" if llm else " (no LLM)"))
+                try:
+                    explainer = None
+                    if llm:
+                        from supagent.llm import LLM
+
+                        explainer = LLM()
+                    grafana, grafana_keep, done_g = GP.pages(explainer=explainer,
+                                                             budget=int(settings.get("grafana.max_llm_calls") or 0))
+                    steps.end(**done_g)
+                except LearningStopped:
+                    raise
+                except Exception as ex:  # pylint: disable=broad-except   (its pages are kept as they are)
+                    db.session.rollback()
+                    grafana = []
+                    grafana_keep = {(p.section, p.slug) for p in db.session.query(ContextPage).filter(
+                        ContextPage.slug.like(GP.PREFIX + "%"))}
+                    steps.end(error=f"{type(ex).__name__}: {str(ex)[:300]}")
+            osd_pages_: list[dict[str, Any]] = []
+            from supagent.knowledge import osd_pages as OP
+
+            if OP.enabled():                             # (0.10.10) the team's OpenSearch Dashboards: its dashboards
+                steps.begin("OpenSearch Dashboards: dashboards and visualizations" + ("" if llm else " (no LLM)"))
+                try:
+                    explainer = None
+                    if llm:
+                        from supagent.llm import LLM
+
+                        explainer = LLM()
+                    osd_pages_, osd_keep, done_o = OP.pages(explainer=explainer,
+                                                            budget=int(settings.get("osd.max_llm_calls") or 0))
+                    grafana_keep |= osd_keep
+                    steps.end(**{k: v for k, v in done_o.items() if not isinstance(v, dict)})
+                except LearningStopped:
+                    raise
+                except Exception as ex:  # pylint: disable=broad-except   (its pages are kept as they are)
+                    db.session.rollback()
+                    osd_pages_ = []
+                    grafana_keep |= {(p.section, p.slug) for p in db.session.query(ContextPage).filter(
+                        ContextPage.slug.like(OP.PREFIX + "%"))}
+                    steps.end(error=f"{type(ex).__name__}: {str(ex)[:300]}")
+            grafana = grafana + osd_pages_
+            keep: set[tuple[str, str]] = set(grafana_keep)
             steps.begin("facts pages (no LLM)")
             done: dict[str, int] = defaultdict(int)
             understood: list[dict[str, Any]] = []
@@ -804,7 +860,7 @@ def build_context(reason: str = "manual", llm: bool = True, force: bool = False)
                     log.warning("supagent context: the systems' pages", exc_info=True)
             from supagent.knowledge.llm_context import pages as llm_pages   # (0.10.9.1) the LLM context, its
             #                                                                 full and its light version
-            for page in fact_pages(ev) + boards + understood + systems + llm_pages(ev):
+            for page in fact_pages(ev) + boards + grafana + understood + systems + llm_pages(ev):
                 check()
                 keep.add((page["section"], page["slug"]))
                 done[save_page(page, "facts", _hash([page["title"], page["content"], page["database_ids"]]))] += 1
@@ -950,12 +1006,48 @@ def context_due(now: dt.datetime | None = None) -> bool:
 # who sees what
 # --------------------------------------------------------------------------- #
 def visible_pages() -> list[ContextPage]:
-    """The pages the current user may read: every database of a page must be one they may query."""
+    """The pages the current user may read: every database of a page must be one they may query; (0.10.10) a page of
+    the team's Grafana, a user grafana.roles allows; of its OpenSearch Dashboards, a user osd.roles allows."""
     from supagent.security import visible_databases
 
     dbs = visible_databases()
+    grafana = _grafana_readable()
+    osd = _osd_readable()
     return [p for p in db.session.query(ContextPage).order_by(ContextPage.section, ContextPage.title)
-            if set(p.database_ids or []) <= dbs and p.kind != REJECTED]
+            if set(p.database_ids or []) <= dbs and p.kind != REJECTED
+            and (grafana or not (p.slug or "").startswith("grafana-"))
+            and (osd or not (p.slug or "").startswith("osd-"))]
+
+
+def _grafana_readable() -> bool:
+    from flask import g
+
+    from supagent import grafana as G
+
+    try:
+        return G.allowed(getattr(g, "user", None))
+    except Exception:  # pylint: disable=broad-except
+        return False
+
+
+def _osd_readable() -> bool:
+    from flask import g
+
+    from supagent import osd
+
+    try:
+        return osd.allowed(getattr(g, "user", None))
+    except Exception:  # pylint: disable=broad-except
+        return False
+
+
+def hidden_from_user(page: Any) -> bool:
+    """(0.10.10) A page of the team's Grafana for a user grafana.roles does not allow, of its OpenSearch Dashboards
+    for a user osd.roles does not allow (every path that shows a page's content: the Context, To review, the diff,
+    the map's hints)."""
+    slug = getattr(page, "slug", "") or ""
+    return (slug.startswith("grafana-") and not _grafana_readable()) or (slug.startswith("osd-") and
+                                                                         not _osd_readable())
 
 
 # --------------------------------------------------------------------------- #
@@ -970,6 +1062,8 @@ CHAPTERS = (   # (part, chapter title, the slugs it takes: exact, or a prefix en
     ("technical", "Inventories", ("inventory-",)),
     ("technical", "Links between data sources", ("links-",)),
     ("technical", "Dashboards", ("dashboard-", "dashboards")),
+    ("technical", "Grafana", ("grafana-",)),
+    ("technical", "OpenSearch Dashboards", ("osd-",)),
 )
 PARTS = (("functional", "Functional"), ("technical", "Technical"))
 RELATED = 5               # related pages listed per page at most

@@ -94,3 +94,61 @@ def test_roles_and_pieces(configured):
     configured["mcp.servers"][0]["roles"] = ["Admin"]
     mcp_sources._CACHE.clear()
     assert mcp_sources.specs("alice") == [] and len(mcp_sources.specs("admin")) == 2
+
+
+@pytest.fixture(scope="module")
+def grafana_like_server():
+    """An MCP server with the tools of a Grafana MCP server (invented answers)."""
+    from fastmcp import FastMCP
+
+    mcp = FastMCP("zqx-dashboards")
+
+    @mcp.tool
+    def search_dashboards(query: str = "") -> list:
+        """Search dashboards."""
+        return []
+
+    @mcp.tool
+    def get_dashboard_by_uid(uid: str) -> dict:
+        """A dashboard."""
+        return {}
+
+    @mcp.tool
+    def alerting_rules_write(operation: str, rule_uid: str = "") -> str:
+        """Create, update, and delete alert rules."""
+        return f"{operation} {rule_uid}"
+
+    port = _free_port()
+    t = threading.Thread(target=lambda: mcp.run(transport="http", host="127.0.0.1", port=port, show_banner=False),
+                         daemon=True)
+    t.start()
+    for _ in range(100):
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            break
+        except OSError:
+            time.sleep(0.1)
+    yield port
+
+
+def test_a_grafana_mcp_server_is_never_offered_whole(ctx, tickets_server, grafana_like_server, monkeypatch):
+    """(0.10.10) Registered as a source under another spelling of grafana.mcp_url, or under an address of its own: its
+    tools (deletes too) are not offered; the other sources are."""
+    from supagent import mcp_sources, settings
+
+    port = grafana_like_server
+    conf = {"grafana.mcp_url": f"http://127.0.0.1:{port}/mcp",
+            "mcp.servers": [{"name": "dash", "transport": "streamable_http", "url": f"HTTP://LOCALHOST:{port}/mcp/"},
+                            {"name": "tickets", "transport": "streamable_http", "url": tickets_server}]}
+    real = settings.get
+    monkeypatch.setattr(settings, "get", lambda key: conf[key] if key in conf else real(key))
+    mcp_sources._CACHE.clear()
+    try:
+        assert [s["name"] for s in mcp_sources.servers()] == ["tickets"]          # the same address, spelled otherwise
+        conf["grafana.mcp_url"] = ""                                                # not the configured one: its tools
+        names = sorted(s["function"]["name"] for s in mcp_sources.specs("admin"))  # give it away
+        assert names == ["tickets_close_ticket", "tickets_count_tickets"]
+        assert mcp_sources.call("admin", "dash_alerting_rules_write", {"operation": "delete"}).startswith(
+            "tool error: unknown MCP tool")
+    finally:
+        mcp_sources._CACHE.clear()

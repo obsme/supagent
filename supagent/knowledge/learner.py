@@ -446,6 +446,32 @@ def _run_learning(reason: str, databases: list[str] | None, llm: bool, max_minut
                         stats["seeded"] = {"error": str(ex)[:300]}
                     steps.end(**_flat(stats["seeded"]))
                     stats.update(_from_data(steps, 240.0))
+                from supagent.knowledge import grafana_pages
+
+                if grafana_pages.enabled() and settings.get("grafana.learn"):    # (0.10.10) the team's Grafana:
+                    check(force=True)                                          # its dashboards (explained) and rules
+                    steps.begin("Grafana: dashboards, panels and alert rules")
+                    try:
+                        stats["grafana"] = grafana_pages.refresh(llm=llm, deadline=llm_deadline)
+                    except LearningStopped:
+                        raise
+                    except Exception as ex:  # pylint: disable=broad-except   (the rest of the learning goes on)
+                        db.session.rollback()
+                        stats["grafana"] = {"error": f"{type(ex).__name__}: {str(ex)[:300]}"}
+                    steps.end(**_flat(stats["grafana"]))
+                from supagent.knowledge import osd_pages
+
+                if osd_pages.enabled() and settings.get("osd.learn"):            # (0.10.10) the team's OpenSearch
+                    check(force=True)                                          # Dashboards: its dashboards explained
+                    steps.begin("OpenSearch Dashboards: dashboards and visualizations")
+                    try:
+                        stats["osd"] = osd_pages.refresh(llm=llm, deadline=llm_deadline)
+                    except LearningStopped:
+                        raise
+                    except Exception as ex:  # pylint: disable=broad-except   (the rest of the learning goes on)
+                        db.session.rollback()
+                        stats["osd"] = {"error": f"{type(ex).__name__}: {str(ex)[:300]}"}
+                    steps.end(**_flat(stats["osd"]))
                 check(force=True)
                 steps.begin("search index and embeddings")
                 stats["index"] = index_knowledge()

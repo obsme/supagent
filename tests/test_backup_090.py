@@ -54,7 +54,7 @@ def test_a_backup_holds_every_part_and_no_secret(knowledge):
     assert set(parts) == {"categories", "catalog", "memory", "documents", "notes", "context", "learned", "dictionary", "settings"}
     # (0.9.6: the four "part of" of the fixture are links too: 4 interactions + 4 parts)
     assert parts["categories"]["supagent_facet"] == 8 and parts["categories"]["supagent_link"] == 8
-    assert parts["documents"] == {"supagent_doc": 1} and parts["memory"] == {"supagent_memory": 1}
+    assert parts["documents"] == {"supagent_doc": 1, "supagent_dash_item": 0} and parts["memory"] == {"supagent_memory": 1}
     with zipfile.ZipFile(out["path"]) as z:
         everything = b"".join(z.read(n) for n in z.namelist())
         manifest = json.loads(z.read("manifest.json"))

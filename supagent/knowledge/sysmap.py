@@ -955,6 +955,7 @@ def map_data(admin: bool) -> dict[str, Any]:
     facets = {f.id: f for f in db.session.query(Facet).filter(Facet.id.in_([v["id"] for v in values] or [-1]))}
     found = hints({fid: f for fid, f in facets.items()})
     pages_ok = None
+    grafana_hidden: set[str] | None = None
     for v in values:
         f = facets.get(v["id"])
         v["origins"] = list((f.origins or []) if f is not None else [])[-3:]
@@ -966,12 +967,19 @@ def map_data(admin: bool) -> dict[str, Any]:
         v["hint"] = None
         if not (v.get("description") or "").strip():
             for ref, title, sentence in found.get(v["id"], []):
-                if not admin and ref.startswith("context:"):
+                if ref.startswith("context:") and (not admin or grafana_hidden is None or grafana_hidden):
                     if pages_ok is None:
-                        from supagent.knowledge.context import visible_pages
+                        from supagent.knowledge.context import _grafana_readable, _osd_readable, visible_pages
+                        from supagent.models import ContextPage
 
                         pages_ok = {f"context:{p.id}" for p in visible_pages()}
-                    if ref.split("#", 1)[0] not in pages_ok:
+                        grafana_hidden = set() if _grafana_readable() else {     # (0.10.10) grafana.roles: an
+                            f"context:{i}" for (i,) in db.session.query(ContextPage.id).filter(   # editor's map too
+                                ContextPage.slug.like("grafana-%"))}
+                        if not _osd_readable():                                  # osd.roles too
+                            grafana_hidden |= {f"context:{i}" for (i,) in db.session.query(ContextPage.id).filter(
+                                ContextPage.slug.like("osd-%"))}
+                    if (not admin and ref.split("#", 1)[0] not in pages_ok) or ref.split("#", 1)[0] in grafana_hidden:
                         continue
                 v["hint"] = {"text": sentence, "from": title, "ref": ref.split("#", 1)[0]}
                 break

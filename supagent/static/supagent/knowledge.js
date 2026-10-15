@@ -266,6 +266,7 @@
     ["routes", "Kinds of work learned from the chats", "Already used as examples by the router; set the right kind, or remove a wrong one."],
     ["fields", "Where the categories are in the data", "Labels and fields that hold several values of a category and are not read for it yet (0.10.2). Read it: the agent knows where the category is in the data, and the next learning proposes the label's other values as values of the category (here, to approve). Set aside: not proposed again."],
     ["warnings", "What could confuse the agent or the search", "Found in the knowledge each time this page is read (0.10.2): one name for two things (or a proposal naming a value of another category), one thing written two ways, the System map in a circle, documents holding the same pages, a term defined twice. Each says why and what to do; Set aside: not said again."],
+    ["grafana", "Alert rules and dashboards drafted for Grafana", "Drafted by the agent from a rule the team wrote (team memory, catalog) or asked in a chat (0.10.10). Grafana has nothing until you approve (with grafana.writes on): an alert rule is created in the folder of the settings (grafana.alert_folder), a dashboard in the folder of Browse its draft names (the folders whose dashboards are about the same things are shown), then read back. An existing rule or dashboard is never changed. Reject keeps it rejected."],
     ["context", "Context pages written by the agent", "The nightly Context build proposes each change of a page (and the removal of a page whose subject is gone): the page shown stays as it is until you approve. A newer change of the same page replaces the one you did not review yet; what that one said and this one no longer does is listed, so nothing is lost silently. A new page is shown at once and listed here until someone has read it."]
   ];
   var TITLES = {};
@@ -379,12 +380,47 @@
     return box;
   }
 
-  function bulk(label, key, items, fn, reject) {   // "Approve all shown" (or reject): a second click confirms
+  function newPage(pg) { return pg.what === "new" && !pg.rejected_before; }   // a Context page nobody read yet
+
+  function grafanaDashboard(x, sp, pv) {   // (0.10.10) a dashboard drafted for Grafana, shown as it will be written
+    var fits = pv["where it fits"] || [], d = sp.dashboard || {};
+    var rows = [
+      el("div", { class: "rtext" }, [el("strong", { text: d.title || sp.title || x.title }), document.createTextNode(" · a new dashboard")]),
+      el("div", { class: "muted", text: "Folder in Browse: " + (pv.folder || sp.folder || sp.folder_uid || "?") +
+        (fits.length ? (pv["fits best"] ? " (where its dashboards are about the same things)" :
+          " · the folder whose dashboards are about the same things: " + fits[0].folder) : "") }),
+      el("div", { class: "muted", text: "Time: from " + ((d.time || {}).from || "?") + " · tags: " + (d.tags || []).join(", ") })];
+    if (d.description) rows.push(el("div", { class: "rtext small-note", text: "Description: " + d.description }));
+    (d.panels || []).forEach(function (p) {
+      var dfl = ((p.fieldConfig || {}).defaults) || {}, steps = ((dfl.thresholds || {}).steps || []).filter(function (t) { return t.value !== null && t.value !== undefined; });
+      rows.push(el("div", { class: "rtext small-note", text: p.title + " (" + p.type + (dfl.unit ? ", " + dfl.unit : "") +
+        (steps.length ? ", thresholds " + steps.map(function (t) { return t.color + " from " + t.value; }).join(", ") : "") + ")" +
+        (p.description ? " · description: " + p.description : "") }));
+      if (p.type === "text") rows.push(el("pre", { class: "query", text: (p.options || {}).content || "" }));
+      if (p.targets) rows.push(el("pre", { class: "query", text: p.targets.map(function (t) {
+        return t.expr + (t.legendFormat && t.legendFormat !== "__auto" ? "   [legend " + t.legendFormat + "]" : ""); }).join("\n") }));
+    });
+    if (fits.length) rows.push(el("div", { class: "muted", text: "Where it fits: " + fits.map(function (f) {
+      return f.folder + " (" + (f.shares || []).join(", ") + ")"; }).join(" · ") }));
+    if (x.source_text) rows.push(el("details", { class: "query" }, [el("summary", { text: "What the team wrote (" + x.source + ")" }), el("pre", { text: x.source_text })]));
+    return card(rows, [x.source, x.requested_by ? "asked by " + x.requested_by : "", S.when(x.requested_at)].filter(Boolean).join(" · "), [
+      act("Create in Grafana", "primary", "grafana", function () {
+        return S.admin("POST", "grafana/" + x.id, { decision: "approve", spec_hash: x.spec_hash }).then(function (r) {
+          return r.error ? r : { done: "created in " + (r.folder || "Grafana") + ((r.differences || []).length ?
+            " (read back with differences: " + r.differences.join("; ") + ")" : " and read back") }; }); }),
+      act("Reject", "", "grafana", function () {
+        return S.admin("POST", "grafana/" + x.id, { decision: "reject" }).then(function (r) { return r.error ? r : { done: "rejected" }; }); })]);
+  }
+
+
+  function bulk(label, key, items, fn, reject, opts) {   // "Approve all shown" (or reject): a second click confirms;
+    opts = opts || {};                                     // opts.pick: only those items (0.10.10), opts.detail: what it does
+    var chosen = opts.pick ? items.filter(opts.pick) : items;
     var box = el("span", { class: "rbulk" });
     var go = el("button", { type: "button", class: "btn small", text: label, onclick: function () {
-      S.confirm(go, label + ": the " + items.length + " shown?", { yes: (reject ? "Reject " : "Approve ") + items.length, no: "Cancel",
-        detail: reject ? "Each one is set aside and never proposed again; you can still add it by hand." :
-          "Each one is used by the agent at once; you can still change or retire them in Categories." }).then(function (ok) {
+      S.confirm(go, label + ": the " + chosen.length + " shown?", { yes: (reject ? "Reject " : "Approve ") + chosen.length, no: "Cancel",
+        detail: opts.detail || (reject ? "Each one is set aside and never proposed again; you can still add it by hand." :
+          "Each one is used by the agent at once; you can still change or retire them in Categories.") }).then(function (ok) {
         if (ok) all();
       });
     } });
@@ -394,7 +430,7 @@
       var chain = Promise.resolve(), n = 0;
       items.forEach(function (it, i) {
         var c = cards[i];
-        if (!c || c.classList.contains("done")) return;           // already decided one by one
+        if (!c || c.classList.contains("done") || (opts.pick && !opts.pick(it))) return;   // decided one by one, or not picked
         chain = chain.then(function () { return fn(it); }).then(function (r) {
           if (r && r.error) return;
           c.classList.add("done", "leaving"); c._acts.innerHTML = ""; c._acts.appendChild(el("span", { class: "rdone", text: reject ? "rejected" : "approved" }));
@@ -698,6 +734,29 @@
                 return S.admin("POST", "fields/decide", { category: x.category, name: x.name, read: false }).then(function (r) {
                   return r.error ? r : { done: "set aside: not proposed again" }; }); })]));
         }),
+        group("grafana", d.grafana || [], function (x) {         // (0.10.10) an alert rule for Grafana: an admin's
+          var sp = x.spec || {}, pv = x.preview || {};
+          if (x.kind === "create_dashboard") return grafanaDashboard(x, sp, pv);   // or a dashboard
+          var now = Array.isArray(pv["value now"]) ? pv["value now"].join(", ") : (pv["value now"] || "?");
+          var fires = pv["would fire now"] === true ? " (it would fire now)" : pv["would fire now"] === false ? " (it would not fire now)" : "";
+          var rows = [
+            el("div", { class: "rtext" }, [el("strong", { text: sp.title || x.title })]),
+            el("pre", { class: "query", text: (sp.query || "") + "\n" + (sp.operator === "lt" ? "< " : "> ") + sp.threshold + " for " + (sp.for || "") }),
+            el("div", { class: "muted", text: "Labels: " + Object.keys(sp.labels || {}).map(function (k) { return k + "=" + sp.labels[k]; }).join(", ") +
+              " · folder " + (sp.folder_uid || "") + ", group " + (sp.rule_group || "") }),
+            el("div", { class: "muted", text: "Value now: " + now + fires + (pv.notified ? " · notified: " + pv.notified.join(", ") : "") })];
+          var ann = sp.annotations || {};                    // every text written with the rule (0.10.10)
+          if (ann.summary) rows.push(el("div", { class: "rtext small-note", text: "Summary: " + ann.summary }));
+          if (ann.description) rows.push(el("div", { class: "rtext small-note", text: "Description: " + ann.description }));
+          if (ann.runbook_url) rows.push(el("div", { class: "rtext small-note", text: "Runbook: " + ann.runbook_url }));
+          if (x.source_text) rows.push(el("details", { class: "query" }, [el("summary", { text: "The rule as the team wrote it (" + x.source + ")" }), el("pre", { text: x.source_text })]));
+          return card(rows, [x.source, x.requested_by ? "asked by " + x.requested_by : "", S.when(x.requested_at)].filter(Boolean).join(" · "), [
+            act("Create in Grafana", "primary", "grafana", function () {
+              return S.admin("POST", "grafana/" + x.id, { decision: "approve", spec_hash: x.spec_hash }).then(function (r) {
+                return r.error ? r : { done: "created in Grafana" + ((r.differences || []).length ? " (read back with differences: " + r.differences.join("; ") + ")" : " and read back") }; }); }),
+            act("Reject", "", "grafana", function () {
+              return S.admin("POST", "grafana/" + x.id, { decision: "reject" }).then(function (r) { return r.error ? r : { done: "rejected" }; }); })]);
+        }),
         group("warnings", d.warnings || [], function (w) {
           return card([el("div", { class: "rtext" }, [el("span", { class: "facet-chip", text: w.subject })]),
                        el("div", { class: "muted", text: "Why: " + w.why }),
@@ -793,7 +852,9 @@
           }));
           return card(main, "version " + pg.version + (pg.proposed_at ? " \u00b7 proposed " + S.when(pg.proposed_at) : "") +
             (pg.replaced ? " \u00b7 replaces " + pg.replaced + " earlier proposal" + (pg.replaced > 1 ? "s" : "") : ""), acts);
-        })
+        }, (d.context || []).filter(newPage).length > 1 ? { bulk: bulk("Read: fine, all new pages shown", "context",   // (0.10.10)
+          d.context || [], function (pg) { return S.admin("POST", "context/" + pg.id + "/review", { action: "approve" }); }, false,
+          { pick: newPage, detail: "Each new page stays as it is (the agent reads it already); you can still edit or reject it later in the Context." }) } : null)
       ];
       parts.forEach(function (p) { if (p) box.appendChild(p); });
     });
@@ -1294,6 +1355,250 @@
       if (!(d.docs || []).length) tb.appendChild(D.emptyRow(8, "No document yet."));
     });
   }
+  // ------------------------------------------------------------------ (0.10.10) Dashboards and visualizations
+  /* The dashboards of Grafana and OpenSearch Dashboards with their panels or visualizations, and which of them the
+     agent reads: each one switched on or off (an admin's), all off then the needed ones on, the last modified date to
+     choose from. A switch saves at once; the pages of a dashboard switched off leave the Context and the search. */
+  var DASH = { source: null, q: "", kind: "dashboard", state: "", sort: "updated", rows: [], total: 0, sources: [],
+               can: false, poll: null, qTimer: null };
+  var DASH_PAGE = 200;
+  var KID_NAMES = { grafana: ["panel", "panels"], osd: ["visualization", "visualizations"] };
+  function dashSource() { return DASH.sources.filter(function (x) { return x.source === DASH.source; })[0]; }
+  function dashKid(n) { var k = KID_NAMES[DASH.source] || ["item", "items"]; return n === 1 ? k[0] : k[1]; }
+  function dashLoad() {
+    var box = $("dash");
+    if (!box) return null;
+    return S.admin("GET", "dashlist").then(function (d) {
+      if (!d || d.error) { box.innerHTML = ""; box.appendChild(el("div", { class: "result bad", text: (d && d.error) || "not read" })); return; }
+      DASH.can = !!d.can_change;
+      DASH.sources = d.sources || [];
+      var known = DASH.sources.filter(function (x) { return x.source === DASH.source; }).length;
+      if (!known) {
+        var set = DASH.sources.filter(function (x) { return x.configured || x.dashboards; });
+        DASH.source = (set[0] || DASH.sources[0] || {}).source || null;
+      }
+      dashRender();
+    });
+  }
+  function dashPollJob() {
+    clearTimeout(DASH.poll);
+    DASH.poll = setTimeout(function () {
+      S.admin("GET", "dashlist").then(function (d) {
+        if (!d || d.error) return;
+        DASH.sources = d.sources || DASH.sources;
+        var s = dashSource();
+        if (s && s.job && s.job.running) { dashHead(); dashPollJob(); } else { dashRender(); }
+      });
+    }, 3000);
+  }
+  function dashRender() {
+    var box = $("dash");
+    box.innerHTML = "";
+    if (!DASH.sources.length) return;
+    box.appendChild(el("div", { class: "dash-tabs", role: "tablist", "aria-label": "Source" }, DASH.sources.map(function (x) {
+      var on = x.source === DASH.source;
+      return el("button", { type: "button", role: "tab", class: "btn small" + (on ? " on" : ""), "aria-selected": on ? "true" : "false",
+        text: x.name + (x.dashboards ? " · " + S.num(x.dashboards_read) + " of " + S.num(x.dashboards) + " read" : ""),
+        onclick: function () { if (on) return; DASH.source = x.source; DASH.q = ""; DASH.kind = "dashboard"; DASH.state = ""; dashRender(); } });
+    })));
+    box.appendChild(el("div", { id: "dash-head", class: "dash-head" }));
+    box.appendChild(el("div", { id: "dash-body" }));
+    dashHead();
+    dashBody();
+  }
+  function dashHead() {
+    var head = $("dash-head"), s = dashSource();
+    if (!head || !s) return;
+    head.innerHTML = "";
+    var job = s.job || {};
+    var said = [];
+    if (s.url) said.push(s.url);
+    said.push(s.listed_at ? "listed " + S.when(s.listed_at) : "not listed yet");
+    if (s.dashboards) said.push(S.num(s.dashboards_read) + " of " + S.num(s.dashboards) + " dashboards read · " + S.num(s.kids_read) + " of " + S.num(s.kids) + " " + s.kid + " read");
+    if (s.gone) said.push(S.num(s.gone) + " gone from " + s.name);
+    head.appendChild(el("div", { class: "muted", text: said.join(" · ") }));
+    if (!s.configured) {
+      head.appendChild(el("div", { class: "result warn", text: s.name + " is not set up: " + (s.source === "grafana" ?
+        "grafana.mcp_url (its MCP server)" : "osd.url and its sign-in (osd.auth, osd.user, osd.secret)") + " in Settings." }));
+    }
+    if (job.running) {
+      head.appendChild(el("div", { class: "result", role: "status", text: (job.what === "list" ? "Listing" : "Writing the pages") + " since " + S.when(job.started) + "…" }));
+    } else if (job.error) {
+      head.appendChild(el("div", { class: "result bad", text: "Last " + (job.what === "list" ? "listing" : "writing") + ": " + job.error }));
+    }
+    if (!DASH.can) return;
+    var res = el("span", { class: "result", role: "status" });
+    var listNow = el("button", { type: "button", class: "btn small", text: "List now", disabled: !s.configured || job.running ? "disabled" : null,
+      title: "Read the list again from " + s.name + " (no AI, no page written)",
+      onclick: function () {
+        listNow.disabled = true;
+        S.admin("POST", "dashlist/" + s.source + "/list", {}).then(function (r) {
+          result(res, r, "listing…");
+          if (!r.error) { s.job = { running: true, what: "list", started: new Date().toISOString() }; dashHead(); dashPollJob(); }
+          else listNow.disabled = false;
+        });
+      } });
+    var all = function (on) {
+      return function () {
+        S.admin("POST", "dashlist/" + s.source + "/all", { active: on }).then(function (r) {
+          result(res, r, on ? "all read: their pages are written now" : "none read: " + S.num(r.pages_removed || 0) + " page" + (r.pages_removed === 1 ? "" : "s") + " left the Context");
+          if (!r.error) { saved(); dashLoad(); }
+        });
+      };
+    };
+    var offAll = sureButton("Deactivate all", all(false), "Deactivate every dashboard of " + s.name + "?",
+      "The agent stops reading them: their pages leave the Context and the search now, and new dashboards wait until someone activates them. Activate the ones needed after.", "Deactivate all");
+    var onAll = sureButton("Activate all", all(true), "Activate every dashboard of " + s.name + "?",
+      "The agent reads them all again (their pages are written in the background), and new dashboards too.", "Activate all");
+    var nw = el("select", { "aria-label": "New dashboards" }, [["1", "New ones: read"], ["0", "New ones: not read until activated"]].map(function (o) {
+      return el("option", { value: o[0], text: o[1], selected: (s.read_new ? "1" : "0") === o[0] ? "selected" : null }); }));
+    nw.addEventListener("change", function () {
+      S.admin("POST", "dashlist/" + s.source + "/default", { active: nw.value === "1" }).then(function (r) {
+        result(res, r, nw.value === "1" ? "new ones are read" : "new ones wait until activated");
+        if (!r.error) s.read_new = nw.value === "1";
+      });
+    });
+    head.appendChild(el("div", { class: "actions" }, [listNow, offAll, onAll, nw, res]));
+  }
+  function dashBody() {
+    var body = $("dash-body"), s = dashSource();
+    if (!body || !s) return;
+    body.innerHTML = "";
+    var q = el("input", { type: "search", "aria-label": "Search the dashboards", placeholder: "Search a title, a folder, a type" });
+    q.value = DASH.q;
+    var kind = el("select", { "aria-label": "Show" }, [["dashboard", "Dashboards"], ["kids", s.source === "grafana" ? "Panels" : "Visualizations and saved searches"]].map(function (o) {
+      return el("option", { value: o[0], text: o[1], selected: DASH.kind === o[0] ? "selected" : null }); }));
+    var state = el("select", { "aria-label": "Read or not" }, [["", "Read or not"], ["read", "Read by the agent"], ["unread", "Not read"]].map(function (o) {
+      return el("option", { value: o[0], text: o[1], selected: DASH.state === o[0] ? "selected" : null }); }));
+    var sort = el("select", { "aria-label": "Sort" }, [["updated", "Last modified first"], ["title", "By title"], ["folder", s.source === "grafana" ? "By folder" : "By index pattern"]].map(function (o) {
+      return el("option", { value: o[0], text: o[1], selected: DASH.sort === o[0] ? "selected" : null }); }));
+    var reload = function () { DASH.q = q.value; DASH.kind = kind.value; DASH.state = state.value; DASH.sort = sort.value; dashRows(false); };
+    q.addEventListener("input", function () { clearTimeout(DASH.qTimer); DASH.qTimer = setTimeout(reload, 300); });
+    [kind, state, sort].forEach(function (x) { x.addEventListener("change", reload); });
+    body.appendChild(el("div", { class: "filters" }, [q, kind, state, sort]));
+    body.appendChild(el("div", { id: "dash-bulk", class: "actions" }));
+    var table = el("table", { class: "grid compact", id: "dash-table" }, [el("thead", {}, [el("tr", {})]), el("tbody", {})]);
+    body.appendChild(el("div", { class: "table-wrap" }, [table]));
+    body.appendChild(el("div", { id: "dash-more" }));
+    dashRows(false);
+  }
+  function dashRows(more) {
+    var s = dashSource(), tb = document.querySelector("#dash-table tbody"), th = document.querySelector("#dash-table thead tr");
+    if (!s || !tb) return;
+    var offset = more ? DASH.rows.length : 0;
+    var path = "dashlist/" + s.source + "?kind=" + encodeURIComponent(DASH.kind) + "&q=" + encodeURIComponent(DASH.q) +
+      "&state=" + encodeURIComponent(DASH.state) + "&sort=" + encodeURIComponent(DASH.sort) + "&offset=" + offset + "&limit=" + DASH_PAGE;
+    S.admin("GET", path).then(function (d) {
+      if (!d || d.error) { tb.innerHTML = ""; tb.appendChild(D.emptyRow(6, (d && d.error) || "not read")); return; }
+      var boards = DASH.kind === "dashboard";
+      th.innerHTML = "";
+      (boards ? ["Read", "Dashboard", s.source === "grafana" ? "Folder" : "Index patterns", s.kid.charAt(0).toUpperCase() + s.kid.slice(1), "Last modified"]
+              : ["Read", s.source === "grafana" ? "Panel" : "Visualization", "Type", s.source === "grafana" ? "Dashboard" : "On dashboards", "Last modified"]).forEach(function (h) {
+        th.appendChild(el("th", { text: h })); });
+      if (!more) { tb.innerHTML = ""; DASH.rows = []; }
+      DASH.total = d.total || 0;
+      (d.rows || []).forEach(function (x) { DASH.rows.push(x); tb.appendChild(dashRow(x, boards)); });
+      if (!DASH.rows.length) tb.appendChild(D.emptyRow(5, s.listed_at ? "Nothing matches." : "Not listed yet: List now (or the next learning) reads the list."));
+      var left = DASH.total - DASH.rows.length;
+      var moreBox = $("dash-more");
+      moreBox.innerHTML = "";
+      if (left > 0) moreBox.appendChild(el("button", { type: "button", class: "btn small", text: "Show " + S.num(Math.min(left, DASH_PAGE)) + " more (" + S.num(left) + " left)",
+        onclick: function () { dashRows(true); } }));
+      dashBulk();
+    });
+  }
+  function dashBulk() {
+    var box = $("dash-bulk"), s = dashSource();
+    if (!box || !s) return;
+    box.innerHTML = "";
+    if (!DASH.can || !DASH.total) return;
+    var what = DASH.kind === "dashboard" ? "dashboard" + (DASH.total === 1 ? "" : "s") : dashKid(DASH.total);
+    var res = el("span", { class: "result", role: "status" });
+    var go = function (on) {
+      return function () {
+        S.admin("POST", "dashlist/" + s.source + "/matching", { active: on, q: DASH.q, kind: DASH.kind, state: DASH.state }).then(function (r) {
+          result(res, r, (on ? "read: " : "not read: ") + S.num(r.items || 0) + " " + what + (r.cascaded ? " (and " + S.num(r.cascaded) + " of their " + dashKid(2) + ")" : ""));
+          if (!r.error) { saved(); dashLoad(); }
+        });
+      };
+    };
+    box.appendChild(el("span", { class: "muted", text: S.num(DASH.total) + " " + what + " shown:" }));
+    box.appendChild(el("button", { type: "button", class: "btn small", text: "Activate the " + S.num(DASH.total) + " shown", onclick: go(true) }));
+    box.appendChild(el("button", { type: "button", class: "btn small", text: "Deactivate the " + S.num(DASH.total) + " shown", onclick: go(false) }));
+    box.appendChild(res);
+  }
+  /* one row: its switch (an admin's), its title and link, where it is, its panels (a dashboard: shown under it on a
+     click), when it was last modified and by whom */
+  function dashRow(x, boards) {
+    var s = dashSource();
+    var tr = el("tr", { class: x.read ? "" : "dash-off" });
+    var box = el("input", { type: "checkbox", "aria-label": "Read by the agent: " + (x.title || x.ref) });
+    box.checked = !!x.active;
+    box.disabled = !DASH.can;
+    var note = el("div", { class: "muted small-note" });
+    if (x.active && !x.read && x.kind === "panel") note.textContent = "its dashboard is not read";
+    box.addEventListener("change", function () {
+      var on = box.checked;
+      box.disabled = true;
+      S.admin("POST", "dashlist/" + s.source + "/set", { ids: [x.id], active: on }).then(function (r) {
+        box.disabled = !DASH.can;
+        if (!r || r.error) { box.checked = !on; note.textContent = (r && r.error) || "not saved"; note.className = "result bad"; return; }
+        x.active = on;
+        x.read = on && !(x.kind === "panel" && note.textContent);
+        tr.className = x.read ? "" : "dash-off";
+        note.className = "muted small-note";
+        note.textContent = on ? "read: its page is written now" + (r.cascaded ? " (and " + S.num(r.cascaded) + " " + dashKid(r.cascaded) + ")" : "")
+                              : "not read" + (r.pages_removed ? ": its page left the Context" : "") + (r.cascaded ? " (and " + S.num(r.cascaded) + " " + dashKid(r.cascaded) + ")" : "");
+        saved();
+        S.admin("GET", "dashlist").then(function (d) { if (d && !d.error) { DASH.sources = d.sources || DASH.sources; dashTabsCount(); } });
+        var open = tr.nextSibling && tr.nextSibling.className === "dash-kids" ? tr.nextSibling : null;
+        if (open && x.kind === "dashboard") { open.remove(); dashKids(x, tr, null); }
+      });
+    });
+    var name = x.link ? el("a", { href: x.link, target: "_blank", rel: "noopener", text: x.title || x.ref }) : el("span", { text: x.title || x.ref });
+    var who = x.updated_by ? " by " + x.updated_by : "";
+    var cells = [el("td", {}, [box]), el("td", {}, [name, note])];
+    if (boards) {
+      cells.push(el("td", { class: "muted", text: x.folder || "" }));
+      var kids = x.children || 0;
+      cells.push(el("td", {}, [kids ? el("button", { type: "button", class: "linkish", text: S.num(kids) + " " + dashKid(kids), "aria-expanded": "false",
+        onclick: function () { dashKids(x, tr, this); } }) : el("span", { class: "muted", text: x.children === 0 ? "none" : "" })]));
+    } else {
+      cells.push(el("td", { class: "muted", text: x.type || "" }));
+      var on = (x.dashboards || []).map(function (b) { return b.title; });
+      if (!on.length && x.dashboard) on = [x.dashboard];
+      cells.push(el("td", { class: "muted", text: on.length ? on.slice(0, 3).join(", ") + (on.length > 3 ? " +" + (on.length - 3) : "") : (s.source === "osd" ? "on no dashboard" : "") }));
+    }
+    cells.push(el("td", { class: "muted", text: x.updated_at ? S.when(x.updated_at) + who : "" }));
+    cells.forEach(function (c) { tr.appendChild(c); });
+    return tr;
+  }
+  function dashTabsCount() {
+    var tabs = document.querySelectorAll("#dash .dash-tabs button");
+    DASH.sources.forEach(function (x, i) {
+      if (tabs[i]) tabs[i].textContent = x.name + (x.dashboards ? " · " + S.num(x.dashboards_read) + " of " + S.num(x.dashboards) + " read" : "");
+    });
+    dashHead();
+  }
+  function dashKids(x, tr, btn) {
+    var open = tr.nextSibling && tr.nextSibling.className === "dash-kids" ? tr.nextSibling : null;
+    if (open) { open.remove(); if (btn) btn.setAttribute("aria-expanded", "false"); return; }
+    var s = dashSource();
+    var cell = el("td", { colspan: "5" }, [el("div", { class: "muted", text: "Reading its " + dashKid(2) + "…" })]);
+    var row = el("tr", { class: "dash-kids" }, [cell]);
+    tr.after(row);
+    if (btn) btn.setAttribute("aria-expanded", "true");
+    S.admin("GET", "dashlist/" + s.source + "/children?ref=" + encodeURIComponent(x.ref)).then(function (d) {
+      cell.innerHTML = "";
+      if (!d || d.error) { cell.appendChild(el("div", { class: "result bad", text: (d && d.error) || "not read" })); return; }
+      var t = el("tbody", {});
+      (d.rows || []).forEach(function (k) { t.appendChild(dashRow(k, false)); });
+      if (!(d.rows || []).length) t.appendChild(D.emptyRow(5, "None listed."));
+      cell.appendChild(el("div", { class: "table-wrap" }, [el("table", { class: "grid compact" }, [el("thead", {}, [el("tr", {}, ["Read",
+        s.source === "grafana" ? "Panel" : "Visualization", "Type", s.source === "grafana" ? "Dashboard" : "On dashboards", "Last modified"].map(function (h) {
+          return el("th", { text: h }); }))]), t])]));
+    });
+  }
   if (admin) {
     var docAuth = function () {
       var t = $("doc-auth").value;
@@ -1645,7 +1950,7 @@
   });
   D.register("catalog", function () { catLoad(false); });
   D.register("memory", memLoad);
-  D.register("docs", docsLoad);
+  D.register("docs", function () { docsLoad(); if (admin) dashLoad(); });
   D.register("notes", notesLoad);
   D.register("categories", function () {
     return loadCategories().then(function () { return facetsLoad(); });

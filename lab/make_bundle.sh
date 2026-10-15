@@ -13,6 +13,7 @@ rm -rf build "$OUT" "$OUT.zip" dist/*.whl
 "$PY" lab/make_guide.py --out "$OUT"
 cp dist/supagent-$VER-py3-none-any.whl "$OUT/"
 cp examples/catalog.example.yaml INSTALL.txt "$OUT/"
-(cd "$OUT" && sha256sum * > SHA256SUMS)
+[ -n "${GRAFANA_WHEELS:-}" ] && cp -r "$GRAFANA_WHEELS" "$OUT/grafana-wheels"   # (0.10.10) mcp offline
+(cd "$OUT" && find . -type f ! -name SHA256SUMS | sed "s|^./||" | sort | xargs sha256sum > SHA256SUMS)
 (cd dist && "$PY" -c "import shutil; shutil.make_archive('supagent-$VER', 'zip', '.', 'supagent-$VER')")
 ls -la "$OUT" "$OUT.zip"

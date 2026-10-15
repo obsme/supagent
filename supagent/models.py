@@ -16,7 +16,7 @@ from superset.extensions import encrypted_field_factory
 
 from supagent.textsafe import SafeString, SafeText
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 20
 
 
 def _now() -> dt.datetime:
@@ -666,9 +666,64 @@ class KFact(db.Model):  # type: ignore[name-defined]
     confidence = sa.Column(sa.Float)
 
 
+class GrafanaAction(db.Model):  # type: ignore[name-defined]
+    """(0.10.10, schema 19) An alert rule or a dashboard drafted for Grafana. Never written by the agent: an admin
+    approves the draft in To review, then it is created in Grafana (a rule in the folder and group of the settings, a
+    dashboard in the folder the draft names) and read back. The spec's hash ties the approval to what was shown; the
+    UID comes from the draft's source (a team memory, a catalog entry) or its content, so that a second draft of the
+    same thing finds the first."""
+
+    __tablename__ = "supagent_grafana_action"
+    id = sa.Column(sa.Integer, primary_key=True)
+    kind = sa.Column(SafeString(16), default="create_rule")      # create_rule | create_dashboard
+    status = sa.Column(SafeString(16), default="proposed", index=True)   # proposed | created | failed | rejected
+    title = sa.Column(SafeString(190))
+    grafana_uid = sa.Column(SafeString(40), index=True)     # the rule's or the dashboard's UID in Grafana
+    spec = sa.Column(sa.JSON)                    # the typed rule or dashboard (what is written when approved)
+    spec_hash = sa.Column(SafeString(64))
+    source = sa.Column(SafeString(64), index=True)   # memory:<id> | catalog:<id> | chat
+    source_text = sa.Column(SafeText)            # the rule as the team wrote it
+    preview = sa.Column(sa.JSON)                 # the query's value when drafted, would it fire then, who is notified
+    requested_by = sa.Column(SafeString(255))
+    requested_at = sa.Column(sa.DateTime, default=_now)
+    decided_by = sa.Column(SafeString(255))
+    decided_at = sa.Column(sa.DateTime)
+    result = sa.Column(sa.JSON)                  # the created rule read back, or the error
+
+
+class DashItem(db.Model):  # type: ignore[name-defined]
+    """(0.10.10, schema 20) A dashboard, a panel or a visualization of the team's Grafana or OpenSearch Dashboards, as
+    last listed (Documents and sites), and whether the agent reads it. Not read (active False): no Context page, no
+    explanation, left out of the search, of the agent's tools and of the panels watched. A Grafana panel is read when
+    it and its dashboard are; an OpenSearch Dashboards visualization (one object, on any number of dashboards) when it
+    is. A new item takes its source's default (dashlist.new_active). The flags outlive the listings: an item gone
+    from its source keeps its flag (gone_at) should it come back."""
+
+    __tablename__ = "supagent_dash_item"
+    __table_args__ = (sa.UniqueConstraint("source", "ref", name="uq_supagent_dash_item"),)
+    id = sa.Column(sa.Integer, primary_key=True)
+    source = sa.Column(SafeString(16), nullable=False, index=True)   # grafana | osd
+    kind = sa.Column(SafeString(16), nullable=False)          # dashboard | panel | visualization | search
+    ref = sa.Column(SafeString(255), nullable=False)          # Grafana: <dashboard UID>, <UID>/<panel id>; OSD: its id
+    parent = sa.Column(SafeString(190), index=True)           # a Grafana panel's dashboard UID
+    title = sa.Column(SafeString(255))
+    folder = sa.Column(SafeString(255))                       # Grafana: the folder's path; OSD: the index patterns
+    type = sa.Column(SafeString(64))                          # the panel's or the visualization's type
+    link = sa.Column(SafeString(1000))
+    parents = sa.Column(sa.JSON)                              # OSD: the ids of the dashboards that show it
+    children = sa.Column(sa.Integer)                          # a dashboard's panels or visualizations
+    updated_at = sa.Column(sa.DateTime)                       # last modified in its source
+    updated_by = sa.Column(SafeString(255))
+    active = sa.Column(sa.Boolean, default=True)
+    set_by = sa.Column(SafeString(255))                       # who set the flag last (empty: its source's default)
+    set_at = sa.Column(sa.DateTime)
+    seen_at = sa.Column(sa.DateTime)                          # last listed
+    gone_at = sa.Column(sa.DateTime)                          # no longer in its source
+
+
 TABLES = [Meta, Setting, Source, KObject, Relation, Run, Change, Conversation, Message, File, Example, Document,
           Entry, EntryVersion, Recipe, QueryStat, Memory, Doc, Chunk, Association, Usage, ContextPage, LLMCall,
-          Route, Facet, Tag, Link, Classified, ItemUse, Note, ChartScan, KUnit, KFact]
+          Route, Facet, Tag, Link, Classified, ItemUse, Note, ChartScan, KUnit, KFact, GrafanaAction, DashItem]
 
 
 def _add_missing_columns(engine: sa.engine.Engine) -> list[str]:

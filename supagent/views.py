@@ -1884,7 +1884,10 @@ class AdminView(BaseView):
         "approve_found": "edit", "merge_same": "delete", "set_facet": "edit", "set_tag": "edit", "set_link": "edit", "set_route": "edit",
         "delete_entry": "delete", "delete_doc": "delete",
         "context_proposals": "read", "context_review": "edit", "context_diff": "read", "lint_dismiss": "edit",
-        "fields_decide": "edit"}
+        "fields_decide": "edit", "grafana_decide": "write",   # (0.10.10) an alert rule for Grafana: an admin's
+        "dashlist_sources": "read", "dashlist_rows": "read", "dashlist_children": "read",   # (0.10.10) what the
+        "dashlist_set": "write", "dashlist_matching": "write", "dashlist_all": "write",     # agent reads of
+        "dashlist_default": "write", "dashlist_list_now": "write"}                         # the dashboards: an admin's
 
     # ---- team memory
     @expose("/api/memory", methods=("GET",))
@@ -2173,6 +2176,113 @@ class AdminView(BaseView):
         db.session.commit()
         _sync_chunks(f"doc:{doc_id}#")                   # (0.10.9.2) this document's pieces only
         return _json({"deleted": doc_id})
+
+    # ---- (0.10.10) the dashboards and visualizations of Grafana and OpenSearch Dashboards the agent reads
+    @expose("/api/dashlist", methods=("GET",))
+    @has_access_api
+    def dashlist_sources(self) -> Response:
+        """Each source: set up or not, its counts (read / all), when it was listed, its job, its default."""
+        from supagent import dashlist
+
+        return _json({"sources": [dashlist.summary(s) for s in dashlist.SOURCES], "can_change": _is_admin()})
+
+    @expose("/api/dashlist/<source>", methods=("GET",))
+    @has_access_api
+    def dashlist_rows(self, source: str) -> Response:
+        """A page of a source's list: ?kind=dashboard|kids &q= &state=read|unread &sort=updated|title|folder
+        &offset= &limit=."""
+        from supagent import dashlist
+
+        a = request.args
+        try:
+            return _json(dashlist.rows(source, q=a.get("q", ""), kind=a.get("kind", "dashboard"),
+                                       state=a.get("state", ""), sort=a.get("sort", "updated"),
+                                       offset=int(a.get("offset") or 0), limit=int(a.get("limit") or 200)))
+        except (dashlist.ListError, ValueError) as ex:
+            return _json({"error": str(ex)}, 400)
+
+    @expose("/api/dashlist/<source>/children", methods=("GET",))
+    @has_access_api
+    def dashlist_children(self, source: str) -> Response:
+        """A dashboard's panels (Grafana) or visualizations (OpenSearch Dashboards): ?ref=<its UID or id>."""
+        from supagent import dashlist
+
+        try:
+            return _json({"rows": dashlist.children(source, str(request.args.get("ref") or ""))})
+        except dashlist.ListError as ex:
+            return _json({"error": str(ex)}, 400)
+
+    def _dashlist_change(self, source: str, how: str) -> Response:
+        from supagent import dashlist
+
+        if not _is_admin():
+            return _json({"error": "only an admin decides what the agent reads"}, 403)
+        body = _body()
+        active = body.get("active")
+        if how != "list" and not isinstance(active, bool):
+            return _json({"error": "active: true or false"}, 400)
+        by = g.user.username
+        try:
+            if how == "list":
+                if not dashlist.configured(source):
+                    return _json({"error": f"{dashlist.NAMES.get(source, source)} is not set up (Settings)"}, 400)
+                if dashlist.job(source).get("running"):
+                    return _json({"listing": "already", "job": dashlist.job(source)})
+                from supagent.tasks import dispatch_dash
+
+                return _json({"listing": dispatch_dash(source, "list")})
+            if how == "set":
+                ids = body.get("ids")
+                if not isinstance(ids, list) or not ids or not all(isinstance(i, int) for i in ids):
+                    return _json({"error": "ids: a list of the items' ids"}, 400)
+                done = dashlist.set_active(source, ids, active, by)
+            elif how == "matching":
+                done = dashlist.set_matching(source, active, by, q=str(body.get("q") or ""),
+                                             kind=str(body.get("kind") or "dashboard"),
+                                             state=str(body.get("state") or ""))
+            elif how == "all":
+                done = dashlist.set_all(source, active, by)
+            else:
+                done = dashlist.set_default(source, active, by)
+        except dashlist.ListError as ex:
+            from superset import db
+
+            db.session.rollback()
+            return _json({"error": str(ex)}, 400)
+        if how != "default":
+            done.update(dashlist.pages_follow(source, done))
+        return _json(done)
+
+    @expose("/api/dashlist/<source>/set", methods=("POST",))
+    @has_access_api
+    def dashlist_set(self, source: str) -> Response:
+        """{"ids": [...], "active": true|false}: these items read or not (an OpenSearch Dashboards dashboard: with
+        its visualizations); their pages follow at once."""
+        return self._dashlist_change(source, "set")
+
+    @expose("/api/dashlist/<source>/matching", methods=("POST",))
+    @has_access_api
+    def dashlist_matching(self, source: str) -> Response:
+        """{"q", "kind", "state", "active"}: every item these filters show (all its pages) read or not."""
+        return self._dashlist_change(source, "matching")
+
+    @expose("/api/dashlist/<source>/all", methods=("POST",))
+    @has_access_api
+    def dashlist_all(self, source: str) -> Response:
+        """{"active": true|false}: everything of the source read or not, and its new items from now on."""
+        return self._dashlist_change(source, "all")
+
+    @expose("/api/dashlist/<source>/default", methods=("POST",))
+    @has_access_api
+    def dashlist_default(self, source: str) -> Response:
+        """{"active": true|false}: whether a new dashboard (or visualization) is read when it is first listed."""
+        return self._dashlist_change(source, "default")
+
+    @expose("/api/dashlist/<source>/list", methods=("POST",))
+    @has_access_api
+    def dashlist_list_now(self, source: str) -> Response:
+        """The list read now from the source, in the background (no LLM, no page)."""
+        return self._dashlist_change(source, "list")
     template_folder = os.path.join(HERE, "templates")
 
     @expose("/")
@@ -2660,13 +2770,48 @@ class AdminView(BaseView):
                   "values": val_q.count(), "relations": len(rel_all), "tags": tag_q.count(), "links": link_q.count(),
                   "removals": drop_q.count(), "retire": n_retire, "routes": route_q.count(), "context": len(pages),
                   "warnings": len(warns), "fields": len(fields)}
+        grafana: list = []                              # (0.10.10) alert rules drafted for Grafana, for an admin
+        try:
+            from supagent import grafana_rules
+
+            grafana = grafana_rules.pending(limit) if _is_admin() else []
+        except Exception:  # pylint: disable=broad-except   (no table yet: superset supagent init)
+            db.session.rollback()
+        counts["grafana"] = len(grafana)
         return _json({"memory": memories, "recipes": recipes, "values": values, "found": found, "same": same,
-                      "retire": retire,
+                      "retire": retire, "grafana": grafana,
                       "relations": relations, "tags": tags, "links": links, "removals": removals, "routes": routes,
                       "context": pages[:limit], "warnings": warns[:limit], "fields": fields[:limit], "counts": counts,
                       "can_delete": _can_delete(), "q": q,
                       "waiting": sum(counts[k] for k in ("memory", "recipes", "values", "relations", "tags", "links",
-                                                         "removals", "retire", "context", "warnings", "fields"))})
+                                                         "removals", "retire", "context", "warnings", "fields",
+                                                         "grafana"))})
+
+    @expose("/api/grafana/<int:action_id>", methods=("POST",))
+    @has_access_api
+    def grafana_decide(self, action_id: int) -> Response:
+        """(0.10.10) An admin's decision on an alert rule drafted for Grafana: {"decision": "approve"} creates it in
+        Grafana (grafana.writes on) and reads it back; {"decision": "reject", "why": ...} keeps it rejected."""
+        from supagent import grafana_rules
+
+        from supagent import grafana as G
+
+        if not _is_admin():
+            return _json({"error": "only an admin decides on what is drafted for Grafana"}, 403)
+        body = _body()
+        try:
+            if body.get("decision") == "approve":
+                shown = str(body.get("spec_hash") or "")
+                if not shown:
+                    return _json({"error": "spec_hash: the draft's hash as To review showed it"}, 400)
+                return _json(grafana_rules.approve(action_id, g.user.username, shown_hash=shown))
+            if body.get("decision") == "reject":
+                return _json(grafana_rules.reject(action_id, g.user.username, str(body.get("why") or "")))
+        except grafana_rules.RuleError as ex:
+            return _json({"error": str(ex)}, 400)
+        except G.GrafanaError as ex:                     # Grafana or its MCP server did not answer: nothing written
+            return _json({"error": f"Grafana: {ex}"}, 502)
+        return _json({"error": "decision: approve or reject"}, 400)
 
     @expose("/api/fields/decide", methods=("POST",))
     @has_access_api
@@ -3161,8 +3306,10 @@ class AdminView(BaseView):
         from supagent.knowledge.context import diff_rows
         from supagent.models import ContextPage
 
+        from supagent.knowledge.context import hidden_from_user
+
         p = db.session.get(ContextPage, page_id)
-        if p is None:
+        if p is None or hidden_from_user(p):
             abort(404)
         new = _body().get("content")
         if not isinstance(new, str) or len(new) > 200_000:
@@ -3175,11 +3322,13 @@ class AdminView(BaseView):
         """approve | reject the agent's proposal for a page (a removal approved: an admin's, as any deletion)."""
         from superset import db
 
-        from supagent.knowledge.context import review
+        from supagent.knowledge.context import hidden_from_user, review
         from supagent.models import ContextPage
 
         action = str(_body().get("action") or "")
         p = db.session.get(ContextPage, page_id)
+        if p is not None and hidden_from_user(p):
+            abort(404)                                   # (0.10.10) a Grafana page, not for this user's roles
         if p is not None and p.proposed_drop and action == "approve" and not _can_delete():
             return _json({"error": "removing a page is an admin's (AI Admin)"}, 403)
         body = _body()

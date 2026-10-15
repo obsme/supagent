@@ -92,6 +92,75 @@ SPECS: list[Spec] = [
     Spec("governed.use_datasets", True, "bool", "Governed pipeline: a query on a table that has a Superset dataset "
          "runs through the chart data API (the dataset's permissions and row-level security apply); else as "
          "execute_sql"),
+    # ---- (0.10.10) Grafana through its MCP server (mcp-grafana, streamable HTTP): dashboards, alert rules, alerts
+    Spec("grafana.mcp_url", "", "str", "The Grafana MCP server (mcp-grafana run with -t streamable-http), e.g. "
+         "http://grafana-mcp.internal:8000/mcp; empty: no Grafana. Run it with --disable-write unless the agent may "
+         "create alert rules (grafana.writes)"),
+    Spec("grafana.mcp_token", "", "str", "The token the MCP server asks of its callers (its --server-auth-token), sent "
+         "as a bearer token; empty: none", secret=True),
+    Spec("grafana.grafana_token", "", "str", "A Grafana service account token sent with each request (the server then "
+         "uses it, not its own credentials); empty: the server's own", secret=True),
+    Spec("grafana.url", "", "str", "Grafana's address as people open it, for the links the agent gives "
+         "(e.g. https://grafana.example)"),
+    Spec("grafana.roles", [], "list", "The Superset roles whose users may read Grafana through the agent; empty: "
+         "every user of the agent (all of them see what the server's credentials see)"),
+    Spec("grafana.writes", False, "bool", "Alert rules and dashboards may be created in Grafana, each after an admin "
+         "approved its draft in To review (never by the agent alone; an existing one is never changed); off: drafts "
+         "only"),
+    Spec("grafana.alert_folder", "", "str", "The UID of the Grafana folder the approved alert rules go to (the only "
+         "one); empty: none created"),
+    Spec("grafana.rule_group", "supagent", "str", "The rule group of the approved alert rules (Grafana evaluates a "
+         "new group every minute; its interval is changed in Grafana)"),
+    Spec("grafana.rule_labels", {"managed_by": "supagent"}, "json", "Labels every created alert rule has (JSON object)"),
+    Spec("grafana.label_keys", ["severity", "team", "service", "environment"], "list", "The label keys a draft may "
+         "set besides those (routing by team, severity...)"),
+    Spec("grafana.datasource", "", "str", "The UID of the Grafana datasource the alert rules query (a Prometheus or "
+         "Mimir one); empty: the one the draft names, if Grafana has it"),
+    Spec("grafana.dashboard_folder", "", "str", "The folder (UID or path) a dashboard the agent drafts goes to when "
+         "neither the user nor the agent names one; empty: the agent names the folder whose dashboards are about the "
+         "same thing, or asks"),
+    Spec("grafana.dashboard_folders", [], "list", "The UIDs of the folders the agent's dashboards may go to; empty: any "
+         "folder (Grafana's permissions of the server's account still apply)"),
+    Spec("grafana.cache_seconds", 60, "int", "Seconds a Grafana answer is kept (dashboards, rules, routing)"),
+    Spec("grafana.timeout", 20, "int", "Seconds a call to the Grafana MCP server may take"),
+    Spec("grafana.context", True, "bool", "With the nightly Context build: a page per Grafana dashboard and per folder "
+         "of alert rules (what each panel and rule reads and computes), when a Grafana MCP server is set"),
+    Spec("grafana.learn", True, "bool", "The learning (Learn, the nightly learning, superset supagent learn) reads "
+         "Grafana too: its dashboards and alert rules written into the Context and the search at once, each dashboard "
+         "explained by the AI"),
+    Spec("grafana.max_llm_calls", 30, "int", "Dashboards the AI explains at most per learning or Context build (the "
+         "others next time); an explanation is written again only when its dashboard changes"),
+    Spec("grafana.max_dashboards", 300, "int", "Dashboards read at most by the nightly Context build"),
+    Spec("grafana.read_new", True, "bool", "A Grafana dashboard listed for the first time is read by the agent; off: "
+         "it waits until someone activates it (Documents and sites, Dashboards: Deactivate all turns this off, "
+         "Activate all on)"),
+    # ---- (0.10.10) OpenSearch Dashboards through its saved objects API (no MCP server): dashboards, visualizations
+    Spec("osd.url", "", "str", "OpenSearch Dashboards' address, e.g. https://dashboards.example:5601 (its saved objects "
+         "API is read, and the links the agent gives point there); empty: none"),
+    Spec("osd.auth", "", "choice", "How supagent signs in to OpenSearch Dashboards: empty (none), basic (a user and "
+         "its password), bearer (a token), header (a token in a header of its own)",
+         choices=("", "basic", "bearer", "header")),
+    Spec("osd.user", "", "str", "The user (osd.auth = basic): one that may only read the saved objects"),
+    Spec("osd.secret", "", "str", "Its password or token (osd.auth basic, bearer or header)", secret=True),
+    Spec("osd.header", "", "str", "The header's name (osd.auth = header)"),
+    Spec("osd.tenant", "", "str", "The tenant whose saved objects are read (the security plugin's multi-tenancy: "
+         "global, private or a tenant's name, sent as the securitytenant header); empty: the user's default"),
+    Spec("osd.verify_tls", True, "bool", "Check OpenSearch Dashboards' certificate"),
+    Spec("osd.ca_bundle", "", "str", "A CA file on the server to check its certificate with (a company CA)"),
+    Spec("osd.roles", [], "list", "The Superset roles whose users may read OpenSearch Dashboards' dashboards through "
+         "the agent; empty: every user of the agent"),
+    Spec("osd.context", True, "bool", "With the nightly Context build: a page per OpenSearch Dashboards dashboard (what "
+         "each visualization counts or computes, on which index pattern, with which query and filters), when "
+         "osd.url is set"),
+    Spec("osd.learn", True, "bool", "The learning reads OpenSearch Dashboards too: its dashboards written into the "
+         "Context and the search, each explained by the AI"),
+    Spec("osd.max_llm_calls", 30, "int", "Dashboards the AI explains at most per learning or Context build (the others "
+         "next time); an explanation is written again only when its dashboard changes"),
+    Spec("osd.max_objects", 10000, "int", "Saved objects read at most (dashboards, visualizations, saved searches)"),
+    Spec("osd.timeout", 30, "int", "Seconds a call to OpenSearch Dashboards may take"),
+    Spec("osd.read_new", True, "bool", "A dashboard or a visualization listed for the first time is read by the agent "
+         "(a new visualization of a dashboard that is read always is); off: it waits until someone activates it "
+         "(Documents and sites, Dashboards: Deactivate all turns this off, Activate all on)"),
     Spec("mcp.servers", [], "json", "Other MCP servers whose tools the agent may use (JSON list of {name, transport: "
          "streamable_http | sse | stdio | websocket, url or command/args, headers, description, tools, write, "
          "allow_write, roles}); needs pip install \"supagent[graph]\""),

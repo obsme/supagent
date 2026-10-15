@@ -17,7 +17,8 @@ restored alone (the categories without the catalog): what names an item that no 
   catalog      the catalog's entries and their versions
   memory       the team's and the users' memories
   documents    the documents and sites (their texts; a site's sign-in secret is never written to a file: on the
-               same Superset it is kept, elsewhere it is entered again)
+               same Superset it is kept, elsewhere it is entered again), and (0.10.10) which dashboards and
+               visualizations of Grafana and OpenSearch Dashboards the agent reads
   notes        the notes
   context      the Context pages
   learned      the learned answers and the investigation paths, the examples, the words that lead to a table,
@@ -65,7 +66,7 @@ def _models() -> dict[str, list[Any]]:
     return {"categories": [M.Facet, M.Tag, M.Link, M.Classified],
             "catalog": [M.Entry, M.EntryVersion, M.Document],
             "memory": [M.Memory],
-            "documents": [M.Doc],
+            "documents": [M.Doc, M.DashItem],
             "notes": [M.Note],
             "context": [M.ContextPage],
             "learned": [M.Recipe, M.Example, M.Association]}

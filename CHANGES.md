@@ -1,5 +1,98 @@
 # Changes
 
+## 0.10.10 — 2026-10-15
+
+The team's requests of 14 October: the team's central Grafana, read through its MCP server (dashboards, alert rules,
+alerts and who they reach), in the Context and in the learning, explained, used in health questions and
+investigations; alert rules and dashboards drafted by the agent and created only when an admin approves; OpenSearch
+Dashboards (2.19 and 3.8, no MCP server) read the same way; in Documents and sites, the list of the dashboards and
+visualizations of both, each one read by the agent or not; the agent's context organized so that the three kinds of
+dashboards are never confused. Tables v20 (`superset supagent init`); the Grafana and OpenSearch Dashboards settings
+are new, and both stay off until set.
+
+Measured before the release under a rule written before any result, on the frozen build beb5b36 (0.10.10 is that build
+with its version) with Qwen3.6-35B-A3B (llama.cpp, its server restarted first), one round of each set on the small
+model's profile: the main open set 156 of 162 right, 4 wrong without a mark, under the rule's bar (158, at most 2):
+released by the owner's decision. The observability open set 28 of 29 right (the rule: 28), 0 wrong without a mark;
+the same set with Grafana and OpenSearch Dashboards set up and read by the learning first (9 and 6 dashboards
+explained), 28 of 29, 0 wrong without a mark. Grafana questions written for this release and never seen before (13 and
+an approval): 12 right, every request to change what exists refused, the one rule created being the one approved,
+nothing else changed. OpenSearch Dashboards questions written for this release (9, on dashboards over real indices,
+figures checked against the data): 9 right; two requests to change OpenSearch Dashboards refused, nothing changed. The
+unit tests: 2156 passed. The upgrade from 0.10.9.2 on a copy of a lab: tables v18 to v20, every setting kept, the
+System map's 289 values and 2,224 links kept, health 200, the knowledge search answering. Not measured: gpt-oss-120b.
+
+Grafana (the team's central Grafana, through its MCP server)
+* **Reads, fast and condensed**: the agent finds dashboards, reads one whole (the panels of collapsed rows too, each
+  panel's query, unit and thresholds), lists alert rules and which fire, reads one rule with its condition and the
+  contact points its alerts reach by the notification policies, and tells which panels and rules read a metric
+  (grafana_metric_uses). Answers are cached (`grafana.cache_seconds`); the nightly read of every dashboard and rule
+  runs on one MCP session, four calls at a time. Texts written in Grafana are given as data, never as instructions.
+* **Context and learning**: a facts page per dashboard (what each panel reads and computes, in words; the metrics
+  with the data dictionary's descriptions; the System map's values its queries select) and per folder of alert rules
+  (query, condition, hold, labels, who is notified), explained by the AI in the learning (what the dashboard watches,
+  what would look unusual, which panels to look at first when that part misbehaves; written again only when the
+  dashboard changes; `grafana.max_llm_calls` a run).
+* **In health questions and investigations**: grafana_watch tells what Grafana shows about a part (a service, a host,
+  a database, a team) now or at the time asked: each panel about it against its thresholds, worst first, with the
+  alerts firing or pending about it. An investigation or a question of health whose answer never looked at Grafana
+  (set up for that user) is sent back once to look.
+* **Alert rules from the team's rules**: the agent drafts a rule from a team memory, a catalog entry or the chat
+  (metrics checked in the datasource, never guessed; the query run once and refused with Prometheus' own reason when
+  it is not valid PromQL; the folder, group and fixed labels of the settings; a preview of the value now and of who
+  would be notified). A rule asked in the chat takes a team rule as its source only on clear evidence (what is
+  measured, its threshold, its hold, its direction and its team agree), and is found again, never drafted twice.
+  An admin approves it in To review; it is then created and read back.
+* **Dashboards**: the agent drafts a new dashboard in the right folder of Browse (the folders holding dashboards about
+  the same things are always said; panels checked: metrics, PromQL, Grafana's panel types and units); a corrected
+  draft replaces the waiting one; an admin approves; it is created as a new dashboard only and read back.
+* **Never more**: nothing is written without an admin's approval (`grafana.writes`, off by default); an existing rule
+  or dashboard is never changed or deleted, no folder is created; a Grafana MCP server registered in `mcp.servers` is
+  never offered whole. Asked to change, pause, silence, rename, move, share or delete what exists in Grafana or
+  OpenSearch Dashboards, the agent says plainly it cannot, then what it can do instead.
+
+OpenSearch Dashboards (2.19 and 3.8; no MCP server)
+* **Read through its saved objects API** (GET only; basic, bearer or header sign-in, tenant, certificate as set): each
+  visualization said in words from its definition (aggregations, TSVB, Timeline, Vega, Markdown, controls, saved
+  searches, VisBuilder), with its index pattern, time field, query, filters and color ranges.
+* **Context and learning**: a page per dashboard and per index pattern of the visualizations on no dashboard,
+  explained by the AI in the learning; the agent's tools osd_dashboards and osd_dashboard.
+* **In health questions and investigations**: the agent is told that the team's visualizations say how the team
+  measures a part (index, field, aggregation, filters, ranges) and computes the same on that index with its SQL tools.
+
+Documents and sites: which dashboards the agent reads
+* **The list** of the dashboards and visualizations of Grafana and OpenSearch Dashboards, with their folder or index
+  patterns, type, and when and by whom they were last modified (newest first); a switch per item, Deactivate all then
+  switch on the few needed (new ones then wait), a whole search at once (admins).
+* **Switched off**: its page leaves the Context and the search at once (never waiting in To review), the AI does not
+  explain it, its panels are not watched; the agent's list tools say how many are switched off and, when a question
+  names one, that it exists and is switched off (never that it does not exist, never what it shows). A Grafana
+  draft's safety checks still see every dashboard.
+
+The agent's context
+* **One system named, its tools only**: a question (or its chat) that names one dashboard system set up here
+  (Superset, Grafana, OpenSearch Dashboards) is offered only that system's chart and dashboard tools and
+  instructions; "OpenSearch Dashboards" no longer reads as Superset dashboards asked; a question that names none
+  keeps every system's reading tools; a system named but not set up filters nothing.
+
+Known gaps
+* **Checked against lab instances only**: Grafana 13.2.4 with mcp-grafana 2.0.2, OpenSearch Dashboards 2.19.5 and
+  3.8.0 without the security plugin. Signing in to OpenSearch Dashboards with the security plugin (basic, tenants,
+  a redirect to SAML or OpenID), its workspaces (2.18+) and its multiple data sources are checked by unit tests
+  only; tell us what your central Grafana and your OpenSearch Dashboards use.
+* **The numbers behind an OpenSearch Dashboards visualization** are computed by the agent with its SQL tools on the
+  same index (it is told the visualization's definition); there is no tool that runs a visualization as OpenSearch
+  Dashboards does. Grafana's panels are run by grafana_watch through the MCP server.
+* **Grafana's alert history** is what Grafana's API and the MCP server give: firing and pending alerts now, the rules'
+  states; an alert that fired and resolved earlier is found in the data when Alertmanager's alerts are indexed.
+* **An investigation that uses up its tool calls** can end without an answer: with Grafana and OpenSearch Dashboards
+  set up, one investigation of the observability set spent its calls (Grafana's panels among them) and the model
+  wrote no text, even when asked again; the same question without them was answered right. An answer that runs out of
+  calls will say what it found in a coming version; until then, ask a narrower question.
+* **A drafted rule's labels** can be off: a rule drafted from a team memory about "the data team" got the label
+  team=data-platform. Nothing is created before an admin approves: check a draft's labels in To review.
+* The rest of 0.10.9.2's known gaps stand (see 0.10.9.2).
+
 ## 0.10.9.2 — 2026-10-14
 
 The team's requests of 14 October: the known gap of 0.10.9.1 (an answer that writes out its query waited for a second

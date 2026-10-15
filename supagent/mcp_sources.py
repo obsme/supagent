@@ -28,6 +28,9 @@ log = logging.getLogger(__name__)
 TTL = 300.0
 CALL_TIMEOUT = 120.0
 TRANSPORTS = ("streamable_http", "sse", "stdio", "websocket")
+GRAFANA_TOOLS = frozenset({"search_dashboards", "get_dashboard_by_uid", "update_dashboard", "alerting_rules_read",
+                           "alerting_rules_write", "alerting_manage_routing", "list_datasources"})
+LOOPBACK = {"localhost", "127.0.0.1", "::1", "[::1]"}
 _LOCK = threading.Lock()
 _CACHE: dict[str, tuple[float, Any]] = {}
 
@@ -44,10 +47,14 @@ def servers() -> list[dict[str, Any]]:
             log.warning("supagent mcp: mcp.servers is not JSON")
             return []
     out = []
+    grafana_url = _url_key(settings.get("grafana.mcp_url"))
     for s in raw if isinstance(raw, list) else []:
         if not isinstance(s, dict):
             continue
         name = str(s.get("name") or "").strip()
+        if grafana_url and _url_key(s.get("url")) == grafana_url:
+            continue                             # (0.10.10) the Grafana server: through supagent.grafana only (its
+        #                                          allowed tools), never all of its tools; see also tools()
         if not re.fullmatch(r"[a-z][a-z0-9_]{0,30}", name) or s.get("transport") not in TRANSPORTS:
             log.warning("supagent mcp: server %r left out (a name of a-z0-9_ and a transport of %s)", name, TRANSPORTS)
             continue
@@ -74,6 +81,31 @@ def _allowed(server: dict[str, Any], username: str) -> bool:
         return user is not None and bool(roles & {r.name for r in user.roles})
     except Exception:  # pylint: disable=broad-except
         return False
+
+
+def _url_key(url: Any) -> str:
+    """A server's address as compared: scheme and host in lower case, the default port, a trailing slash and the
+    loopback's names left out ("" when none)."""
+    from urllib.parse import urlsplit
+
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    try:
+        u = urlsplit(text)
+        host = (u.hostname or "").lower()
+        port = u.port
+    except ValueError:
+        return text.lower().rstrip("/")
+    host = "loopback" if host in LOOPBACK else host
+    if port in (80, 443, None):
+        port = None
+    return f"{host}:{port or ''}{u.path.rstrip('/') or ''}"
+
+
+def _grafana_like(names: set[str]) -> bool:
+    """(0.10.10) A Grafana MCP server, whatever its address: two of its dashboard and alerting tools."""
+    return len(names & GRAFANA_TOOLS) >= 2
 
 
 def _connection(server: dict[str, Any], username: str) -> dict[str, Any]:
@@ -113,6 +145,11 @@ def tools(username: str) -> list[Any]:
             log.warning("supagent mcp: tools of %s: %s", s["name"], ex)
             continue
         wanted = set(s.get("tools") or [])
+        bases = {t.name[len(s["name"]) + 1:] if t.name.startswith(s["name"] + "_") else t.name for t in found}
+        if _grafana_like(bases):                     # (0.10.10) a Grafana MCP server's writes and deletes are never
+            log.warning("supagent mcp: %s is a Grafana MCP server: left out (Grafana is read through the grafana.* "
+                        "settings, with its allowed tools only)", s["name"])   # offered: supagent.grafana only
+            continue
         for t in found:
             base = t.name[len(s["name"]) + 1:] if t.name.startswith(s["name"] + "_") else t.name
             if wanted and base not in wanted:

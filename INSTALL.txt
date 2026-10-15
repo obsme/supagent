@@ -1,14 +1,15 @@
-supagent 0.10.9.2 - the AI agent inside Apache Superset
-=======================================================
+supagent 0.10.10 - the AI agent inside Apache Superset
+======================================================
 
 What is in this folder
-  supagent-0.10.9.2-py3-none-any.whl  the package for Superset 6.1 (pure Python; nothing else to install)
+  supagent-0.10.10-py3-none-any.whl   the package for Superset 6.1 (pure Python; nothing else to install)
   supagent-guide.html / .pdf          the guide (install, LLM middleware, learning, screens)
   catalog.example.yaml                an example catalog, to adapt
+  grafana-wheels/                     mcp and what it needs beyond Superset 6.1 (Grafana, without internet)
   SHA256SUMS                          checksums
 
-Upgrading? From 0.10.9.1: pip install this wheel on every host, restart; nothing to run: "From 0.10.9.1 to
-0.10.9.2" below. From 0.10.9: the same, and "From 0.10.9 to 0.10.9.1" below. From 0.10.8.1: the same (osagg 0.2.15 or 0.2.16), and "From 0.10.8.1 to 0.10.9" below. From 0.10.8: the same with osagg 0.2.15, and "From 0.10.8 to 0.10.8.1" below. From 0.10.7: the same, and "From 0.10.7 to 0.10.8" below. From 0.10.6.2, 0.10.6.1 or 0.10.6: the same, and "From 0.10.6.2 to 0.10.7" below (and "From 0.10.6.1 to
+Upgrading? From 0.10.9.2: pip install this wheel on every host, run superset supagent init (tables v20), restart:
+"From 0.10.9.2 to 0.10.10" below. From 0.10.9.1: the same, and "From 0.10.9.1 to 0.10.9.2" below. From 0.10.9: the same, and "From 0.10.9 to 0.10.9.1" below. From 0.10.8.1: the same (osagg 0.2.15 or 0.2.16), and "From 0.10.8.1 to 0.10.9" below. From 0.10.8: the same with osagg 0.2.15, and "From 0.10.8 to 0.10.8.1" below. From 0.10.7: the same, and "From 0.10.7 to 0.10.8" below. From 0.10.6.2, 0.10.6.1 or 0.10.6: the same, and "From 0.10.6.2 to 0.10.7" below (and "From 0.10.6.1 to
 0.10.6.2", "From 0.10.6 to 0.10.6.1" for what they brought, in this wheel too). From 0.10.0: pip install this wheel on every host,
 superset supagent init once (no table changes: v18), restart: "From 0.10.0 to 0.10.6" below (0.10.4 and 0.10.5 were not released: "What 0.10.5 brings" and "What 0.10.4 brings" too). From 0.9.6.9,
 0.9.6.8, ... 0.9.6.1 or 0.9.6: pip install this wheel on every host, superset supagent init once (tables v17 to v18:
@@ -134,6 +135,71 @@ role): three packages must be pinned, or Superset itself does not start (none is
    supagent_store). Then:
      superset supagent init          builds it (the first time it finds the extensions)
      superset supagent store status  extensions, versions, size, warnings
+
+9. Grafana through its MCP server (optional; off until grafana.mcp_url is set): the agent reads the team's Grafana
+   (dashboards and what each panel computes, alert rules, which alerts fire and who they reach), writes a Context
+   page per dashboard and per folder of alert rules (explained by the AI in the learning), watches its panels in
+   health questions and investigations, and drafts alert rules and dashboards that an admin approves in To review.
+   It never changes or deletes anything that exists in Grafana.
+   a. The Python package mcp where Superset runs: without internet, from this folder:
+        pip install --no-index --find-links grafana-wheels mcp
+      (mcp and the nine pure-Python packages it needs beyond Superset 6.1's own, in versions checked beside it);
+      with internet: pip install "supagent[grafana]".
+   b. The MCP server (mcp-grafana 2.0.2 or later, from its GitHub releases; check the archive against the release's
+      checksums file), on a host that reaches Grafana:
+        GRAFANA_URL=https://grafana.example GRAFANA_SERVICE_ACCOUNT_TOKEN=<token> \
+        mcp-grafana -t streamable-http --address 0.0.0.0:8300 --usage-stats=disabled \
+            --server-auth-token <a token of your own> \
+            --enabled-tools search,datasource,prometheus,alerting,dashboard,folder,navigation
+      --usage-stats=disabled: mcp-grafana reports usage to Grafana Labs by default. --enabled-tools: only the tool
+      families supagent uses. Reading only: add --disable-write and leave grafana.writes off.
+   c. Grafana's service account: Viewer to read; to create alert rules and dashboards, Editor rights on the folders
+      they may go to and nothing more (a folder the account may only view: Grafana refuses, nothing is made).
+   d. Settings (Settings page, or superset supagent settings --set): grafana.mcp_url (http://mcp-host:8300/mcp),
+      grafana.mcp_token (the server's auth token), grafana.url (Grafana's address, for the links), grafana.roles
+      (the Superset roles that may use it; empty: everyone), grafana.datasource (the Prometheus or Mimir datasource
+      UID of the rules and panels). Creating, off by default: grafana.writes; alert rules go to grafana.alert_folder
+      in grafana.rule_group with the labels grafana.rule_labels; dashboards go to the folder their draft names
+      (grafana.dashboard_folder when none is named; grafana.dashboard_folders limits them). The Context and the
+      learning: grafana.context, grafana.learn (on), grafana.max_llm_calls (30), grafana.max_dashboards (300).
+      Do not add the Grafana server to mcp.servers: it is left out there (its tools are never offered whole).
+
+10. OpenSearch Dashboards (optional; 2.19 and 3.8; no MCP server; off until osd.url is set): read through its saved
+   objects API, GET requests only.
+   a. A user that may read the saved objects (with the security plugin: read access to the OpenSearch Dashboards
+      index of the tenant to read).
+   b. Settings: osd.url (its address with its base path, e.g. https://dashboards.example:5601), osd.auth (basic,
+      bearer or header) with osd.user / osd.secret (kept encrypted) / osd.header, osd.tenant (global, private or a
+      tenant's name), osd.verify_tls and osd.ca_bundle, osd.roles (who may use it through the agent; empty:
+      everyone), osd.context, osd.learn (on), osd.max_llm_calls (30), osd.max_objects (10000), osd.timeout (30).
+   c. What it gives: a Context page per dashboard (each visualization's aggregation in words, index pattern and time
+      field, query and filters, color ranges), explained by the AI in the learning; the tools osd_dashboards and
+      osd_dashboard. The numbers behind a visualization: the agent queries its index pattern with its SQL tools.
+
+11. Which dashboards the agent reads (Data dictionary -> Knowledge -> Documents and sites, "Dashboards and
+   visualizations", admins): per source the dashboards and their panels (Grafana) or visualizations and saved
+   searches (OpenSearch Dashboards), with their folder or index patterns, type, and when and by whom they were last
+   modified (newest first). A switch per item; "Deactivate all" then switch on what is needed (new dashboards then
+   wait: grafana.read_new, osd.read_new); a whole search at once. What is switched off leaves the Context and the
+   search at once and is no longer read, explained or watched; the agent says it exists and is switched off when a
+   question names it. "List now" reads the list again (no AI); every learning does too.
+
+From 0.10.9.2 to 0.10.10
+========================
+  - pip install the wheel on every host, then `superset supagent init` (tables v18 -> v20: the drafts of Grafana rules
+    and dashboards, the list of the dashboards read), restart the web servers, the workers and beat.
+  - Nothing changes until Grafana or OpenSearch Dashboards is set up (Settings): every new tool, page and learning
+    step is off while grafana.mcp_url and osd.url are empty.
+  - Grafana is read through its MCP server (mcp-grafana 2.0.2 or later) with the Python package mcp: Superset 6.1
+    brings it only with its fastmcp extra. Without internet: pip install --no-index --find-links grafana-wheels mcp
+    (the folder grafana-wheels of this delivery: mcp and the nine pure-Python packages it needs beyond Superset 6.1's
+    own, in versions checked beside it); with internet: pip install "supagent[grafana]". Then "Grafana through its
+    MCP server" below.
+  - OpenSearch Dashboards needs nothing more: "OpenSearch Dashboards" below.
+  - Measured: main open set 156/162 (under its bar of 158: released by the owner's decision), observability 28/29, the
+    same with Grafana and OpenSearch Dashboards set up 28/29; new Grafana questions 12/13 (every change request
+    refused, only the approved rule created), OpenSearch Dashboards questions 9/9, change requests 2/2 refused; unit
+    tests 2156; upgrade from 0.10.9.2 checked.
 
 From 0.10.9.1 to 0.10.9.2
 =========================

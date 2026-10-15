@@ -193,8 +193,10 @@ def texts() -> Iterator[dict[str, Any]]:
     for e in db.session.query(Entry).filter(Entry.deleted_at.is_(None), Entry.enabled.is_(True)):
         yield {"ref": f"entry:{e.id}", "title": e.title, "text": e.content or ""}
     for p in db.session.query(ContextPage).filter(ContextPage.kind.is_distinct_from("rejected"),
-                                                       ContextPage.slug.notin_(_llm_slugs())):
-        yield {"ref": f"context:{p.id}", "title": p.title, "text": p.content or ""}
+                                                       ContextPage.slug.notin_(_llm_slugs()),
+                                                       ContextPage.slug.notlike("grafana-%"),
+                                                       ContextPage.slug.notlike("osd-%")):   # (0.10.10) a text
+        yield {"ref": f"context:{p.id}", "title": p.title, "text": p.content or ""}   # written in Grafana retires nothing
     for n in db.session.query(Note).filter(Note.scope == "team"):
         yield {"ref": f"note:{n.id}", "title": n.title or "", "text": n.text or ""}
 

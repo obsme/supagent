@@ -150,6 +150,18 @@ then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with t
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
 
+## Upgrade from 0.10.9.2 to 0.10.10
+
+pip install the wheel on every host, run `superset supagent init` (tables v20) and restart. New and off until set up:
+the team's Grafana read through its MCP server (dashboards, alert rules, alerts, in the Context and the learning,
+explained, watched in health questions and investigations; alert rules and dashboards drafted by the agent and created
+only when an admin approves), OpenSearch Dashboards 2.19 and 3.8 read through its saved objects API, and in Documents
+and sites the list of their dashboards and visualizations, each one read by the agent or not. Grafana needs the Python
+package mcp: the delivery's grafana-wheels folder installs it without internet. Measured: main open set 156/162 (under
+its bar of 158: released by the owner's decision), observability 28/29, the same with Grafana and OpenSearch
+Dashboards set up 28/29; new Grafana questions 12/13 (every change request refused, only the approved rule created),
+OpenSearch Dashboards questions 9/9, change requests 2/2 refused; unit tests 2156; upgrade from 0.10.9.2 checked.
+
 ## Upgrade from 0.10.9.1 to 0.10.9.2
 
 No table change and no new setting: pip install the wheel on every host and restart. The learning reads the team's

@@ -134,6 +134,19 @@ def doc_task(doc_id: int) -> None:
         db.session.remove()
 
 
+@celery_app.task(name="supagent.dash", ignore_result=True, soft_time_limit=1800, time_limit=1900)
+def dash_task(source: str, what: str, refs: list[str] | None = None) -> None:
+    """(0.10.10) The list of Grafana's or OpenSearch Dashboards' dashboards read now, or pages written again."""
+    from superset import db
+
+    from supagent import dashlist
+
+    try:
+        dashlist.run_job(source, what, refs)
+    finally:
+        db.session.remove()
+
+
 @celery_app.task(name="supagent.learn_tick", ignore_result=True)
 def learn_tick() -> None:
     """Every hour: the daily learning when due, and old files removed."""
@@ -387,6 +400,13 @@ def dispatch_catalog() -> str:
         agent_catalog(llm_docs=False, parts=("formulas",))
 
     return _dispatch(catalog_task, run)
+
+
+def dispatch_dash(source: str, what: str, refs: list[str] | None = None) -> str:
+    """(0.10.10) dashlist.run_job in a worker (or a thread of this process): "list" or "pages" of `refs`."""
+    from supagent import dashlist
+
+    return _dispatch(dash_task, dashlist.run_job, source, what, list(refs or []))
 
 
 def dispatch_doc(doc_id: int) -> str:

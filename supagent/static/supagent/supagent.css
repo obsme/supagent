@@ -938,3 +938,14 @@ table.grid.compact th, table.grid.compact td { padding: 4px 8px; }
 .memory-text { white-space: pre-wrap; }
 .memory-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; width: 100%; }
 .memory-form textarea { flex: 1 1 100%; min-height: 3em; font: inherit; }
+/* (0.10.10) the dashboards and visualizations of Grafana and OpenSearch Dashboards the agent reads (Documents and
+   sites) */
+.dash-title { margin-top: 20px; }
+.dash-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.dash-tabs .btn.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.dash-head { display: grid; gap: 4px; margin-bottom: 6px; }
+#dash tr.dash-off > td { color: var(--muted); }
+#dash tr.dash-off > td a { color: var(--muted); }
+tr.dash-kids > td { background: var(--line-2); }
+#dash-bulk { margin: 4px 0; }
+#dash-more { margin: 6px 0; }

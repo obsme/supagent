@@ -144,6 +144,18 @@
         <thead><tr><th>Document</th><th>Category</th><th class="num">Pages</th><th class="num">Size</th>
           <th class="num">In the search</th><th>State</th><th>Read</th><th></th></tr></thead>
         <tbody></tbody></table></div>
+      <div class="admin-only">
+        <div class="sec-head dash-title"><h3>Dashboards and visualizations</h3>
+          <button type="button" class="info" aria-controls="x-dash" aria-label="About the dashboards">i</button></div>
+        <div class="explain" id="x-dash">The dashboards of the team's Grafana and OpenSearch Dashboards that the agent
+          reads: the learning explains them, the Context and the search have them, the agent's tools list and read
+          them, its investigations look at their panels. Switch off what the agent should not read: its page leaves
+          the Context and the search at once. To read only a few, Deactivate all then switch on those needed (new
+          dashboards then wait until someone activates them); the last modified date helps to choose. An OpenSearch
+          Dashboards dashboard switched on reads its visualizations too. Alert rules are all read. The connections are
+          set in Settings (grafana.*, osd.*); only an admin changes what is read.</div>
+        <div id="dash"></div>
+      </div>
     </div>
 
     <div id="sub-notes" class="sub" hidden>
