@@ -1,15 +1,16 @@
-supagent 0.10.11.1 - the AI agent inside Apache Superset
+supagent 0.10.11.2 - the AI agent inside Apache Superset
 ========================================================
 
 What is in this folder
-  supagent-0.10.11.1-py3-none-any.whl the package for Superset 6.1 (pure Python; nothing else to install)
+  supagent-0.10.11.2-py3-none-any.whl the package for Superset 6.1 (pure Python; nothing else to install)
   supagent-guide.html / .pdf          the guide (install, LLM middleware, learning, screens)
   catalog.example.yaml                an example catalog, to adapt
   grafana-wheels/                     mcp and what it needs beyond Superset 6.1 (Grafana, without internet)
   SHA256SUMS                          checksums
 
-Upgrading? From 0.10.11: pip install this wheel on every host, restart; nothing to run: "From 0.10.11 to
-0.10.11.1" below. From 0.10.10: the same, and "From 0.10.10 to 0.10.11" below. From 0.10.9.2: pip install
+Upgrading? From 0.10.11.1: pip install this wheel on every host, restart; nothing to run: "From 0.10.11.1
+to 0.10.11.2" below. From 0.10.11: the same, and "From 0.10.11 to 0.10.11.1" below. From 0.10.10: the
+same, and "From 0.10.10 to 0.10.11" below. From 0.10.9.2: pip install
 this wheel on every host, run superset supagent init (tables v20), restart: "From 0.10.9.2 to 0.10.10" and
 the sections after it below. From 0.10.9.1: the same, and "From 0.10.9.1 to 0.10.9.2" below. From 0.10.9: the same, and "From 0.10.9 to 0.10.9.1" below. From 0.10.8.1: the same (osagg 0.2.15 or 0.2.16), and "From 0.10.8.1 to 0.10.9" below. From 0.10.8: the same with osagg 0.2.15, and "From 0.10.8 to 0.10.8.1" below. From 0.10.7: the same, and "From 0.10.7 to 0.10.8" below. From 0.10.6.2, 0.10.6.1 or 0.10.6: the same, and "From 0.10.6.2 to 0.10.7" below (and "From 0.10.6.1 to
 0.10.6.2", "From 0.10.6 to 0.10.6.1" for what they brought, in this wheel too). From 0.10.0: pip install this wheel on every host,
@@ -37,7 +38,7 @@ role): three packages must be pinned, or Superset itself does not start (none is
 1. Install in Superset's virtualenv (pip only)
 
    PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-   $PY -m pip install supagent-0.10.11.1-py3-none-any.whl
+   $PY -m pip install supagent-0.10.11.2-py3-none-any.whl
    Superset 6.1: nothing else is needed (offline too).
 
 2. Register it: one line in superset_config.py (no logic)
@@ -188,6 +189,16 @@ role): three packages must be pinned, or Superset itself does not start (none is
    wait: grafana.read_new, osd.read_new); a whole search at once. What is switched off leaves the Context and the
    search at once and is no longer read, explained or watched; the agent says it exists and is switched off when a
    question names it. "List now" reads the list again (no AI); every learning does too.
+
+From 0.10.11.1 to 0.10.11.2
+===========================
+  - pip install the wheel on every host and restart the web servers, the workers and beat; nothing to run (tables
+    unchanged, v20; no new setting).
+  - An answer's steps are kept whole again (0.10.11.1 cut a step's arguments over 4,000 characters, and Helpful keeps
+    an answer's query as an example); only the copy sent to the chat page is cut.
+  - Measured: a 5,000-character query kept whole by Helpful (test); the heavy chats open in 0.2 s and 0.7 s as with
+    0.10.11.1, the "did not finish opening" note and the chat panel checked in a browser; tables unchanged (v20); unit
+    tests 2187.
 
 From 0.10.11 to 0.10.11.1
 =========================

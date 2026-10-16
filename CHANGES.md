@@ -1,5 +1,25 @@
 # Changes
 
+## 0.10.11.2 — 2026-10-16
+
+A correction of 0.10.11.1, found by reading its change again the same day: it also cut the steps an answer keeps
+(each step's arguments over 4,000 characters), and those steps are read by more than the page: *Helpful* keeps an
+answer's query as an example for similar questions, and the learning reads the tables its queries name. A query of
+8,851 characters would have been kept as its first 1,002. The steps are kept whole again; only the copy sent to the
+chat page is cut. What 0.10.11.1 brought is unchanged, and an answer saved by 0.10.11.1 with a query that long (the
+rare case) keeps the cut query: ask it again for a whole example.
+
+Measured in the lab on the frozen build e14434c, as 0.10.11.1 was: a test now proves the point (a query of 5,000
+characters and more, in a step saved by the agent's own code, is kept whole by Helpful while the page's copy is cut).
+The two chats built like the one reported open as with 0.10.11.1: 0.2 s and 0.7 s, no long task in the page; the rows
+of the heavy one, asked, in 4.9 s once. Two paths checked for the first time: a chat that did not finish drawing is
+not opened again by itself (the page says so, nothing drawn) and Open it draws it with no long task; the chat panel
+opened on a Superset page with each heavy chat answers in 3.2 s, its longest task 274 ms (Superset's own page). Tables
+unchanged (v20); the unit tests: 2187 passed.
+
+Upgrade from 0.10.11.1 or 0.10.11: pip install the wheel on every host, restart the web servers, the workers and
+beat; nothing to run (tables unchanged, v20; no new setting). INSTALL.txt, *From 0.10.11.1 to 0.10.11.2*.
+
 ## 0.10.11.1 — 2026-10-16
 
 The team's report of 16 October on 0.10.11: after a question about the anomalies of an OpenSearch Dashboards

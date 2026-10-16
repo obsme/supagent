@@ -20,7 +20,7 @@ from supagent import settings
 from supagent.agent import Cancelled
 from supagent.llm import llm_task
 from supagent.models import Conversation, File, Message
-from supagent.pagekeep import fit_results, fit_steps
+from supagent.pagekeep import fit_results
 
 log = logging.getLogger(__name__)
 FILE_TOOLS = ("export_excel", "chart_from_sql", "chart_image")
@@ -68,7 +68,7 @@ def _steps_for_page(trace: list[dict], agent: Any = None) -> list[dict]:
                     **({"ledger": t["ledger"]} if isinstance(t.get("ledger"), dict) else {}),   # the work plan
                     **({"found": t["found"]} if isinstance(t.get("found"), list) else {}),      # a search's items
                     **({"read": t["read"]} if isinstance(t.get("read"), list) else {})})        # its words read otherwise
-    return fit_steps(out)
+    return out          # (0.10.11.2) kept whole: Helpful keeps a step's SQL as an example; the page cuts its own copy
 
 
 def _files_of(trace: list[dict]) -> list[dict]:

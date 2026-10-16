@@ -2,8 +2,10 @@
 queries, every cell as long as the database gave it): raw log lines with their stack traces made one answer tens of
 megabytes, that the server read and sent again at every opening of the chat and the browser parsed and drew, in the
 same thread as the Superset page around the chat panel. Here: at most RESULT_COLUMNS columns, CELL_CHARS per cell
-and a byte budget per answer (the first rows kept, the result marked cut: the Excel extract gives every row); the
-steps' arguments and lists cut the same way. Answers kept before 0.10.11.1 are cut when they are next read."""
+and a byte budget per answer (the first rows kept, the result marked cut: the Excel extract gives every row; the
+query itself is kept whole). Answers kept before 0.10.11.1 are cut when they are next read. The steps are kept whole
+(0.10.11.2: Helpful keeps a step's SQL as an example, the learning reads their queries): fit_steps cuts the copy
+sent to the page only."""
 from __future__ import annotations
 
 import json

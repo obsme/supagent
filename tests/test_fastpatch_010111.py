@@ -280,3 +280,48 @@ def test_a_host_reads_back_its_own_history(ctx):
         for r in rows:
             db.session.delete(r)
         db.session.commit()
+
+
+def test_a_long_query_is_kept_whole_for_helpful(app):
+    """(0.10.11.2) The steps are stored whole: Helpful keeps the answer's SQL as an example, whatever its length (the
+    page gets a cut copy)."""
+    from superset.extensions import db, security_manager as sm
+
+    from conftest import login
+    from supagent.models import Conversation, Example, Message
+    from supagent.pagekeep import ARGS_CHARS
+    from supagent.runner import _steps_for_page
+
+    sql = "SELECT app, COUNT(*) AS n FROM jobs WHERE " + " OR ".join(f"name = 'job-{i:05d}'" for i in range(400)) + " GROUP BY app"
+    assert len(sql) > 5000
+    trace = [{"tool": "execute_sql", "status": "done", "seconds": 1.0, "result": "{}",
+              "args": {"request": {"sql": sql, "database_id": 1}}}]
+    steps = _steps_for_page(trace)
+    assert steps[0]["args"]["request"]["sql"] == sql                      # stored whole
+    with app.app_context():
+        u = sm.find_user(username="alice")
+        conv = Conversation(user_id=u.id, title="jobs per application")
+        db.session.add(conv)
+        db.session.flush()
+        db.session.add(Message(conversation_id=conv.id, role="user", content="How many jobs per application?", status="done"))
+        m = Message(conversation_id=conv.id, role="assistant", status="done", content="7 and 5.", steps=steps,
+                    results=[])
+        db.session.add(m)
+        db.session.commit()
+        cid, mid = conv.id, m.id
+        db.session.remove()
+    try:
+        with app.test_client() as c:
+            login(c, "alice")
+            page = c.get(f"/supagent/api/messages/{mid}").get_json()
+            assert len(json.dumps(page["steps"][0]["args"])) <= ARGS_CHARS + 50      # the page's copy: cut
+            assert c.post(f"/supagent/api/messages/{mid}/feedback", json={"value": 1}).get_json()["example_kept"]
+        with app.app_context():
+            assert db.session.query(Example).filter_by(message_id=mid).one().sql == sql   # the example: whole
+    finally:
+        with app.app_context():
+            db.session.query(Example).filter_by(message_id=mid).delete(synchronize_session=False)
+            db.session.query(Message).filter(Message.conversation_id == cid).delete(synchronize_session=False)
+            db.session.query(Conversation).filter(Conversation.id == cid).delete(synchronize_session=False)
+            db.session.commit()
+            db.session.remove()
