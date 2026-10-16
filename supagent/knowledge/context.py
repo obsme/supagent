@@ -49,8 +49,9 @@ MAIN_ITEMS = 25            # the main metrics and indices of a data source on it
 MAX_VALUES = 300           # values listed per inventory line
 MAX_APPS = 8               # application pages at most
 DOC_CHARS = 3000           # of each document in an LLM prompt (at least; a wiki of many pages: its digest, below)
-DOCS_CHARS = 24000         # (0.10.12) of all the documents of a summary page: a wiki of thousands of pages gives its
-DIGEST_LEAD = 400          #   central pages (the most linked to) with their first lines, never only its first page
+DOCS_CHARS = 30000         # (0.10.12) of all the documents of a summary page: a wiki of thousands of pages gives its
+DIGEST_LEAD = 160          #   central pages (the most linked to) with their first lines (0.10.12.1: ~100 of them; a
+                           #   share by number of pages, not the same for every document)
 DIGEST_DOCS = 6            # documents in a summary page's evidence (the ones with the most pages first)
 PART_RELATIONS = 80        # (0.10.12) the relations the documents and the code state (calls, uses, runs on...) given
 RELATIONS_POOL = 600       #   to the summaries, the most stated first; an application's page: its own, from the pool
@@ -412,6 +413,23 @@ def _relation_lines(rels: list[dict[str, Any]]) -> list[str]:
             f"{'s' if r['pages'] > 1 else ''})" for r in rels]
 
 
+def _shares(chosen: list[dict[str, Any]]) -> dict[int, int]:
+    """(0.10.12.1) Each document's room in a summary page: a small one its text (DOC_CHARS at most), the ones of many
+    pages the rest in proportion to their pages (DOC_CHARS at least): a wiki of 5,000 pages had the room of a page of
+    three, about nine of its pages."""
+    def small(d: dict[str, Any]) -> bool:
+        return len(d.get("pages") or []) < 3 or len(d.get("content") or "") <= DOC_CHARS
+
+    big = [d for d in chosen if not small(d)]
+    if not big:
+        return {d["id"]: max(DOC_CHARS, DOCS_CHARS // max(1, len(chosen))) for d in chosen}
+    out = {d["id"]: min(len(d.get("content") or ""), DOC_CHARS) for d in chosen if small(d)}
+    left = max(DOCS_CHARS - sum(out.values()), DOC_CHARS * len(big))
+    pages = sum(len(d["pages"]) for d in big)
+    out.update({d["id"]: max(DOC_CHARS, int(left * len(d["pages"]) / pages)) for d in big})
+    return out
+
+
 def _digest(d: dict[str, Any], chars: int) -> str:
     """(0.10.12) What a summary page reads of a document: a small one, its beginning; one of many pages (a wiki, a
     repository), its central pages first (the most linked to by its other pages), each with its first lines, up to
@@ -492,8 +510,8 @@ def summary_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
                   "count": len({v for slot in per_db.values() for v in slot["values"]})}
                  for dim, per_db in ev["inventory"].items()]
     chosen = sorted(ev["docs"], key=lambda d: (-len(d.get("pages") or []), d["id"]))[:DIGEST_DOCS]
-    share = max(DOC_CHARS, DOCS_CHARS // max(1, len(chosen)))
-    docs = [{"ref": f"doc:{d['id']}", "title": d["title"], "text": _digest(d, share)} for d in chosen]
+    shares = _shares(chosen)
+    docs = [{"ref": f"doc:{d['id']}", "title": d["title"], "text": _digest(d, shares[d["id"]])} for d in chosen]
     pool = ev.get("part_relations") or []
     stated = [{"ref": "facts", "title": "what the documents and the code state about the parts",
                "relations": _relation_lines(pool[:PART_RELATIONS])}] if pool else []

@@ -1,5 +1,25 @@
 # Changes
 
+## 0.10.12.1 — 2026-10-16
+
+A correction of 0.10.12's summaries, found by reading its change again the same evening: each document's room in a
+summary page was the same (the summary's 24,000 characters shared by six documents), so a wiki of 5,000 pages had the
+room of a three-page one: about nine of its central pages. A document's room now follows its number of pages (a small
+one keeps its text, 3,000 characters at most; the ones of many pages share the rest, 30,000 in all), and each central
+page is given in fewer words (its first 160 characters): a wiki of 5,000 pages among five small documents gives some
+hundred of its central pages. What a summary reads of a wiki is then: those central pages (the most linked to by its
+other pages), and the relations its pages state (the 80 most stated, from every page the understanding read).
+
+Not measured with an LLM: released by the owner's decision without a gate, as 0.10.12; checked before it, the unit
+tests (2212 passed) and the deny-list. On the lab's 11 documents, the summary's evidence gives each document a room
+following its pages (222 pages: 10,829 characters and 74 of its pages; the smallest, 3,000), a summary page's evidence
+about 40,000 characters.
+
+Upgrade from 0.10.12: pip install the wheel on every host, restart the web servers, the workers and beat; nothing to
+run (tables unchanged, v20; no new setting). The summaries are written again at the next Context build (the Context
+tab's Build now, or the nightly one); a summary page that exists waits in To review for a person's validation
+(`context.review`, on): approve it there. INSTALL.txt, *From 0.10.12 to 0.10.12.1*.
+
 ## 0.10.12 — 2026-10-16
 
 Released by the owner's decision without the measurement runs of a gate ("release the fixes on 0.10.12 without

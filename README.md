@@ -107,7 +107,7 @@ Content-Security-Policy (Talisman nonces).
 ```bash
 # the Python of Superset's virtualenv
 PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-$PY -m pip install supagent-0.10.12-py3-none-any.whl        # Superset 6.1: nothing else to install
+$PY -m pip install supagent-0.10.12.1-py3-none-any.whl      # Superset 6.1: nothing else to install
 ```
 
 One line in `superset_config.py` registers it. It holds no logic:
@@ -149,6 +149,14 @@ row level security filters and dashboards keep them), the AI roles' users moved 
 then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with the knowledge written) and Viewer
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
+## Upgrade from 0.10.12 to 0.10.12.1
+
+pip install the wheel on every host and restart (tables unchanged, v20). A document's room in the Context's summary
+pages follows its number of pages: a wiki of 5,000 pages gives some hundred of its central pages (0.10.12 gave it the
+room of a three-page document), with the relations its pages state. The summaries are written again at the next
+Context build; a summary page that exists waits in To review for validation. Measured: not measured with an LLM (no
+gate, the owner's decision); unit tests 2212.
 
 ## Upgrade from 0.10.11.2 to 0.10.12
 

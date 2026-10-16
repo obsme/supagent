@@ -167,3 +167,25 @@ def test_the_summaries_get_the_relations_the_documents_state(ctx):
         db.session.query(KUnit).filter(KUnit.doc_id == doc.id).delete(synchronize_session=False)
         db.session.delete(doc)
         db.session.commit()
+
+
+def test_a_wiki_has_the_room_of_its_pages_among_small_documents():
+    """(0.10.12.1) Six documents in a summary: the small ones their text, the wiki of 5,000 pages most of the room (it
+    had a sixth of it, about nine of its pages)."""
+    from supagent.knowledge import context as C
+
+    wiki = _wiki(5000)
+    repo = {"id": 2, "title": "Ansible", "content": "x" * 50_000,
+            "pages": [{"path": f"roles/r{i}/tasks/main.yml", "title": f"r{i}", "at": i * 250, "chars": 248, "links": []}
+                      for i in range(200)]}
+    smalls = [{"id": 10 + i, "title": f"Runbook {i}", "content": "Restart the service. " * 50, "pages": []} for i in range(4)]
+    shares = C._shares([wiki, repo] + smalls)
+    assert all(shares[10 + i] == len(smalls[i]["content"]) for i in range(4))     # a small one: its text
+    assert shares[1] > 18_000 and shares[2] >= C.DOC_CHARS                         # the wiki: most of the room
+    digest = C._digest(wiki, shares[1])
+    assert digest.count("\n- Page ") >= 80                                        # some 100 of its pages
+    specs = {s["slug"]: s for s in C.summary_specs({"databases": {}, "inventory": {}, "relations": [], "entries": [],
+                                                    "answers": [], "memory": [], "docs": [wiki, repo] + smalls,
+                                                    "part_relations": []})}
+    texts = {e["ref"]: e["text"] for e in specs["overview"]["evidence"] if e["ref"].startswith("doc:")}
+    assert len(texts["doc:1"]) > 18_000 and sum(map(len, texts.values())) <= C.DOCS_CHARS + 2 * C.DOC_CHARS
