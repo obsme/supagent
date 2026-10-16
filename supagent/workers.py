@@ -179,6 +179,9 @@ def _on_worker_ready(sender: Any = None, **_kw: Any) -> None:
     _BEAT.update(stop=stop, thread=thread)
     thread.start()
     log.info("supagent: worker %s seen by the web servers (queues %s)", node, ", ".join(value["queues"]) or "?")
+    from supagent import hoststats
+
+    hoststats.start(_APP["app"], "worker")         # (0.10.11.1) the host's CPU, memory and disks for the usage page
 
 
 def _on_shutting_down(**_kw: Any) -> None:

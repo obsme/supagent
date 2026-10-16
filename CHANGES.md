@@ -1,5 +1,76 @@
 # Changes
 
+## 0.10.11.1 — 2026-10-16
+
+The team's report of 16 October on 0.10.11: after a question about the anomalies of an OpenSearch Dashboards
+dashboard, the chat, the chat panel and Superset's pages stopped answering in that browser, after a reload and after a
+restart of Superset too. And three requests: the chats deleted from the command line, the CPU, memory and disks of
+every server a Superset component runs on in the usage page, and several pages of a wiki removed at once.
+
+In the lab, a chat built like the one reported froze the same way, in the browser: an answer's chart. Its bars were
+labelled with the rows' values (log messages with their stack traces: thousands of characters each), and the page
+fitted each label to its place by taking one character off at a time and measuring the whole text again: minutes of
+work for one chart, in the page's only thread. The chat panel is the chat page in a frame of the same site, which
+shares that thread with the Superset page around it, and the chat opens again, at every load, the chat that was open:
+every Superset page of that browser froze. Superset's server was not loaded by it (its health answered in under
+0.01 s while the page was frozen). An answer that kept tens of megabytes of rows (raw log lines) did not freeze the
+page but made its chat slow to open (4.7 s to load, 5.1 s to draw): both are fixed here.
+
+Measured in the lab on the frozen build 8bbe720 against 0.10.11, with two chats built like the one reported: a 30-row
+"top error messages" answer (labels of 2,000 to 40,000 characters) and a 42 MB answer (six results of 5,000 raw log
+rows). With 0.10.11 the first chat's page never answered again (stopped after 3 min 26 s); the second took 4.7 s to
+load and 5.1 s to draw, the web process 150 MB bigger. With 0.10.11.1 the first opens in 0.2 s (0.1 MB sent instead of
+0.9 MB) and the second in 0.7 s, with no long task in the page; the second's rows, asked with Show the query results,
+come in 4.9 s once (then bounded and saved so). Superset's health answered in under 0.01 s throughout. In a browser:
+two pages of a document removed at once, the Servers table showing the lab's host; on the command line: a chat listed,
+deleted, then said gone. Tables unchanged (v20); the unit tests: 2186 passed.
+
+The chat page
+* **Labels and values fitted at once**: a label is cut by halves to its place (from its first 400 characters); a
+  column's distinct values are counted as they come (they were listed again at every row: half a second for 5,000
+  rows of 12 columns); a value axis never loops on huge numbers close together; a table cell shows its first 300
+  characters (more of it in its tooltip); a number is looked for in short cells only.
+* **A chat that did not finish drawing is not opened again by itself**: the next load of the page says so, with
+  *Open it* and *Delete it*.
+* **A chat opens with the rows of its last two answers**; an earlier answer's come with *Show the query results*.
+
+What an answer keeps for the page
+* **Bounded**: 120 columns, 2,000 characters per value, 3 MB of rows for all the results of one answer (the first rows
+  kept; the page says "first N rows here" or "long values cut here", and an Excel extract asked of the agent has every
+  row). The steps' arguments and lists are cut the same way; an answer's text is drawn up to its first 60,000
+  characters (*Copy answer* gives all of it).
+* **Answers kept before 0.10.11.1** are bounded when they are next read, and saved so; rows over 4 MB are never read
+  to open a chat, only when asked (*Show the query results*).
+
+Command line
+* **superset supagent conversations**: the chats, the latest first, with their user, their messages and their size
+  (counted by the database: a chat too big to open is listed without being read); `--user NAME`, `--limit N`.
+  `--delete ID` (repeated for several) or `--user NAME --all` say what would go; with `--yes` they are deleted, with
+  their messages, files and the examples taken from them, as the chat's own Delete.
+
+Usage page
+* **Servers**: every host a Superset component runs on (a web server, a Celery worker, beat) with its CPU over the last
+  minute, load, memory, swap, disks (each over 90 % shown in red), what the Superset processes there take, the last 24
+  hours of CPU and memory as small lines, and when it was last heard from (a component silent for 5 minutes is shown
+  as gone). Each process of a component writes its host's figures every minute, read from /proc (Linux): nothing to
+  install on the hosts.
+
+Documents and sites
+* **Several pages removed at once**: in a document's *Pages*, tick the pages (or *all shown* after a filter by title,
+  address or space), then *Remove N picked pages*: the document's text rebuilt once, their search pieces and what was
+  learned from them deleted, never read again (as one page's *Remove*).
+
+Upgrade from 0.10.11: pip install the wheel on every host, restart the web servers, the workers and beat; nothing to
+run (tables unchanged, v20; no new setting). Browsers take the new page files at once (their names carry their
+content's hash). INSTALL.txt, *From 0.10.11 to 0.10.11.1*.
+
+Known gaps
+* The agent's work runs in the web server when no Celery worker is alive (`agent.executor` auto, or thread): a long
+  investigation then shares the web server's processes with Superset's pages. Celery workers keep it apart (README,
+  *Celery workers and beat*).
+* Measured on the lab, with chats built like the one reported (raw log rows; long labels); the team's own chat was not
+  available.
+
 ## 0.10.11 — 2026-10-16
 
 Stabilization after 0.10.10: the misses of its gates read as classes and fixed where they come from, and Grafana and

@@ -287,6 +287,53 @@ def forget_learned(databases: tuple[str, ...], everything: bool, yes: bool) -> N
         click.echo("Nothing was changed. Add --yes to forget it (--everything: also people's work in the dictionary).")
 
 
+@supagent.command("conversations",
+                  help="(0.10.11.1) List the chats, the latest first (with the size of what their answers keep), or "
+                       "delete some: --delete ID (repeat), or --user NAME --all; without --yes, only show what would go")
+@click.option("--user", "username", default=None, help="Only this user's chats (Superset username)")
+@click.option("--delete", "ids", multiple=True, type=int, help="Delete this chat (its id, as listed; repeat)")
+@click.option("--all", "every", is_flag=True, help="With --user: delete all the chats of that user")
+@click.option("--limit", default=30, show_default=True, type=int, help="Chats listed")
+@click.option("--yes", is_flag=True, help="Do it (otherwise only show what would be deleted)")
+@with_appcontext
+def conversations_cmd(username: str | None, ids: tuple[int, ...], every: bool, limit: int, yes: bool) -> None:
+    from superset import security_manager
+
+    from supagent.chats import delete, listed
+
+    user_id = None
+    if username:
+        user = security_manager.find_user(username=username)
+        if user is None:
+            raise click.ClickException(f"no Superset user {username!r}")
+        user_id = user.id
+    if every and user_id is None:
+        raise click.ClickException("--all needs --user NAME")
+    if every:
+        rows = chosen = listed(user_id, 100000)
+    elif ids:
+        rows = chosen = listed(user_id, len(ids), ids=list(ids))     # by their ids, however old
+        for i in sorted(set(ids) - {r["id"] for r in chosen}):
+            click.echo(f"No chat {i}" + (f" of {username}" if username else "") + ".")
+        if not chosen:
+            click.echo("Nothing to delete.")
+            return
+    else:
+        rows, chosen = listed(user_id, limit), []
+    for r in rows:
+        click.echo(f"{r['id']:>7}  {str(r['user'])[:16]:<16}  {str(r['updated_at'])[:16]:<16}  {r['messages']:>4} messages  "
+                   f"{r['bytes'] / 1e6:8.2f} MB{'  (an answer running)' if r['running'] else ''}  {str(r['title'])[:60]}")
+    if not (every or ids):
+        click.echo("To delete: superset supagent conversations --delete ID [--delete ID ...] --yes "
+                   "(or --user NAME --all --yes)")
+        return
+    if not yes:
+        click.echo(f"Nothing was changed: {len(chosen)} chat(s) would be deleted. Add --yes to delete them.")
+        return
+    click.echo(f"Deleted {delete([r['id'] for r in chosen])} chat(s) with their messages, files and examples. A browser "
+               "that had one of them open shows an empty chat at its next load.")
+
+
 @supagent.command("settings", help="Show or change settings: --set key=value (repeat), --unset key")
 @click.option("--set", "pairs", multiple=True, metavar="KEY=VALUE")
 @click.option("--unset", "unset", multiple=True, metavar="KEY")

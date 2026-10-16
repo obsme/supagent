@@ -28,6 +28,16 @@
       <button type="submit" class="btn primary">Show</button>
     </form>
   </section>
+  <section class="card" id="servers-card">
+    <div class="sec-head">
+      <h2>Servers</h2><button type="button" class="info" aria-controls="x-servers" aria-label="About the servers">i</button>
+      <div class="explain" id="x-servers">Every server a Superset component runs on (web server, Celery worker, Celery
+        beat): its CPU over the last minute, load, memory, swap and disks, and what the Superset processes there take,
+        with the last 24 hours of CPU and memory. Written by those processes every minute; a component not heard from
+        for 5 minutes is shown as gone. Refreshed every minute.</div>
+    </div>
+    <div class="table-wrap"><table id="hosts"></table></div>
+  </section>
   <div id="usage-note" class="muted" aria-live="polite"></div>
   <section class="tiles" id="tiles"></section>
   <section class="card">

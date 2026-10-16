@@ -24,7 +24,7 @@ import logging
 import os
 from typing import Any, Callable
 
-__version__ = "0.10.11"
+__version__ = "0.10.11.1"
 
 log = logging.getLogger(__name__)
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -145,6 +145,10 @@ def init_app(app: Any) -> None:
     from supagent import workers
 
     workers.register(app)                  # the workers' heartbeat (in a `celery worker` only)
+    from supagent import hoststats
+
+    if hoststats.role_of() in ("web", "beat"):     # (0.10.11.1) the host's CPU, memory and disks for the usage page
+        hoststats.start(app)                       # (a worker starts its own when it is ready: workers.py)
     log.info("supagent %s: chat, data dictionary and daily learning enabled", __version__)
 
 

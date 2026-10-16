@@ -60,6 +60,11 @@
 
   function remember(id) { try { if (id) localStorage.setItem(STORE, String(id)); else localStorage.removeItem(STORE); } catch (e) { /* private mode */ } }
   function remembered() { try { return parseInt(localStorage.getItem(STORE) || "", 10) || null; } catch (e) { return null; } }
+  /* (0.10.11.1) the chat being drawn: still marked at the next load of the page, it never finished (the page froze
+     on it, or was reloaded while it drew): it is then not opened again by itself, the page says so */
+  var OPENING = "supagent.opening";
+  function opening(id) { try { if (id) localStorage.setItem(OPENING, String(id)); else localStorage.removeItem(OPENING); } catch (e) { /* private mode */ } }
+  function unfinished() { try { return parseInt(localStorage.getItem(OPENING) || "", 10) || null; } catch (e) { return null; } }
 
   // ---------------------------------------------------------------- copy (clipboard API needs HTTPS: fallback)
   function toast(msg) {
@@ -128,8 +133,9 @@
   // focus: a message to show (a chat found by the search), else the end of the conversation
   function open(id, focus) {
     stopPolling();
+    opening(id);
     S.chat("GET", "conversations/" + id).then(function (data) {
-      if (data.error) { welcome(); return; }
+      if (data.error) { opening(null); welcome(); return; }
       current = id;
       remember(id);
       box.innerHTML = "";
@@ -149,7 +155,23 @@
         scrollDown();
       }
       markList();
+      opening(null);
     });
+  }
+
+  function reopenNote(id) {
+    var note = el("div", { class: "reopen-note", role: "status" }, [
+      el("p", { text: "The chat that was open last time did not finish opening (it may hold more than this page can " +
+                      "draw), so it was not opened again." }),
+      el("div", {}, [
+        el("button", { type: "button", class: "btn small", text: "Open it", onclick: function () { open(id); } }),
+        el("button", { type: "button", class: "btn small", text: "Delete it", onclick: function (ev) {
+          S.confirm(ev.currentTarget, "Delete this chat?", { detail: "Its messages, results and files go for good; " +
+            "what the agent learned from it stays." }).then(function (ok) {
+            if (ok) S.chat("DELETE", "conversations/" + id).then(function () { note.remove(); loadConversations(null); });
+          });
+        } })])]);
+    box.insertBefore(note, box.firstChild);
   }
 
   // ---------------------------------------------------------------- search in the user's own chats
@@ -195,6 +217,7 @@
   }
 
   // ---------------------------------------------------------------- one answer
+  function cut(t, n) { return t.length > n ? t.slice(0, n) + " …" : t; }
   function stepsView(steps, key) {
     steps = (steps || []).filter(function (s) { return s.tool !== "understood"; });
     if (!steps.length) return null;
@@ -219,8 +242,8 @@
         d.appendChild(st);
         return;
       }
-      if (s.args && Object.keys(s.args).length) st.appendChild(el("pre", { text: JSON.stringify(s.args, null, 2) }));
-      if (s.result) st.appendChild(el("pre", { text: s.result }));
+      if (s.args && Object.keys(s.args).length) st.appendChild(el("pre", { text: cut(JSON.stringify(s.args, null, 2), 4000) }));
+      if (s.result) st.appendChild(el("pre", { text: cut(String(s.result), 4000) }));
       d.appendChild(st);
     });
     return d;
@@ -324,6 +347,23 @@
     return card;
   }
 
+  /* (0.10.11.1) an earlier answer of the chat: its rows are read when asked (the chat opens with the last ones only) */
+  function laterView(node, bubble, m) {
+    var b = el("button", { type: "button", class: "btn small", text: "Show the query results" });
+    b.addEventListener("click", function () {
+      b.disabled = true;
+      b.textContent = "Reading the results…";
+      S.chat("GET", "messages/" + m.id).then(function (full) {
+        if (full.error || !full.id) { b.disabled = false; b.textContent = "Show the query results"; toast(full.error || "Not read"); return; }
+        m.results = full.results || [];
+        m.results_later = false;
+        node._sig = null;
+        fill(node, bubble, m);
+      });
+    });
+    return el("div", { class: "results-later" }, [b]);
+  }
+
   function resultView(m, n, res) {
     var p = V.plan(res);
     var wrap = el("div", {});
@@ -333,7 +373,9 @@
     var body = el("div", { class: "viz-body" });
     var caption = (res.title ? res.title + " · " : "") + S.num(res.row_count) + " row" + (res.row_count === 1 ? "" : "s") +
                   (res.database ? " · " + res.database : "") +
-                  (res.truncated ? " · first " + S.num((res.rows || []).length) + " rows here: ask for an Excel extract for all" : "");
+                  (res.truncated ? " · first " + S.num((res.rows || []).length) + " rows here" +
+                   (res.cut_for_page ? ", long values cut" : "") + ": ask for an Excel extract for all" :
+                   res.cut_for_page ? " · long values cut here: an Excel extract has them whole" : "");
     bar.appendChild(el("span", { class: "caption", text: caption }));
     var seg = el("span", { class: "seg", role: "group", "aria-label": "View" });
     var bTable = el("button", { type: "button", text: "Table" });
@@ -522,6 +564,7 @@
     bubble.appendChild(answer);
     var rv = resultsView(m);
     if (rv) bubble.appendChild(rv);
+    else if (m.results_later) bubble.appendChild(laterView(node, bubble, m));
     var fv = filesView(m.files);
     if (fv) bubble.appendChild(fv);
     var meta = el("div", { class: "meta" });
@@ -574,7 +617,10 @@
       if (node) {
         var nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
         node.className = "msg assistant" + (m.status === "error" ? " error" : "");
+        var last = !/^(pending|running|cancelling)$/.test(m.status);
+        if (last) opening(current);               // the finished answer drawn: marked like an opening (0.10.11.1)
         fill(node, node.querySelector(".bubble"), m);
+        if (last) opening(null);
         if (m.topic !== null && m.topic !== undefined && node.dataset.topic !== String(m.topic)) {
           node.dataset.topic = String(m.topic);         // its subject is known once the answer starts
           var q = node.previousElementSibling;
@@ -867,5 +913,12 @@
       if (url.origin !== location.origin) a.target = "_blank";
     }, true);
   }
-  loadConversations(remembered() || undefined);
+  var stuck = unfinished(), last = remembered();
+  opening(null);
+  if (stuck && stuck === last) {
+    remember(null);
+    loadConversations(undefined).then(function () { reopenNote(stuck); });
+  } else {
+    loadConversations(last || undefined);
+  }
 })();

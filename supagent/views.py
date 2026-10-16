@@ -20,9 +20,11 @@ import os
 import re
 from typing import Any
 
+import sqlalchemy as sa
 from flask import Response, g, request
 from flask_appbuilder import BaseView, expose
 from flask_appbuilder.security.decorators import has_access, has_access_api
+from sqlalchemy.orm import defer
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +38,31 @@ SAFE_ATTRS = {"a": {"href", "title"}, "th": {"align"}, "td": {"align"}}
 
 def _json(data: Any, status: int = 200) -> Response:
     return Response(json.dumps(data, default=str, ensure_ascii=False), status=status, mimetype="application/json")
+
+
+MARKDOWN_CHARS = 60_000      # an answer's Markdown drawn at most (0.10.11.1)
+RESULTS_INLINE = 2           # the answers of a chat whose rows come with it; the earlier ones' when asked
+INLINE_BYTES = 4_000_000     # an answer's stored rows sent with its chat at most (bounded answers are 3 MB at most)
+
+
+def _page_results(m: Any) -> list:
+    """An answer's rows for the page, bounded (pagekeep); an answer kept before 0.10.11.1 is bounded now and
+    saved so, once: the next opening of its chat reads the bounded rows."""
+    from superset import db
+
+    from supagent.models import Message
+    from supagent.pagekeep import fit_results
+
+    results, changed = fit_results(m.results)
+    if changed:
+        try:
+            db.session.query(Message).filter(Message.id == m.id).update({"results": results},
+                                                                       synchronize_session=False)
+            db.session.commit()
+        except Exception:  # pylint: disable=broad-except   (shown bounded all the same)
+            db.session.rollback()
+            log.warning("supagent: the bounded rows of answer %s: not saved", m.id, exc_info=True)
+    return results
 
 
 def render_markdown(text: str) -> str:
@@ -293,10 +320,11 @@ class ChatView(BaseView):
         return conv
 
     @staticmethod
-    def _message_json(m: Any) -> dict:
+    def _message_json(m: Any, with_results: bool = True) -> dict:
         from superset import db
 
         from supagent.models import File
+        from supagent.pagekeep import fit_steps
 
         files = []
         for f in m.files or []:
@@ -305,10 +333,13 @@ class ChatView(BaseView):
                 item["url"] = f"api/files/{f['id']}"
             files.append(item)
         final = m.status in ("done", "error", "cancelled")
+        content = m.content or ""
+        if len(content) > MARKDOWN_CHARS:             # an answer that ran on and on: the page shows its beginning
+            content = content[:MARKDOWN_CHARS] + "\n\n… (cut here: Copy answer gives all of it)"
         return {"id": m.id, "role": m.role, "status": m.status, "content": m.content or "",
-                "html": render_markdown(m.content or "") if m.role == "assistant" else None,
-                "steps": m.steps or [], "files": files, "feedback": m.feedback, "feedback_reason": m.feedback_reason,
-                "results": (m.results or []) if final else [],
+                "html": render_markdown(content) if m.role == "assistant" else None,
+                "steps": fit_steps(m.steps), "files": files, "feedback": m.feedback, "feedback_reason": m.feedback_reason,
+                "results": _page_results(m) if final and with_results else [],
                 "created_at": m.created_at, "finished_at": m.finished_at, "topic": m.topic}
 
     @expose("/api/conversations", methods=("GET",))
@@ -330,26 +361,33 @@ class ChatView(BaseView):
         from supagent.models import Message
 
         conv = self._conversation(cid)
-        msgs = db.session.query(Message).filter_by(conversation_id=conv.id).order_by(Message.id).all()
+        # (0.10.11.1) the rows of the last answers only: an earlier answer's come when asked (results_later)
+        msgs = (db.session.query(Message).options(defer(Message.results)).filter_by(conversation_id=conv.id)
+                .order_by(Message.id).all())
         if expire_stale(msgs):
             db.session.commit()
-        return _json({"id": conv.id, "title": conv.title, "messages": [self._message_json(m) for m in msgs]})
+        sizes = dict(db.session.query(Message.id, sa.func.length(sa.cast(Message.results, sa.Text)))
+                     .filter(Message.conversation_id == conv.id).all())
+        inline = {m.id for m in msgs if m.role == "assistant"}
+        # an answer's rows kept before 0.10.11.1 can weigh tens of megabytes: never read to open the chat, only when
+        # asked (the message's own request bounds them then, once)
+        inline = {i for i in sorted(inline)[-RESULTS_INLINE:] if (sizes.get(i) or 0) <= INLINE_BYTES}
+        out = []
+        for m in msgs:
+            item = self._message_json(m, with_results=m.id in inline)
+            if m.id not in inline and m.role == "assistant" and (sizes.get(m.id) or 0) > 4 and \
+                    m.status in ("done", "error", "cancelled"):
+                item["results_later"] = True
+            out.append(item)
+        return _json({"id": conv.id, "title": conv.title, "messages": out})
 
     @expose("/api/conversations/<int:cid>", methods=("DELETE",))
     @has_access_api
     def delete_conversation(self, cid: int) -> Response:
-        from superset import db
-
-        from supagent.models import Example, File, Message
+        from supagent.chats import delete
 
         conv = self._conversation(cid)
-        ids = [m.id for m in db.session.query(Message.id).filter_by(conversation_id=conv.id)]
-        if ids:
-            db.session.query(File).filter(File.message_id.in_(ids)).delete(synchronize_session=False)
-            db.session.query(Example).filter(Example.message_id.in_(ids)).delete(synchronize_session=False)
-            db.session.query(Message).filter(Message.id.in_(ids)).delete(synchronize_session=False)
-        db.session.delete(conv)
-        db.session.commit()
+        delete([conv.id])
         return _json({"deleted": cid})
 
     @expose("/api/ask", methods=("POST",))
@@ -1873,7 +1911,7 @@ class AdminView(BaseView):
     # (0.9.6) write: the settings (an admin's); read: the knowledge the dictionary's pages read (an editor's too);
     # edit: the knowledge written (an editor's); delete: the knowledge deleted (an admin's)
     method_permission_name = {
-        "index": "write", "get_settings": "write", "put_settings": "write", "test_llm": "write", "test_source": "write", "learn": "write",
+        "index": "write", "get_settings": "write", "put_settings": "write", "test_llm": "write", "test_source": "write", "hosts_data": "write", "learn": "write",
         "classify_now": "write", "backups": "write", "backup_file": "write", "backup_restore": "write",
         "stop_learning": "write", "runs": "write", "status": "write", "usage": "write", "usage_data": "write",
         "entries": "read", "entry_history": "read", "export_catalog": "read", "team_memory": "read", "docs": "read",
@@ -2116,6 +2154,17 @@ class AdminView(BaseView):
         if d is None or d.kind != "url":
             abort(404)
         body = _body()
+        if isinstance(body.get("pages"), list):        # (0.10.11.1) several at once: [{page_id|path|url}, ...]
+            from supagent.knowledge.docs import exclude_pages
+
+            refs = [r for r in body["pages"] if isinstance(r, dict)][:MAX_DOC_PAGES]
+            out = exclude_pages(d, g.user.username, refs)
+            if not out["removed"]:
+                db.session.rollback()
+                return _json({"error": "none of these pages is in this document", **out}, 400)
+            db.session.commit()
+            _sync_chunks(f"doc:{d.id}#")
+            return _json(out)
         try:
             out = exclude_page(d, g.user.username, url=str(body.get("url") or ""),
                                page_id=str(body.get("page_id") or ""), path=str(body.get("path") or ""))
@@ -2317,6 +2366,15 @@ class AdminView(BaseView):
         grain = request.args.get("grain") or ("day" if end - start > dt.timedelta(days=3) else "hour")
         tz = request.args.get("tz", type=int) or 0
         return _json(report(start, end, grain, tz_offset_minutes=max(-900, min(900, tz))))
+
+    @expose("/api/hosts", methods=("GET",))
+    @has_access_api
+    def hosts_data(self) -> Response:
+        """(0.10.11.1) The servers Superset runs on: per host its components and its CPU, load, memory, swap, disks,
+        the Superset processes, and a day of history (supagent.hoststats)."""
+        from supagent.hoststats import GONE_S, hosts
+
+        return _json({"hosts": hosts(), "gone_after_s": GONE_S})
 
     @expose("/api/settings", methods=("GET",))
     @has_access_api

@@ -114,4 +114,55 @@
     });
   });
   load();
+
+  /* (0.10.11.1) the servers Superset runs on: CPU, load, memory, swap, disks, the Superset processes, a day of history */
+  function pct(v) { return v === null || v === undefined ? "" : S.num(v) + " %"; }
+  function spark(points, key, label) {
+    var vals = (points || []).map(function (p) { return p[key]; }).filter(function (v) { return typeof v === "number"; });
+    if (vals.length < 2) return el("span", { class: "muted", text: "" });
+    var w = 120, h = 22, n = vals.length;
+    var d = vals.map(function (v, i) { return (i ? "L" : "M") + (i * (w - 2) / (n - 1) + 1).toFixed(1) + "," +
+      (h - 1 - Math.max(0, Math.min(100, v)) * (h - 2) / 100).toFixed(1); }).join(" ");
+    var ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("width", w); svg.setAttribute("height", h); svg.setAttribute("class", "spark");
+    svg.setAttribute("role", "img"); svg.setAttribute("aria-label", label + ", last 24 hours, peak " + Math.max.apply(null, vals) + " %");
+    var path = document.createElementNS(ns, "path");
+    path.setAttribute("d", d); path.setAttribute("fill", "none"); path.setAttribute("stroke", "currentColor"); path.setAttribute("stroke-width", "1.5");
+    svg.appendChild(path);
+    var t = document.createElementNS(ns, "title"); t.textContent = label + ": peak " + Math.max.apply(null, vals) + " %"; svg.appendChild(t);
+    return svg;
+  }
+  function warn(text, bad) { return el("span", { class: bad ? "warn-text" : "", text: text }); }
+  function renderHosts(d) {
+    var t = $("hosts");
+    t.innerHTML = "";
+    var heads = ["Server", "Components", "CPU", "Load 1 · 5 · 15", "Memory", "Swap", "Disks", "Superset processes",
+                 "CPU, 24 h", "Memory, 24 h", "Seen"];
+    t.appendChild(el("thead", {}, [el("tr", {}, heads.map(function (h) { return el("th", { text: h }); }))]));
+    var body = el("tbody", {});
+    (d.hosts || []).forEach(function (h) {
+      var l = h.last || {}, roles = h.roles || {};
+      var comps = Object.keys(roles).sort().map(function (r) { return r + (roles[r].alive ? "" : " (gone)"); }).join(", ");
+      var disks = el("div", {}, (l.disks || []).map(function (k) {
+        return el("div", {}, [warn(k.mount + " " + S.num(k.pct) + " % of " + S.bytes(k.total), k.pct >= 90)]); }));
+      var mem = l.mem_total ? warn(S.bytes(l.mem_used) + " of " + S.bytes(l.mem_total) + " (" + pct(l.mem_pct) + ")", l.mem_pct >= 90) : "";
+      var swap = l.swap_total ? warn(S.bytes(l.swap_used) + " of " + S.bytes(l.swap_total), l.swap_used > l.swap_total / 2) : el("span", { class: "muted", text: "none" });
+      var load = (l.load || []).map(function (x) { return S.num(x); }).join(" · ") + (l.cpus ? " (" + l.cpus + " cores)" : "");
+      var sp = l.superset || {};
+      body.appendChild(el("tr", {}, [el("td", { text: h.host }), el("td", { text: comps }),
+        el("td", { class: "num" }, [warn(pct(l.cpu_pct), l.cpu_pct >= 85)]),
+        el("td", {}, [warn(load, l.cpus && (l.load || [0])[0] > l.cpus)]), el("td", {}, [mem]), el("td", {}, [swap]),
+        el("td", {}, [disks]), el("td", { text: (sp.count || 0) + " · " + S.bytes(sp.rss || 0) }),
+        el("td", {}, [spark(h.history, "cpu", "CPU")]), el("td", {}, [spark(h.history, "mem", "Memory")]),
+        el("td", { class: "muted", text: h.age === null || h.age === undefined ? "" : (h.age < 90 ? "now" : S.num(Math.round(h.age / 60)) + " min ago") })]));
+    });
+    if (!(d.hosts || []).length) body.appendChild(el("tr", {}, [el("td", { colspan: String(heads.length), class: "muted",
+      text: "No server has written yet: the web servers, workers and beat write their host every minute once they run 0.10.11.1 (restart them after the upgrade)." })]));
+    t.appendChild(body);
+  }
+  function loadHosts() {
+    S.admin("GET", "hosts").then(renderHosts, function () { /* the page stays as it was */ });
+  }
+  loadHosts();
+  setInterval(loadHosts, 60000);
 })();

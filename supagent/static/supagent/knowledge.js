@@ -1233,6 +1233,59 @@
       });
       return b;
     };
+    /* (0.10.11.1) several pages removed at once: a filter (title, address, space), "all shown", Remove picked */
+    var bulkBar = function (rows) {
+      var filter = el("input", { type: "search", placeholder: "Filter the pages (title, address, space)", "aria-label": "Filter the pages" });
+      var all = el("input", { type: "checkbox", "aria-label": "Pick every page shown" });
+      var go = el("button", { type: "button", class: "btn small danger", text: "Remove picked pages" });
+      var res = el("span", { class: "result", role: "status" });
+      var bar = el("div", { class: "doc-pages-bulk" }, [el("label", {}, [all, document.createTextNode(" all shown ")]), filter, go, res]);
+      var picked = function () { return rows.filter(function (r) { return r.box.checked; }); };
+      var count = function () {
+        var n = picked().length;
+        go.disabled = !n;
+        go.textContent = n ? "Remove " + S.num(n) + " picked page" + (n === 1 ? "" : "s") : "Remove picked pages";
+      };
+      rows.forEach(function (r) { r.box.addEventListener("change", count); });
+      filter.addEventListener("input", function () {
+        var t = filter.value.trim().toLowerCase();
+        rows.forEach(function (r) { r.tr.hidden = !!t && r.text.indexOf(t) < 0; });
+        all.checked = false;
+      });
+      all.addEventListener("change", function () {
+        rows.forEach(function (r) { if (!r.tr.hidden) r.box.checked = all.checked; });
+        count();
+      });
+      go.addEventListener("click", function () {
+        var chosen = picked();
+        if (!chosen.length) return;
+        var yes = el("button", { type: "button", class: "btn small danger", text: "Remove " + S.num(chosen.length) });
+        var no = el("button", { type: "button", class: "btn small", text: "Cancel" });
+        var ask = el("span", { class: "doc-page-confirm" }, [el("span", { text: "Remove " + S.num(chosen.length) + " page" +
+          (chosen.length === 1 ? "" : "s") + " from the document (not read again; their text, search pieces and what was learned from them deleted)? " }), yes, no]);
+        go.replaceWith(ask);
+        no.addEventListener("click", function () { ask.replaceWith(go); });
+        yes.addEventListener("click", function () {
+          yes.disabled = no.disabled = true;
+          res.textContent = "Removing…"; res.className = "result";
+          S.admin("POST", "docs/" + x.id + "/pages/remove", { pages: chosen.map(function (r) {
+            return { page_id: r.p.page_id || "", path: r.p.path || "", url: r.p.url || "" }; }) }).then(function (r) {
+            if (!r || r.error || !(r.removed || []).length) {
+              res.textContent = (r && r.error) || "not removed"; res.className = "result bad"; ask.replaceWith(go); return;
+            }
+            if (shown) {
+              var gone = chosen.map(function (c) { return c.p; });
+              shown.pages = (shown.pages || []).filter(function (q) { return gone.indexOf(q) < 0; });
+              shown.excluded = (shown.excluded || []).concat(r.removed.map(function (k) {
+                return { key: k.key, title: k.title || "", url: k.url || "", by: "you", at: new Date().toISOString() }; }));
+              render(shown);
+            } else { read(); }
+          });
+        });
+      });
+      count();
+      return bar;
+    };
     function render(d) {
       cell.innerHTML = "";
       if (d.error) { cell.appendChild(el("div", { class: "result bad", text: d.error })); return; }
@@ -1248,19 +1301,27 @@
           (last.left ? ": at least " + S.num(last.left) + " more linked page" + (last.left === 1 ? " was" : "s were") + " not read" : "") +
           ". Raise “Pages” (Edit) to read more of the site." }));
       }
-      var heads = ["Page", "Space", "Size", "Links", "Images"].concat(can ? [""] : []);
+      var heads = (can ? [""] : []).concat(["Page", "Space", "Size", "Links", "Images"]).concat(can ? [""] : []);
       var table = el("table", { class: "grid compact" }, [el("thead", {}, [el("tr", {}, heads.map(function (h) {
         return el("th", { text: h }); }))])]);
       var tb = el("tbody", {});
+      var rows = [];                                /* (0.10.11.1) pages picked for a removal at once */
       pages.forEach(function (p) {
         var name = p.url ? el("a", { href: p.url, target: "_blank", rel: "noopener", text: p.title || p.path || p.url }) :
           el("span", { text: p.title || p.path || "" });
         var tr = el("tr", {}, [el("td", {}, [name, p.url ? el("div", { class: "muted nm", text: p.url }) : null]),
           el("td", { text: p.space || "" }), el("td", { class: "num", text: S.bytes(p.chars || 0) }),
           el("td", { class: "num", text: p.links ? S.num(p.links) : "" }), el("td", { class: "num", text: p.images ? S.num(p.images) : "" })]);
-        if (can) tr.appendChild(el("td", { class: "row-actions" }, [removeBtn(p, tr)]));
+        if (can) {
+          var box = el("input", { type: "checkbox", "aria-label": "Pick this page" });
+          tr.insertBefore(el("td", {}, [box]), tr.firstChild);
+          tr.appendChild(el("td", { class: "row-actions" }, [removeBtn(p, tr)]));
+          rows.push({ p: p, tr: tr, box: box,
+                      text: [p.title, p.path, p.url, p.space].filter(Boolean).join(" ").toLowerCase() });
+        }
         tb.appendChild(tr);
       });
+      if (can && rows.length) cell.appendChild(bulkBar(rows));
       if (!pages.length) tb.appendChild(D.emptyRow(heads.length, "No page read yet."));
       table.appendChild(tb);
       cell.appendChild(el("div", { class: "table-wrap" }, [table]));

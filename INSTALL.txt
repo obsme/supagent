@@ -1,16 +1,17 @@
-supagent 0.10.11 - the AI agent inside Apache Superset
-======================================================
+supagent 0.10.11.1 - the AI agent inside Apache Superset
+========================================================
 
 What is in this folder
-  supagent-0.10.11-py3-none-any.whl   the package for Superset 6.1 (pure Python; nothing else to install)
+  supagent-0.10.11.1-py3-none-any.whl the package for Superset 6.1 (pure Python; nothing else to install)
   supagent-guide.html / .pdf          the guide (install, LLM middleware, learning, screens)
   catalog.example.yaml                an example catalog, to adapt
   grafana-wheels/                     mcp and what it needs beyond Superset 6.1 (Grafana, without internet)
   SHA256SUMS                          checksums
 
-Upgrading? From 0.10.10: pip install this wheel on every host, restart; nothing to run: "From 0.10.10 to
-0.10.11" below. From 0.10.9.2: pip install this wheel on every host, run superset supagent init (tables
-v20), restart: "From 0.10.9.2 to 0.10.10" and "From 0.10.10 to 0.10.11" below. From 0.10.9.1: the same, and "From 0.10.9.1 to 0.10.9.2" below. From 0.10.9: the same, and "From 0.10.9 to 0.10.9.1" below. From 0.10.8.1: the same (osagg 0.2.15 or 0.2.16), and "From 0.10.8.1 to 0.10.9" below. From 0.10.8: the same with osagg 0.2.15, and "From 0.10.8 to 0.10.8.1" below. From 0.10.7: the same, and "From 0.10.7 to 0.10.8" below. From 0.10.6.2, 0.10.6.1 or 0.10.6: the same, and "From 0.10.6.2 to 0.10.7" below (and "From 0.10.6.1 to
+Upgrading? From 0.10.11: pip install this wheel on every host, restart; nothing to run: "From 0.10.11 to
+0.10.11.1" below. From 0.10.10: the same, and "From 0.10.10 to 0.10.11" below. From 0.10.9.2: pip install
+this wheel on every host, run superset supagent init (tables v20), restart: "From 0.10.9.2 to 0.10.10" and
+the sections after it below. From 0.10.9.1: the same, and "From 0.10.9.1 to 0.10.9.2" below. From 0.10.9: the same, and "From 0.10.9 to 0.10.9.1" below. From 0.10.8.1: the same (osagg 0.2.15 or 0.2.16), and "From 0.10.8.1 to 0.10.9" below. From 0.10.8: the same with osagg 0.2.15, and "From 0.10.8 to 0.10.8.1" below. From 0.10.7: the same, and "From 0.10.7 to 0.10.8" below. From 0.10.6.2, 0.10.6.1 or 0.10.6: the same, and "From 0.10.6.2 to 0.10.7" below (and "From 0.10.6.1 to
 0.10.6.2", "From 0.10.6 to 0.10.6.1" for what they brought, in this wheel too). From 0.10.0: pip install this wheel on every host,
 superset supagent init once (no table changes: v18), restart: "From 0.10.0 to 0.10.6" below (0.10.4 and 0.10.5 were not released: "What 0.10.5 brings" and "What 0.10.4 brings" too). From 0.9.6.9,
 0.9.6.8, ... 0.9.6.1 or 0.9.6: pip install this wheel on every host, superset supagent init once (tables v17 to v18:
@@ -36,7 +37,7 @@ role): three packages must be pinned, or Superset itself does not start (none is
 1. Install in Superset's virtualenv (pip only)
 
    PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-   $PY -m pip install supagent-0.10.11-py3-none-any.whl
+   $PY -m pip install supagent-0.10.11.1-py3-none-any.whl
    Superset 6.1: nothing else is needed (offline too).
 
 2. Register it: one line in superset_config.py (no logic)
@@ -187,6 +188,21 @@ role): three packages must be pinned, or Superset itself does not start (none is
    wait: grafana.read_new, osd.read_new); a whole search at once. What is switched off leaves the Context and the
    search at once and is no longer read, explained or watched; the agent says it exists and is switched off when a
    question names it. "List now" reads the list again (no AI); every learning does too.
+
+From 0.10.11 to 0.10.11.1
+=========================
+  - pip install the wheel on every host and restart the web servers, the workers and beat; nothing to run (tables
+    unchanged, v20; no new setting).
+  - A chat that froze a browser opens again: its answer is bounded the first time it is read. A browser still on the
+    frozen chat: reload once after the upgrade (the page then says the chat did not finish opening and offers to open
+    or delete it).
+  - Chats from the command line: superset supagent conversations [--user NAME] [--limit N] lists them with their
+    size; superset supagent conversations --delete ID [--delete ID ...] --yes, or --user NAME --all --yes, deletes them
+    (without --yes: what would go, nothing changed).
+  - The usage page's Servers table fills once each web server, worker and beat runs 0.10.11.1 (restart them all).
+  - Measured: in the lab, a chat whose chart froze 0.10.11's page for good opens in 0.2 s, and a 42 MB answer's chat
+    in 0.7 s (4.7 s to load before), with no long task in the page; two pages removed at once, the Servers table and
+    the command line checked; tables unchanged (v20); unit tests 2186.
 
 From 0.10.10 to 0.10.11
 =======================

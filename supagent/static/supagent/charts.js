@@ -7,7 +7,7 @@
   "use strict";
   var NS = "http://www.w3.org/2000/svg";
   var TIME_RE = /^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?)?(Z|[+-]\d{2}:?\d{2})?$/;
-  var MAX_SERIES = 8, MAX_BARS = 40, TABLE_ROWS = 500;
+  var MAX_SERIES = 8, MAX_BARS = 40, TABLE_ROWS = 500, CELL = 300;
 
   // ------------------------------------------------------------------ helpers
   function css(name) { return getComputedStyle(document.body).getPropertyValue(name).trim(); }
@@ -40,12 +40,15 @@
     return v.toLocaleString(undefined, { maximumFractionDigits: a >= 100 ? 0 : a >= 1 ? 2 : 4 });
   }
   function niceTicks(lo, hi, count) {
+    if (!isFinite(lo) || !isFinite(hi)) return [0, 1];
     if (!(hi > lo)) { hi = lo + (lo === 0 ? 1 : Math.abs(lo) * 0.1); }
     var span = hi - lo, step = Math.pow(10, Math.floor(Math.log10(span / count)));
     var err = span / count / step;
     if (err >= 7.5) step *= 10; else if (err >= 3.5) step *= 5; else if (err >= 1.5) step *= 2;
     var start = Math.floor(lo / step) * step, end = Math.ceil(hi / step) * step, ticks = [];
-    for (var t = start; t <= end + step / 2; t += step) ticks.push(Math.abs(t) < step / 1e6 ? 0 : t);
+    // a step too small for numbers this big (1e18 apart by a few units) adds nothing: two ticks, never a loop
+    if (!(step > 0) || start + step === start || end + step === end) return [lo, hi];
+    for (var t = start; t <= end + step / 2 && ticks.length < 200; t += step) ticks.push(Math.abs(t) < step / 1e6 ? 0 : t);
     return ticks;
   }
   var measureCtx = document.createElement("canvas").getContext("2d");
@@ -53,12 +56,19 @@
     measureCtx.font = (size || 12) + "px " + (css("--font") || "sans-serif");
     return measureCtx.measureText(s).width;
   }
+  // the longest start of s that fits px (a log line, a stack trace: thousands of characters), by halves
   function clip(s, px, size) {
     s = String(s);
+    if (s.length > 400) s = s.slice(0, 400);
     if (textWidth(s, size) <= px) return s;
-    while (s.length > 1 && textWidth(s + "…", size) > px) s = s.slice(0, -1);
-    return s + "…";
+    var lo = 1, hi = s.length;
+    while (lo < hi) {
+      var mid = Math.ceil((lo + hi) / 2);
+      if (textWidth(s.slice(0, mid) + "…", size) <= px) lo = mid; else hi = mid - 1;
+    }
+    return s.slice(0, lo) + "…";
   }
+  function short(s, n) { s = String(s); return s.length > n ? s.slice(0, n) + "…" : s; }
 
   // time ticks on round local boundaries (00:00, 03:00, 06:00...; days; weeks; months)
   var MIN = 60000, HOUR = 60 * MIN, DAY = 24 * HOUR;
@@ -85,19 +95,20 @@
   function analyze(res) {
     var cols = res.columns || [], rows = res.rows || [];
     return cols.map(function (name, i) {
-      var n = 0, num = 0, time = 0, distinct = {};
+      // the distinct values counted as they come (1001 at most): no list of them made again at every row
+      var n = 0, num = 0, time = 0, distinct = new Map(), nd = 0;
       for (var r = 0; r < rows.length; r++) {
         var v = rows[r][i];
         if (v === null || v === undefined || v === "") continue;
         n++;
         if (isNum(v)) num++;
-        else if (typeof v === "string" && TIME_RE.test(v.trim())) time++;
-        if (Object.keys(distinct).length <= 1000) distinct[String(v)] = 1;
+        else if (typeof v === "string" && v.length < 40 && TIME_RE.test(v.trim())) time++;
+        if (nd <= 1000) { var k = String(v); if (!distinct.has(k)) { distinct.set(k, 1); nd++; } }
       }
       var type = !n ? "empty" : num === n ? "number" : time === n ? "time" : "category";
-      if (type === "number" && /(^|_|\b)(id|code|year)$/i.test(name) && Object.keys(distinct).length > 1) type = "category";
+      if (type === "number" && /(^|_|\b)(id|code|year)$/i.test(name) && nd > 1) type = "category";
       if (type === "number" && /^(ts|time|timestamp)$/i.test(name)) type = "category";
-      return { name: name, index: i, type: type, distinct: Object.keys(distinct).length };
+      return { name: name, index: i, type: type, distinct: nd };
     });
   }
 
@@ -166,7 +177,7 @@
       if (x + w > width && x > 0) { x = 0; y += 18; }
       if (kind === "line") svg("line", { x1: x, x2: x + 14, y1: y - 4, y2: y - 4, stroke: it.color, "stroke-width": 2, "stroke-linecap": "round" }, g);
       else svg("rect", { x: x, y: y - 9, width: 10, height: 10, rx: 2, fill: it.color }, g);
-      text(g, x + 20, y, it.name, { fill: ink, "font-size": 12 });
+      text(g, x + 20, y, it.name, { fill: ink, "font-size": 12 });     // names come short (drawLine)
       x += w;
     });
     return y + 12;
@@ -189,7 +200,7 @@
       var pts = Object.keys(groups[k]).map(Number).sort(function (a, b) { return a - b; })
         .map(function (t) { return [t, groups[k][t]]; });
       var peak = pts.reduce(function (m, q) { return isNum(q[1]) ? Math.max(m, Math.abs(q[1])) : m; }, 0);
-      return { name: k, pts: pts, peak: peak };
+      return { name: short(k, 80), pts: pts, peak: peak };
     });
     var hidden = 0;
     if (series.length > MAX_SERIES) {
@@ -302,7 +313,7 @@
     rows = rows.slice(0, MAX_BARS);
     if (!rows.length) return false;
     var colors = palette(), ink = css("--ink"), ink2 = css("--ink-2"), muted = css("--muted"), grid = css("--grid"), axis = css("--axis"), surface = css("--panel");
-    var label = function (r) { return p.cats.map(function (c) { return r[c.index] === null ? "(empty)" : String(r[c.index]); }).join(" · "); };
+    var label = function (r) { return p.cats.map(function (c) { return r[c.index] === null ? "(empty)" : short(r[c.index], 300); }).join(" · "); };
     var W = Math.max(320, host.clientWidth || 640);
     var labelW = Math.min(W * 0.4, Math.max.apply(null, rows.map(function (r) { return textWidth(label(r), 12); })) + 4);
     var vals = rows.map(function (r) { return r[measure.index]; });
@@ -418,8 +429,9 @@
         var tr = tb.insertRow();
         cols.forEach(function (c, i) {
           var td = tr.insertCell();
-          var v = r[i];
-          td.textContent = isNum(v) ? fmt(v) : v === null || v === undefined ? "" : String(v);
+          var v = r[i], t = isNum(v) ? fmt(v) : v === null || v === undefined ? "" : String(v);
+          if (t.length > CELL) { td.title = t.slice(0, 4 * CELL); t = t.slice(0, CELL) + "…"; }   // a log line: its start
+          td.textContent = t;
           if (c.type === "number") td.className = "num";
         });
       });

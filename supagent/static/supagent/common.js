@@ -199,7 +199,9 @@
     if (!n && n !== 0) return "";
     if (n < 1024) return n + " B";
     if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
-    return (n / 1048576).toFixed(1) + " MB";
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
+    if (n < 1099511627776) return (n / 1073741824).toFixed(1) + " GB";     // (0.10.11.1) a server's memory and disks
+    return (n / 1099511627776).toFixed(1) + " TB";
   }
 
   function sourceBadge(src, verified) {
@@ -490,7 +492,8 @@
       }
       Array.prototype.forEach.call(t.querySelectorAll("td, th"), function (c) {
         var x = (c.textContent || "").trim();
-        if (NUMBER.test(x) || (c.tagName === "TD" && EMPTY.test(x))) c.classList.add("num");
+        // a number is short: a long cell (a log line, a list of addresses) is never tried (the test is quadratic on it)
+        if ((x.length <= 40 && NUMBER.test(x)) || (c.tagName === "TD" && EMPTY.test(x))) c.classList.add("num");
       });
     });
   }

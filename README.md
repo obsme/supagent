@@ -107,7 +107,7 @@ Content-Security-Policy (Talisman nonces).
 ```bash
 # the Python of Superset's virtualenv
 PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-$PY -m pip install supagent-0.10.11-py3-none-any.whl        # Superset 6.1: nothing else to install
+$PY -m pip install supagent-0.10.11.1-py3-none-any.whl      # Superset 6.1: nothing else to install
 ```
 
 One line in `superset_config.py` registers it. It holds no logic:
@@ -149,6 +149,18 @@ row level security filters and dashboards keep them), the AI roles' users moved 
 then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with the knowledge written) and Viewer
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
+## Upgrade from 0.10.11 to 0.10.11.1
+
+pip install the wheel on every host and restart the web servers, the workers and beat (tables unchanged, v20). The
+chat never freezes on a heavy answer any more (a chart's long labels froze the page and, through the chat panel, every
+Superset page of that browser): what an answer keeps for the page is bounded, a chat opens with the rows of its last
+two answers, and a chat that did not finish drawing is not opened again by itself. `superset supagent conversations`
+lists the chats and deletes them (`--delete ID --yes`); the usage page shows the CPU, memory and disks of every server
+a Superset component runs on; several pages of a document are removed at once. Measured: in the lab, a chat whose
+chart froze 0.10.11's page for good opens in 0.2 s, and a 42 MB answer's chat in 0.7 s (4.7 s to load before), with no
+long task in the page; two pages removed at once, the Servers table and the command line checked; tables unchanged
+(v20); unit tests 2186.
 
 ## Upgrade from 0.10.10 to 0.10.11
 
@@ -2330,6 +2342,9 @@ superset supagent charts [--scan] [--understand] [--chart N]              the ni
 superset supagent store status | rebuild | sync | wipe [--yes] | search "words" [--user U] [--chats]
                                                                           the knowledge store (0.6)
 superset supagent grant USER...
+superset supagent conversations [--user U] [--limit N]                   the chats, with their size (0.10.11.1)
+superset supagent conversations --delete ID [--delete ID ...] --yes      deleted (without --yes: what would
+                                                                         go); --user U --all --yes: all of U's
 superset supagent push-descriptions [--labels] | push-metrics            catalog -> datasets
 superset supagent mcp [--host 127.0.0.1 --port 5009]                     the tools for other agents
 ```
@@ -2360,6 +2375,13 @@ behind your gateway.
 * **People first**: the background LLM work (the daily learning's descriptions, learned answers
   and memory from a *Helpful*) waits while answers are being computed (2 minutes at most per
   call), so that the LLM serves the people waiting first.
+* **A chat from the command line**: `superset supagent conversations` lists the chats with their size
+  (`--user NAME`, `--limit N`); `--delete ID --yes` deletes one (repeat `--delete`), `--user NAME --all --yes`
+  all of a user's; without `--yes` it only says what would go (0.10.11.1).
+* **The servers**: the usage page's *Servers* table shows every host a Superset component runs on (web
+  server, Celery worker, beat) with its CPU, load, memory, swap and disks, what the Superset processes take
+  there, and 24 hours of CPU and memory; each process writes its host's figures every minute (read from /proc:
+  Linux, nothing to install), a component silent for 5 minutes is shown as gone (0.10.11.1).
 * **Old chats**: `chats.keep_days` (0, the default: keep every chat) deletes the chats nobody
   used for that many days, with their messages and files (90: three months); what they taught
   stays. The delivered messages of a queue in Superset's database: `agent.queue_keep_days`

@@ -635,27 +635,47 @@ def exclude_page(doc: Doc, by: str, url: str = "", page_id: str = "", path: str 
     the document's text now (the search's pieces follow), and what the understanding read from it deleted (its unit
     and its facts). What the map was proposed from it is withdrawn by the next learning, and a link approved from it
     only proposed for removal (never removed without a person)."""
+    out = exclude_pages(doc, by, [{"url": url, "page_id": page_id, "path": path}])
+    if not out["removed"]:
+        raise ValueError("no such page in this document")
+    first = out["removed"][0]
+    return {"removed": first["key"], "title": first["title"], "pages": out["pages"], "units": out["units"],
+            "facts": out["facts"]}
+
+
+def exclude_pages(doc: Doc, by: str, refs: list[dict[str, Any]]) -> dict[str, Any]:
+    """(0.10.11.1) Several pages removed at once ({"page_id"} or {"path"} or {"url"} each), as exclude_page removes
+    one: the document's text rebuilt once, their units and facts deleted in one go. Pages not found are said."""
     from supagent.models import KFact, KUnit
 
     pages = [p for p in doc.pages or [] if isinstance(p, dict)]
-
-    def same(p: dict[str, Any]) -> bool:
-        return bool((page_id and str(p.get("id") or "") == str(page_id)) or (path and p.get("path") == path)
-                    or (url and not page_id and not path and p.get("url") == url))
-
-    hit = next((p for p in pages if same(p)), None)
-    if hit is None:
-        raise ValueError("no such page in this document")
-    key = page_key(hit)
-    kept_ex = [e for e in excluded_pages(doc) if e["key"] != key]
-    kept_ex.append({"key": key, "url": str(hit.get("url") or "")[:2000], "title": str(hit.get("title") or "")[:300],
-                    "by": by, "at": dt.datetime.utcnow().isoformat(timespec="seconds")})
+    by_id = {str(p.get("id")): p for p in pages if p.get("id")}
+    by_path = {p.get("path"): p for p in pages if p.get("path")}
+    by_url = {p.get("url"): p for p in pages if p.get("url")}
+    hits: list[dict[str, Any]] = []
+    missing = []
+    for r in refs:
+        page_id, path, url = str(r.get("page_id") or ""), str(r.get("path") or ""), str(r.get("url") or "")
+        hit = (by_id.get(page_id) if page_id else None) or (by_path.get(path) if path else None) or \
+            (by_url.get(url) if url and not page_id and not path else None)
+        if hit is None:
+            missing.append(page_id or path or url)
+        elif not any(h is hit for h in hits):
+            hits.append(hit)
+    if not hits:
+        return {"removed": [], "missing": missing, "pages": len(pages), "units": 0, "facts": 0}
+    now = dt.datetime.utcnow().isoformat(timespec="seconds")
+    keys = [page_key(h) for h in hits]
+    kept_ex = [e for e in excluded_pages(doc) if e["key"] not in set(keys)]
+    kept_ex += [{"key": k, "url": str(h.get("url") or "")[:2000], "title": str(h.get("title") or "")[:300], "by": by,
+                 "at": now} for k, h in zip(keys, hits)]
     doc.auth = {**_auth(doc), "excluded": kept_ex[-EXCLUDED_KEPT:]}
-    rest = [p for p in pages if p is not hit]
+    gone = {id(h) for h in hits}
+    rest = [p for p in pages if id(p) not in gone]
     content = doc.content or ""
     if all(isinstance(p.get("at"), int) and isinstance(p.get("chars"), int) for p in pages):
         texts, placed, at = [], [], 0
-        for p in rest:                                 # the document's text without it, each page's place again
+        for p in rest:                                 # the document's text without them, each page's place again
             block = content[p["at"]:p["at"] + p["chars"]]
             if placed:
                 at += 2
@@ -666,12 +686,12 @@ def exclude_page(doc: Doc, by: str, url: str = "", page_id: str = "", path: str 
     else:                                              # (a reading before 0.10.7 said no place: its text goes at the next)
         doc.pages = rest
     doc.content_hash = hashlib.sha256((doc.content or "").encode()).hexdigest()[:40]
-    ukeys = {str(hit.get("path") or hit.get("id") or hit.get("url") or "")[:512]} - {""}
+    ukeys = {str(h.get("path") or h.get("id") or h.get("url") or "")[:512] for h in hits} - {""}
     units = [i for (i,) in db.session.query(KUnit.id).filter(KUnit.doc_id == doc.id, KUnit.ukey.in_(ukeys or {"-"}))]
     facts = db.session.query(KFact).filter(KFact.unit_id.in_(units or [-1])).delete(synchronize_session=False)
     db.session.query(KUnit).filter(KUnit.id.in_(units or [-1])).delete(synchronize_session=False)
-    return {"removed": key, "title": hit.get("title") or "", "pages": len(doc.pages or []), "units": len(units),
-            "facts": facts}
+    return {"removed": [{"key": k, "title": h.get("title") or "", "url": h.get("url") or ""} for k, h in zip(keys, hits)],
+            "missing": missing, "pages": len(doc.pages or []), "units": len(units), "facts": facts}
 
 
 def include_page(doc: Doc, key: str) -> bool:

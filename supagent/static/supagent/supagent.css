@@ -949,3 +949,16 @@ table.grid.compact th, table.grid.compact td { padding: 4px 8px; }
 tr.dash-kids > td { background: var(--line-2); }
 #dash-bulk { margin: 4px 0; }
 #dash-more { margin: 6px 0; }
+
+/* (0.10.11.1) the usage page's servers: values past a limit, the day's sparklines; the pages picked for a removal */
+.warn-text { color: var(--bad); font-weight: 600; }
+svg.spark { vertical-align: middle; color: var(--accent); }
+.doc-pages-bulk { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 6px; }
+.doc-pages-bulk input[type="search"] { min-width: 240px; flex: 1 1 240px; }
+/* (0.10.11.1) a chat that did not finish opening; an earlier answer's rows read when asked */
+.reopen-note { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; padding: 10px 12px;
+               border: 1px solid var(--line); border-left: 3px solid var(--warn);
+               border-radius: 6px; background: var(--panel); }
+.reopen-note p { margin: 0; }
+.reopen-note div { display: flex; gap: 8px; flex-wrap: wrap; }
+.results-later { margin: 6px 0; }
