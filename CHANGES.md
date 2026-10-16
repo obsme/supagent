@@ -1,5 +1,78 @@
 # Changes
 
+## 0.10.12 — 2026-10-16
+
+Released by the owner's decision without the measurement runs of a gate ("release the fixes on 0.10.12 without
+validating it this time", 16 October): checked before it, the unit tests and the deny-list only. It brings the team's
+requests of 16 October evening, the agent's fixes of the development rounds after 0.10.11, and 0.10.11.1 and
+0.10.11.2.
+
+Not measured: released by the owner's decision without the measurement runs of a gate (no LLM run); checked before it,
+the unit tests (2211 passed) and the deny-list. The new summaries' evidence was built on the lab's 11 documents
+without an LLM: 600 relations found across their pages, a summary page's evidence about 33,000 characters.
+
+What the team asked
+* **Saving what the agent learned is fast**: after every save (a learned answer edited, confirmed or rejected, a
+  catalog entry, a memory, a page removed) the knowledge store behind the agent's search read every piece of the
+  knowledge (its text, its vector, its categories, its words) and kept the saved kind's: 0.47 ms a piece, minutes with
+  a wiki of thousands of pages, the page saying "updating the agent's search" all along. Now the kinds saved are read
+  as such, and one document's change reads that document's pieces only.
+* **The summary of a wiki of thousands of pages**: the Context's summary pages (How the system works, Technical
+  overview, an application's page) were written from the first 3,000 characters of six documents: a wiki of 5,000
+  pages gave its first page. They now read each document's digest (its central pages, the most linked to by its other
+  pages, each with its first lines) and the relations the documents and the code state about the parts (A calls B,
+  runs on C, depends on D..., with the number of pages stating each): the chains between applications come from every
+  page. An application's page gets the relations that name it. The main applications are counted over every page.
+* **A wiki of more than 5,000 pages**: one document reads up to 50,000 pages (was 5,000); a new one, 2,000 (was 200).
+  The list of documents never loads a wiki's text and sends a document's pages only when they are few (its number
+  otherwise).
+* **Repositories of scripts, custom folders and libraries**: a repository's code is read by default (was its
+  documentation and text files only); one asked for its documentation that has none has its code read (it was an
+  error, "no text file", and nothing was read); a file without an extension is read anywhere when it is a script
+  (its first line is #!: ops/backup, deploy/run), as before in bin/ and scripts/; a build folder's scripts are read
+  (build/deploy.sh; what a build left there is not); more scripts and configuration are read (csh, fish, awk, sed, Tcl,
+  VBScript, Puppet, Salt, RPM specs, PL/SQL, DDL, HQL, Nomad, Rego, Bicep, Jsonnet, CUE, Nix, Bazel, CMake...);
+  20,000 files are listed (was 5,000). A role's copied files and certificates are never taken for scripts.
+
+Answers
+* **A last text that only says the work is done** ("The answer is complete. All tasks have been done.", after the work
+  plan's last update) is never the answer: the answer written before it is given, or the model is asked once for the
+  whole answer.
+* **Rows linked to a period's rows, taken by their own date**: "the net revenue of the week", defined in the chat as
+  the week's sold orders minus the refunds of those orders, answered with the refunds made in the week (their own
+  return date): two different sets of orders. The answer is sent back once to use the reading the question means and
+  to say which; the key reading is named when a definition in the chat ties the rows. Found only on the queries whose
+  results give the answer's figures (a query tried and dropped is not the answer's reading).
+* **A question of what depends on what, answered from a table**: "which applications depend on them?" answered from
+  an inventory table, the System map never read, missed a link only the map has. Any data query no longer spares the
+  System map: only a figure asked (a count, a ranking, a total) answered from the data does.
+* **The query an answer wrote is run** when the answer ran no data query, also after a lookup of the table's
+  description: "And on the 23rd?" was answered twice with the SQL written in the text and an invented figure.
+* **The first rows ordered by a label are sent back before they run**: "the server with the least available memory"
+  queried with ORDER BY 1 ASC LIMIT 1 over (server, its minimum) gave the first server by name. A query keeping five
+  rows or fewer of its groups, ordered by a label it groups by (not a time bucket), is sent back once to order by the
+  figure; sent again unchanged, it runs.
+
+Also in 0.10.12: 0.10.11.1 and 0.10.11.2 (a chat that froze the browser, chats deleted from the command line, the
+servers' CPU, memory and disks in the usage page, several pages of a document removed at once, the steps kept whole).
+
+Upgrade from 0.10.11.2, 0.10.11.1 or 0.10.11: pip install the wheel on every host, restart the web servers, the workers
+and beat; nothing to run (tables unchanged, v20; no new setting). A repository document keeps the choice it was saved
+with: edit it and choose *All its code too* to have its scripts and libraries read (a new one reads them; one without
+documentation has its code read anyway). A wiki: raise its *Pages or files at most* (Edit) above its number of pages;
+the Context's summaries are written again at its next build (the Context tab's Build now, or the nightly build).
+INSTALL.txt, *From 0.10.11.2 to 0.10.12*.
+
+Known gaps
+* Not measured: no gate run (the owner's decision). The agent's fixes were measured in development rounds only (main
+  open set 158 to 159 of 162, observability 26 to 28 of 29; an A/B run of the observability set the same day gave 0.10.12
+  27 and 29, 0.10.11 29 and 28: a round's variance). The new summaries were checked on the lab's 11 documents (600
+  relations found, a summary page's evidence about 33,000 characters) without an LLM run, not on a wiki of thousands of
+  pages.
+* The relations come from what the understanding reads (calls, runs on, uses, depends on, connects to... written in
+  the forms it knows: configuration, code, tables, sentences of those forms); a relation said otherwise in free prose is
+  not stated, and the summary says "not known yet" where nothing states it.
+
 ## 0.10.11.2 — 2026-10-16
 
 A correction of 0.10.11.1, found by reading its change again the same day: it also cut the steps an answer keeps

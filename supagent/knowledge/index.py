@@ -694,7 +694,7 @@ def sync(prefixes: tuple[str, ...] | None = None, dry_run: bool = False) -> dict
                                           escape="\\") for p in prefixes]))
     existing = {c.ref: c for c in q if prefixes is None or c.ref.startswith(prefixes)}
     wanted = (p for p in pieces(prefixes) if prefixes is None or p["ref"].startswith(prefixes))
-    return _write(existing, wanted, dry_run)
+    return _write(existing, wanted, dry_run, scope=prefixes)
 
 
 def sync_objects(ids: list[int] | set[int]) -> dict[str, int]:
@@ -712,11 +712,14 @@ def sync_objects(ids: list[int] | set[int]) -> dict[str, int]:
             tops.add(parent[0])
     refs = [f"object:{i}" for i in tops]
     existing = {c.ref: c for c in db.session.query(Chunk).filter(Chunk.ref.in_(refs or ["-"]))}
-    return _write(existing, _object_pieces(only=tops))
+    return _write(existing, _object_pieces(only=tops), scope=tuple(refs) or None)
 
 
-def _write(existing: dict[str, Chunk], wanted: Iterator[dict[str, Any]], dry_run: bool = False) -> dict[str, Any]:
-    """The chunks of `existing` made like the pieces `wanted` (new, changed, removed)."""
+def _write(existing: dict[str, Chunk], wanted: Iterator[dict[str, Any]], dry_run: bool = False,
+           scope: tuple[str, ...] | None = None) -> dict[str, Any]:
+    """The chunks of `existing` made like the pieces `wanted` (new, changed, removed); `scope`: the refs' prefixes
+    this write was about, given to the knowledge store as they are (0.10.12: one document's pieces made the store
+    read every document's, a wiki of thousands of pages, for one page removed)."""
     from supagent.knowledge.embeddings import qdrant_delete
 
     seen: set[str] = set()
@@ -769,8 +772,8 @@ def _write(existing: dict[str, Chunk], wanted: Iterator[dict[str, Any]], dry_run
         from supagent.knowledge.facets import forget_live
 
         forget_live()                                # this process's map: what exists read again at once
-        _store_sync(tuple(sorted({ref.split(":")[0] + ":" for ref in seen} | {c.ref.split(":")[0] + ":"
-                                                                               for c in gone})))
+        _store_sync(tuple(sorted(scope)) if scope else
+                    tuple(sorted({ref.split(":")[0] + ":" for ref in seen} | {c.ref.split(":")[0] + ":" for c in gone})))
     return out
 
 

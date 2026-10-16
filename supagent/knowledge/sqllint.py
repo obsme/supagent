@@ -405,6 +405,57 @@ def extreme_refusal(name: str, args: dict) -> str | None:
             "for. If this is meant, send this same call again unchanged.")
 
 
+TIMEISH = re.compile(r"(?:^|_)(?:ts|time|timestamp|date|day|hour|minute|week|month|year|bucket|period)(?:$|_)|^@",
+                     re.I)
+
+
+def ranked_by_label(sql: str) -> tuple[str, int] | None:
+    """(0.10.12) (the label, the limit) when a query keeps its first few groups (LIMIT 5 or less) ordered by a label it
+    groups by, not by the figure it computes: "ORDER BY 1 ASC LIMIT 1" over (node, MIN(value)) gave the first server
+    by name (srv-amer-000, 89.78 GiB) for "the server with the least available memory" (srv-apac-009, 10.25 GiB).
+    A time bucket is not a label here (the first days of a period are asked that way)."""
+    from sqlglot import exp
+
+    tree = _parse(sql)
+    sel = tree if isinstance(tree, exp.Select) else (tree.find(exp.Select) if tree is not None else None)
+    if sel is None or not sel.args.get("group") or not sel.args.get("order") or not sel.args.get("limit"):
+        return None
+    try:
+        n = int(sel.args["limit"].expression.this)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    exprs = list(sel.expressions)
+    if n > 5 or not any(e.find(exp.AggFunc) for e in exprs):
+        return None
+    key = sel.args["order"].expressions[0].this
+    target = None
+    if isinstance(key, exp.Literal) and not key.is_string and str(key.this).isdigit():
+        i = int(key.this) - 1
+        target = exprs[i] if 0 <= i < len(exprs) else None
+    elif isinstance(key, exp.Column):
+        target = next((e for e in exprs if (e.alias_or_name or "").lower() == key.name.lower()), key)
+    if target is None or target.find(exp.AggFunc) or not isinstance(target.unalias(), exp.Column):
+        return None
+    name = target.alias_or_name or ""
+    if not name or TIMEISH.search(name):
+        return None
+    return name, n
+
+
+def ranked_refusal(name: str, args: dict) -> str | None:
+    if name not in ("execute_sql", "export_excel"):
+        return None
+    req = args.get("request") if isinstance(args.get("request"), dict) else args
+    found = ranked_by_label(str((req or {}).get("sql") or ""))
+    if not found:
+        return None
+    label, n = found
+    return (f"tool error (not run: ranked by name): this query keeps its first {n} row(s) ordered by {label}, a label "
+            "it groups by, not by the figure it computes: the first row is not the most or the least. Order by the "
+            "figure (its alias, DESC for the most, ASC for the least). If this is meant, send this same call again "
+            "unchanged.")
+
+
 def bucket_grain(sql: str) -> str | None:
     m = TRUNC.search(sql or "")
     if not m:

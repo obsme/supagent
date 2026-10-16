@@ -130,7 +130,8 @@ def _catalog_changed(before: dict) -> dict:
         return {}
 
 
-MAX_DOC_PAGES = 5000    # pages or files of one document at most (a repository's code: 0.9.6.1)
+MAX_DOC_PAGES = 50000   # pages or files of one document at most (0.10.12: a wiki of 6,000 pages and more; was 5,000)
+DOC_PAGES_LISTED = 300  # a document's pages sent with the list of documents at most (more: their number)
 DOC_OPTIONS = ("verify_tls", "ca_bundle", "files")      # a document's certificate check, CA file, repository files
 
 def _ref_titles(refs: Any) -> dict[str, str]:
@@ -1983,14 +1984,17 @@ class AdminView(BaseView):
 
     # ---- documents and sites
     @staticmethod
-    def _doc_json(d: Any, pieces: dict[int, int] | None = None) -> dict:
-        """A document for the page: never its secret (describe_auth says whether one is set)."""
+    def _doc_json(d: Any, pieces: dict[int, int] | None = None, chars: int | None = None) -> dict:
+        """A document for the page: never its secret (describe_auth says whether one is set). (0.10.12) Its pages
+        listed when they are few (a wiki of thousands: their number; the list of its pages is its own page)."""
         from supagent.knowledge.docs import describe_auth, read_log, reader_of
 
         last = read_log(d.id) if d.kind == "url" else {}
+        pages = d.pages or []
         return {"id": d.id, "kind": d.kind, "title": d.title, "url": d.url, "category": d.category,
-                "pages": [{k: p.get(k) for k in ("url", "title", "chars")} for p in (d.pages or [])],
-                "chars": len(d.content or ""), "max_pages": d.max_pages,
+                "pages": [{k: p.get(k) for k in ("url", "title", "chars")} for p in pages] if len(pages) <= DOC_PAGES_LISTED
+                else [], "page_count": len(pages),
+                "chars": chars if chars is not None else len(d.content or ""), "max_pages": d.max_pages,
                 "refresh_days": d.refresh_days, "enabled": d.enabled, "status": d.status, "error": d.error,
                 "fetched_at": d.fetched_at, "created_by": d.created_by, "reader": d.reader or "",
                 "reads_as": reader_of(d) if d.kind == "url" else "upload", "auth": describe_auth(d),
@@ -2020,7 +2024,9 @@ class AdminView(BaseView):
         from supagent.models import Doc
 
         pieces = self._doc_pieces()
-        return _json({"docs": [self._doc_json(d, pieces) for d in db.session.query(Doc).order_by(Doc.id.desc())]})
+        rows = (db.session.query(Doc, sa.func.length(Doc.content)).options(defer(Doc.content))   # (0.10.12) a wiki's
+                .order_by(Doc.id.desc()).all())                                                 # text never loaded
+        return _json({"docs": [self._doc_json(d, pieces, int(n or 0)) for d, n in rows]})
 
     @expose("/api/docs", methods=("POST",))
     @has_access_api

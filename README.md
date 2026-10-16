@@ -107,7 +107,7 @@ Content-Security-Policy (Talisman nonces).
 ```bash
 # the Python of Superset's virtualenv
 PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-$PY -m pip install supagent-0.10.11.2-py3-none-any.whl      # Superset 6.1: nothing else to install
+$PY -m pip install supagent-0.10.12-py3-none-any.whl        # Superset 6.1: nothing else to install
 ```
 
 One line in `superset_config.py` registers it. It holds no logic:
@@ -149,6 +149,16 @@ row level security filters and dashboards keep them), the AI roles' users moved 
 then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with the knowledge written) and Viewer
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
+## Upgrade from 0.10.11.2 to 0.10.12
+
+pip install the wheel on every host and restart (tables unchanged, v20). Released by the owner's decision without the
+measurement runs of a gate. Saving what the agent learned is fast again (the knowledge store reads the saved kind's
+pieces only); the Context's summaries read a digest of every page of a wiki and the relations its pages state (a wiki
+of 5,000 pages gave its first page); one document reads up to 50,000 pages; a repository's scripts, custom folders and
+libraries are read (its code by default; a script without an extension known by its #! line); and the agent's fixes of
+the development rounds after 0.10.11. Measured: not measured (released without a gate, the owner's decision); unit
+tests 2211.
 
 ## Upgrade from 0.10.11.1 to 0.10.11.2
 
@@ -2063,11 +2073,15 @@ searchable by everyone who can open the Data dictionary: use a token that only r
 * **Bitbucket** (Data Center: `/projects/P/repos/R/browse/...`, or its clone address `/scm/P/R.git` (0.9.6.2); Cloud:
   `bitbucket.org/ws/repo/src/...` or `bitbucket.org/ws/repo.git`): the text
   files of a folder (Markdown, txt, rst, adoc, HTML, YAML, JSON, CSV, config, XML, SQL), README and docs first, each
-  at most `docs.max_kb`, through the REST API. **All the code** (0.9.6.1, *A repository: read*): the source code too
+  at most `docs.max_kb`, through the REST API. **All the code** (0.9.6.1, *A repository: read*; the default since
+  0.10.12): the source code too
   (Python, Java, Kotlin, Scala, Groovy, JavaScript, TypeScript, Go, Rust, C, C++, C#, Ruby, PHP, shell, PowerShell,
-  Terraform, SQL, Dockerfile, Makefile, Jenkinsfile, build files...), 5,000 files at most a document, never the
+  Terraform, SQL, Dockerfile, Makefile, Jenkinsfile, build files, Puppet, Salt, PL/SQL...; a file without an
+  extension when its first line is #!; 0.10.12: one asked for its documentation that has none has its code read),
+  20,000 files listed (0.10.12; was 5,000), never the
   files that hold keys (`.env`, `*.pem`, `*.key`, `id_rsa`, `secrets.yaml`...) nor the vendored and built ones
-  (`node_modules`, `vendor`, `dist`, `build`, `*.min.js`, lock files). In every file a repository gives (its
+  (`node_modules`, `vendor`, `dist`, `*.min.js`, lock files; in `build`, its scripts only). In every file a
+  repository gives (its
   documentation too), a password, token or key given a value, a URL's password, a private key and cloud or git
   tokens are masked (`***`) before anything is kept. **Read
   again only as far as it changed** (0.9.6.1): the branch's last commit is kept with each file; the same commit,
@@ -2084,7 +2098,7 @@ Superset's PostgreSQL has pgvector, pg_textsearch or pg_trgm (words, near spelli
 and images it has), the pages not read and why (not readable: 404, 403, a sign-in page; no text; larger than
 `docs.max_kb`; a title matching `docs.skip_titles`; read by another document of the same site), and when the
 number of pages asked was reached, how many linked pages were left: raise it in *Edit* to read more of the site. A
-new address reads 200 pages at most by default (up to 5,000).
+new address reads 2,000 pages at most by default (up to 50,000: 0.10.12; was 200 and 5,000).
 
 ## The documents and the code, read (0.10)
 

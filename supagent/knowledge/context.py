@@ -24,13 +24,13 @@ import json
 import logging
 import re
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any
 
 from superset import db
 
 from supagent import settings
-from supagent.models import ContextPage, Doc, Entry, KObject, Memory, Recipe, Relation, Run, Source
+from supagent.models import ContextPage, Doc, Entry, KFact, KObject, KUnit, Memory, Recipe, Relation, Run, Source
 
 log = logging.getLogger(__name__)
 SECTIONS = ("functional", "technical")
@@ -48,7 +48,18 @@ INVENTORY = {   # what a label or field of these names holds (lower case, exact 
 MAIN_ITEMS = 25            # the main metrics and indices of a data source on its page (a person's, used, catalog)
 MAX_VALUES = 300           # values listed per inventory line
 MAX_APPS = 8               # application pages at most
-DOC_CHARS = 3000           # of each document in an LLM prompt
+DOC_CHARS = 3000           # of each document in an LLM prompt (at least; a wiki of many pages: its digest, below)
+DOCS_CHARS = 24000         # (0.10.12) of all the documents of a summary page: a wiki of thousands of pages gives its
+DIGEST_LEAD = 400          #   central pages (the most linked to) with their first lines, never only its first page
+DIGEST_DOCS = 6            # documents in a summary page's evidence (the ones with the most pages first)
+PART_RELATIONS = 80        # (0.10.12) the relations the documents and the code state (calls, uses, runs on...) given
+RELATIONS_POOL = 600       #   to the summaries, the most stated first; an application's page: its own, from the pool
+RELATION_VERBS = {"calls": "calls", "sends_to": "sends data to", "reads_from": "reads from", "uses": "uses",
+                  "runs_on": "runs on", "depends_on": "depends on", "connects_to": "connects to",
+                  "owned_by": "is owned by", "collects": "collects the logs of", "scrapes": "scrapes",
+                  "monitors": "monitors", "powered_by": "is powered by", "part_of": "is part of",
+                  "routes_to": "routes to", "writes": "writes", "logs_to": "logs to", "emits": "emits",
+                  "watched_by": "is watched by", "in_group": "is in the server group"}
 DESC_CHARS = 1200          # of a main index's or metric's description on its page (cut after a whole sentence)
 FIELDS_OF = 3              # the main indices and metrics whose fields or labels a data source's page lists
 FIELD_CHARS = 240          # of a field's description on that list
@@ -245,7 +256,9 @@ def collect() -> dict[str, Any]:
                                "agent": e.updated_by == AGENT, "database_id": database_id})
     for d in db.session.query(Doc).filter(Doc.enabled.is_(True), Doc.status == "ok").order_by(Doc.id):
         out["docs"].append({"id": d.id, "title": d.title or d.url or f"document {d.id}", "url": d.url,
-                            "content": d.content or ""})
+                            "content": d.content or "",
+                            "pages": [p for p in (d.pages or []) if isinstance(p, dict)]})   # (0.10.12) its digest
+    out["part_relations"] = _part_relations()
     for m in db.session.query(Memory).filter(Memory.scope == "team", Memory.status == "active").order_by(Memory.id):
         out["memory"].append({"id": m.id, "kind": m.kind, "text": m.text})
     for r in (db.session.query(Recipe).filter(Recipe.status.in_(("helpful", "confirmed")))
@@ -367,6 +380,74 @@ def fact_pages(ev: dict[str, Any]) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # summary pages (LLM, only when their evidence changed)
 # --------------------------------------------------------------------------- #
+def _part_relations(limit: int = RELATIONS_POOL) -> list[dict[str, Any]]:
+    """(0.10.12) What the documents and the code state about the parts (the understanding's facts: A calls B, runs on
+    C...), the most stated first: [{"a", "verb", "b", "pages"}], the pages being the units (wiki pages, files) that
+    state it. A summary was written from the documents' first lines and never saw them."""
+    from sqlalchemy import func
+
+    try:
+        n = func.count(func.distinct(KFact.unit_id))
+        rows = (db.session.query(KFact.subject, KFact.verb, KFact.obj, n)
+                .join(KUnit, KUnit.id == KFact.unit_id).join(Doc, Doc.id == KUnit.doc_id)
+                .filter(Doc.enabled.is_(True), KFact.verb.in_(list(RELATION_VERBS)))
+                .group_by(KFact.subject, KFact.verb, KFact.obj).order_by(n.desc()).limit(limit * 3).all())
+    except Exception:  # pylint: disable=broad-except   (no understanding yet: the summaries as before)
+        db.session.rollback()
+        log.warning("supagent context: the relations stated in the documents", exc_info=True)
+        return []
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for a, verb, b, count in rows:
+        a, b = " ".join(str(a or "").split()), " ".join(str(b or "").split())
+        if not a or not b or a.lower() == b.lower():
+            continue
+        key = (a.lower(), verb, b.lower())
+        r = merged.setdefault(key, {"a": a, "verb": verb, "b": b, "pages": 0})
+        r["pages"] += int(count or 0)
+    return sorted(merged.values(), key=lambda r: (-r["pages"], r["a"].lower(), r["b"].lower()))[:limit]
+
+
+def _relation_lines(rels: list[dict[str, Any]]) -> list[str]:
+    return [f"{r['a']} {RELATION_VERBS.get(r['verb'], r['verb'])} {r['b']} ({r['pages']} page"
+            f"{'s' if r['pages'] > 1 else ''})" for r in rels]
+
+
+def _digest(d: dict[str, Any], chars: int) -> str:
+    """(0.10.12) What a summary page reads of a document: a small one, its beginning; one of many pages (a wiki, a
+    repository), its central pages first (the most linked to by its other pages), each with its first lines, up to
+    `chars`: what thousands of pages are about, not their first page."""
+    content = d.get("content") or ""
+    pages = [p for p in d.get("pages") or [] if isinstance(p.get("at"), int) and isinstance(p.get("chars"), int)]
+    if len(content) <= chars or len(pages) < 3:
+        return content[:chars]
+    key = lambda p: str(p.get("id") or p.get("path") or p.get("title") or p.get("url") or "")  # noqa: E731
+    ids = {str(p.get("id")): key(p) for p in pages if p.get("id")}
+    titles = {str(p.get("title") or "").lower(): key(p) for p in pages if p.get("title")}
+    inbound: Counter = Counter()
+    for p in pages:
+        for x in p.get("links") or []:
+            x = str(x)
+            target = ids.get(x) or titles.get(x.split(":", 1)[-1].lower())     # a page's id, or "SPACE:Title"
+            if target and target != key(p):
+                inbound[target] += 1
+    spaces = sorted({str(p["space"]) for p in pages if p.get("space")})
+    head = (f"{len(pages)} pages" + (f" (spaces: {', '.join(spaces[:10])})" if spaces else "") +
+            "; its central pages first (the most linked to), each with its first lines:\n")
+    out, used = [head], len(head)
+    for p in sorted(pages, key=lambda p: (-inbound[key(p)], str(p.get("path") or "").count("/"),
+                                          len(str(p.get("title") or "")))):
+        block = content[p["at"]:p["at"] + p["chars"]]
+        first, _, body = block.partition("\n")
+        title = str(p.get("title") or first.lstrip("# ").strip())
+        lead = " ".join((body if first.startswith("# ") else block).split())[:DIGEST_LEAD]
+        line = f"- {title}" + (f" ({inbound[key(p)]} pages link to it)" if inbound[key(p)] else "") + f": {lead}\n"
+        if used + len(line) > chars:
+            break
+        out.append(line)
+        used += len(line)
+    return "".join(out)
+
+
 def _numbered(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Evidence items as E1, E2...: (for the prompt, the page's sources)."""
     prompt, sources = [], []
@@ -381,10 +462,14 @@ def _apps(ev: dict[str, Any]) -> list[str]:
     found: set[str] = set()
     for slot in (ev["inventory"].get("Applications") or {}).values():
         found.update(v for v in slot["values"] if v and 2 <= len(v) <= 60 and not v.isdigit())   # not "A", not "7"
-    text = " ".join([d["content"][:20000] for d in ev["docs"]] + [a["question"] or "" for a in ev["answers"]] +
+    # (0.10.12) every page of every document counts (was: each document's first 20,000 characters)
+    text = " ".join([d["content"][:20_000_000] for d in ev["docs"]] + [a["question"] or "" for a in ev["answers"]] +
                     [e["content"] for e in ev["entries"]])
+    words = Counter(re.findall(r"[\w][\w.-]*", text.lower()))
 
     def mentions(app: str) -> int:
+        if re.fullmatch(r"[\w][\w.-]*", app):                 # one word: counted once for all
+            return words.get(app.lower(), 0)
         return len(re.findall(r"(?<![\w-])" + re.escape(app) + r"(?![\w-])", text, re.I))
 
     ranked = sorted(found, key=lambda a: (-mentions(a), a))
@@ -406,7 +491,12 @@ def summary_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
                   "examples": sorted({v for slot in per_db.values() for v in slot["values"]})[:25],
                   "count": len({v for slot in per_db.values() for v in slot["values"]})}
                  for dim, per_db in ev["inventory"].items()]
-    docs = [{"ref": f"doc:{d['id']}", "title": d["title"], "text": d["content"][:DOC_CHARS]} for d in ev["docs"][:6]]
+    chosen = sorted(ev["docs"], key=lambda d: (-len(d.get("pages") or []), d["id"]))[:DIGEST_DOCS]
+    share = max(DOC_CHARS, DOCS_CHARS // max(1, len(chosen)))
+    docs = [{"ref": f"doc:{d['id']}", "title": d["title"], "text": _digest(d, share)} for d in chosen]
+    pool = ev.get("part_relations") or []
+    stated = [{"ref": "facts", "title": "what the documents and the code state about the parts",
+               "relations": _relation_lines(pool[:PART_RELATIONS])}] if pool else []
     entries = [{"ref": f"entry:{e['id']}", "title": e["title"], "classification": e["classification"],
                 "text": e["content"][:600]} for e in ev["entries"] if e["classification"] != "formula"][:40]
     questions = [{"ref": f"recipe:{a['id']}", "title": (a["question"] or "")[:80], "question": a["question"]}
@@ -416,14 +506,16 @@ def summary_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
     specs = [
         {"section": "functional", "slug": "overview", "title": "How the system works", "database_ids": all_dbs,
          "brief": "Explain what the system does for its users, its applications and their roles, the main processes "
-                  "and chains between applications, and where the data of each one is (## What it does, ## Applications, "
-                  "## Processes and chains, ## Where the data is).",
-         "evidence": docs + entries + questions + databases + inventory},
+                  "and chains between applications (who calls, uses, depends on and runs on what: the relations the "
+                  "documents state, with how many pages state each), and where the data of each one is (## What it "
+                  "does, ## Applications, ## Processes and chains, ## Where the data is).",
+         "evidence": docs + stated + entries + questions + databases + inventory},
         {"section": "technical", "slug": "architecture", "title": "Technical overview", "database_ids": all_dbs,
          "brief": "Describe the data sources, the infrastructure (servers, services, clusters, environments, regions), "
-                  "how the data sources relate and what is not known (## Data sources, ## Infrastructure, ## Links, "
+                  "how the data sources and the parts relate (the relations the documents state: what calls, runs on, "
+                  "connects to what) and what is not known (## Data sources, ## Infrastructure, ## Links, "
                   "## Not known yet).",
-         "evidence": databases + inventory + relations + docs},
+         "evidence": databases + inventory + relations + stated + docs},
     ]
     for app in _apps(ev):
         ev_app = []
@@ -438,6 +530,10 @@ def summary_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
             if re.search(r"(?<![\w-])" + re.escape(app) + r"(?![\w-])", a["question"] or "", re.I):
                 ev_app.append({"ref": f"recipe:{a['id']}", "title": (a["question"] or "")[:80],
                                "question": a["question"]})
+        mine = [r for r in pool if app.lower() in (r["a"].lower(), r["b"].lower())][:40]
+        if mine:                                    # (0.10.12) its chain as the documents and the code state it
+            ev_app.append({"ref": "facts", "title": f"what the documents state about {app}",
+                           "relations": _relation_lines(mine)})
         holders = [{"ref": f"database:{i}", "title": ev["databases"][i]["name"], "holders": slot["holders"][:10]}
                    for i, slot in (ev["inventory"].get("Applications") or {}).items() if app in slot["values"]]
         specs.append({"section": "functional", "slug": f"application-{slugify(app)}", "title": f"Application {app}",

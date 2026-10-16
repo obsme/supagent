@@ -69,7 +69,7 @@ API_BYTES = 16 * 1024 * 1024    # an API answer (a listing, a page with its body
 CONFLUENCE_LIST = 25            # pages with their bodies per request (a space)
 CHILDREN_LIST = 50              # children per request (a page's)
 REPO_LIST = 1000                # files per request (Bitbucket Data Center)
-MAX_LISTED = 5000               # files of a repository listed at most (the documentation is chosen among them)
+MAX_LISTED = 20000              # files of a repository listed at most (what is read is chosen among them; 0.10.12: was 5,000)
 # the API of a cloud service by the host of its pages (Bitbucket Cloud: pages on bitbucket.org, API on
 # api.bitbucket.org): the sign-in goes to both
 CLOUD_APIS = {"bitbucket.org": "https://api.bitbucket.org/2.0", "www.bitbucket.org": "https://api.bitbucket.org/2.0"}
@@ -85,20 +85,36 @@ CODE_FILES = (".py", ".pyi", ".java", ".kt", ".kts", ".scala", ".groovy", ".grad
               ".tf", ".tfvars", ".hcl", ".proto", ".graphql", ".gql", ".css", ".scss", ".less", ".toml", ".j2",
               ".jinja", ".jinja2", ".erb", ".epp", ".gotmpl", ".tftpl", ".tpl", ".tmpl", ".dockerfile", ".cfg", ".ini",
               ".conf", ".properties", ".xml", ".sql",
-              ".yaml", ".yml", ".json", ".service", ".timer", ".socket", ".env.example")
+              ".yaml", ".yml", ".json", ".service", ".timer", ".socket", ".env.example",
+              # (0.10.12) the scripts and configuration of operations repositories
+              ".csh", ".tcsh", ".fish", ".awk", ".sed", ".tcl", ".vbs", ".psd1", ".pyw", ".pp", ".sls", ".spec",
+              ".rules", ".repo", ".cnf", ".nomad", ".rego", ".bicep", ".jsonnet", ".libsonnet", ".cue", ".nix",
+              ".pls", ".pks", ".pkb", ".ddl", ".hql", ".mk", ".cmake", ".bzl", ".sbt", ".cljs", ".edn", ".zig",
+              ".nim", ".gemspec", ".rake", ".xsd", ".xsl", ".xslt", ".wsdl", ".ldif", ".cron", ".crontab",
+              ".logrotate", ".pl.in", ".sh.in", ".py.in", ".in")
 CODE_NAMES = {"dockerfile", "containerfile", "makefile", "jenkinsfile", "vagrantfile", "procfile", "gemfile",
               "rakefile", "build", "workspace", "cmakelists.txt", "caddyfile", "corefile", "monitrc", "crontab"}
 # (0.10.4) the files an Ansible role copies or renders named after the path they go to (etc_monit_conf.d_postfix,
 # etc_apache2_sites-available_blog): its configuration, read with the code; never one whose name speaks of a secret
 ROLE_FILE = re.compile(r"(^|/)roles/[^/]+/(files|templates)/(?![^/]*(secret|passw|token|key|cert|crt|pem|vault|"
                        r"credential|id_rsa|id_ed25519|htpasswd|shadow))(etc|usr|var|opt|srv)_[^/.]*(\.[^/.]+)*$", re.I)
-SKIP_DIRS = {"node_modules", "vendor", "dist", "build", "target", "out", "obj", ".git", "__pycache__",
+SKIP_DIRS = {"node_modules", "vendor", "dist", "target", "out", "obj", ".git", "__pycache__",
              ".venv", "venv", "site-packages", "bower_components", ".idea", ".vscode", "coverage", ".gradle", ".mvn",
              ".terraform", ".next", ".nuxt"}
 SKIP_FILE = re.compile(r"(\.min\.(js|css)|\.map|\.lock|(^|/)(package-lock\.json|npm-shrinkwrap\.json|"
                        r"pnpm-lock\.yaml|go\.sum))$", re.I)
 # (0.10.10) the folders of a repository's scripts: their files without an extension are scripts (bin/, scripts/, sbin/)
 SCRIPT_DIRS = {"bin", "sbin", "scripts", "script", "tools", "cron.d", "cron"}
+# (0.10.12) a build folder: its scripts are read (build/deploy.sh), what a build left in it is not
+BUILD_DIRS = {"build"}
+SCRIPT_FILES = (".sh", ".bash", ".zsh", ".ksh", ".csh", ".fish", ".ps1", ".psm1", ".bat", ".cmd", ".gradle", ".kts",
+                ".mk", ".cmake")         # (a .py or .js there may be a copy a build made: not read)
+# an Ansible role's files and templates (what it copies: ROLE_FILE says which are read) and a trust store's names
+ROLE_DIR = re.compile(r"(^|/)roles/[^/]+/(files|templates)/")
+TRUST_NAME = re.compile(r"(^|[_.-])(ca|cacert|ca-bundle|cabundle|truststore|keystore|chain|fullchain)$", re.I)
+# files without an extension that are not scripts (a script elsewhere than bin/ or scripts/ is known by its #! line)
+NOT_SCRIPT_NAME = re.compile(r"^(license|licence|copying|authors|contributors|notice|changelog|changes|history|news|"
+                             r"todo|version|owners|codeowners|maintainers|patents|install|readme)", re.I)
 SECRET_NAME = re.compile(r"secret|passw|token|key|cert|crt|pem|vault|credential|id_rsa|id_ed25519|htpasswd|shadow", re.I)
 # (0.10) Ansible's files without an extension: the inventories (hosts, inventory, hosts.example...) and the variables
 # of groups and hosts (group_vars/<group>, host_vars/<host>, or a folder of them)
@@ -564,7 +580,7 @@ def _auth(doc: Doc) -> dict[str, Any]:
 
 
 OPTIONS = ("verify_tls", "ca_bundle", "files", "excluded")   # kept in doc.auth with the sign-in (no secret among them)
-EXCLUDED_KEPT = 5000           # (0.10.9.1) pages removed from a document by a person, kept at most
+EXCLUDED_KEPT = 20000          # (0.10.9.1) pages removed from a document by a person, kept at most (0.10.12: was 5,000)
 
 
 def tls_of(doc: Doc) -> Any:
@@ -582,9 +598,10 @@ def tls_of(doc: Doc) -> Any:
 
 
 def files_of(doc: Doc) -> str:
-    """What a repository gives: "docs" (its documentation and text files) or "code" (all its code too)."""
+    """What a repository gives: "docs" (its documentation and text files) or "code" (all its code too: the default
+    since 0.10.12, a repository of scripts and libraries being read for what it does)."""
     f = str(_auth(doc).get("files") or "").strip().lower()
-    return f if f in FILES else "docs"
+    return f if f in FILES else "code"
 
 
 def page_key(p: dict[str, Any]) -> str:
@@ -1386,20 +1403,39 @@ def is_text_file(path: str) -> bool:
 
 
 def wanted_file(path: str, files: str = "docs") -> bool:
-    """A repository's file to read: a text file (and with files "code", a source or build file), never a file that
-    holds keys, nor one under node_modules, vendor, dist, build... nor a minified or lock file."""
+    """A repository's file to read: a text file (and with files "code", a source or build file, or a file without an
+    extension that may be a script: maybe_script), never a file that holds keys, nor one under node_modules, vendor,
+    dist... (a build folder: its scripts only), nor a minified or lock file."""
     low = path.lower()
     parts = low.split("/")
     if any(p in SKIP_DIRS for p in parts[:-1]) or KEY_FILE.search(low) or SKIP_FILE.search(low):
         return False
+    name = sample_base(parts[-1])
+    if any(p in BUILD_DIRS for p in parts[:-1]):        # (0.10.12) build/deploy.sh: read; what a build left: not
+        return files == "code" and name.endswith(SCRIPT_FILES)
     if is_text_file(path):
         return True
-    name = sample_base(parts[-1])
     script = "." not in name and len(parts) >= 2 and parts[-2] in SCRIPT_DIRS and not name.startswith(("license",
                                                                                                     "copying")) and \
         not SECRET_NAME.search(name)
     return files == "code" and (name.endswith(CODE_FILES) or name in CODE_NAMES or bool(ROLE_FILE.search(path)) or
-                                script)   # (0.10.10) bin/backup, scripts/rotate: a script without an extension
+                                script or maybe_script(path))   # (0.10.10) bin/backup, scripts/rotate
+
+
+def maybe_script(path: str) -> bool:
+    """(0.10.12) A file without an extension outside bin/ and scripts/ (ops/backup, deploy/run): read, and kept only
+    when its first line is #! (shebang_kept)."""
+    low = path.lower()
+    parts = low.split("/")
+    name = parts[-1]
+    return ("." not in name and not (len(parts) >= 2 and parts[-2] in SCRIPT_DIRS) and name not in CODE_NAMES
+            and not NOT_SCRIPT_NAME.match(name) and not SECRET_NAME.search(name) and not ANSIBLE_FILE.search(path)
+            and not ROLE_DIR.search(low) and not TRUST_NAME.search(name) and not is_text_file(path))
+
+
+def shebang_kept(path: str, text: str) -> bool:
+    """A file read as maybe a script: kept when it is one (#! on its first line)."""
+    return not maybe_script(path) or text.lstrip("\ufeff").startswith("#!")
 
 
 def doc_rank(path: str) -> tuple[int, int, str]:
@@ -1634,7 +1670,8 @@ def _read_bitbucket(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
     want, limit, files = _max_pages(doc), _limit(), files_of(doc)
     where = f" in {t['path']}" if t["path"] else ""
     title = f"{t['name']}{(' ' + t['path']) if t['path'] else ''}"
-    one = bool(t["path"] and wanted_file(t["path"], "code") and (t["cloud"] is False or t["ref"]))
+    one = bool(t["path"] and wanted_file(t["path"], "code") and not maybe_script(t["path"]) and   # (a folder's
+               (t["cloud"] is False or t["ref"]))                                              # name: no file)
     calls = _Calls(want * 2 + 40)
     head = None if one else _head(t, sign, calls)
     scope = f"{t['path']}|{t.get('ref') or t.get('at') or ''}|{files}|{want}"
@@ -1671,6 +1708,8 @@ def _read_bitbucket(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
             except requests.exceptions.RequestException as ex:
                 skipped, last = skipped + 1, f"{path}: {type(ex).__name__}"
                 continue
+            if not shebang_kept(path, text):           # (0.10.12) a file without an extension that is no script
+                continue
             masked += n
             pages.append((*repo_page(f["web"], path, text), meta(path)))
         log.info("supagent: document %s: %s read again from %s: %d file(s) changed, %d kept, %d secret(s) masked",
@@ -1684,6 +1723,12 @@ def _read_bitbucket(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
         lister: Callable[..., list[dict[str, Any]]] = _bitbucket_cloud_files if t["cloud"] else _bitbucket_dc_files
         found = lister(t, sign, _Calls(80 + want))      # listing and reading: each its own number of requests
     chosen = sorted((f for f in found if wanted_file(f["path"], files) or one), key=lambda f: doc_rank(f["path"]))
+    if not chosen and files == "docs":               # (0.10.12) a repository of scripts and libraries, no documentation:
+        chosen = sorted((f for f in found if wanted_file(f["path"], "code")), key=lambda f: doc_rank(f["path"]))
+        if chosen:                                   # its code read (it was "no text file", the repository unread)
+            files = "code"
+            scope = f"{t['path']}|{t.get('ref') or t.get('at') or ''}|{files}|{want}"
+            log.info("supagent: document %s: %s has no documentation file: its code read", doc.id, t["name"])
     if not chosen:
         kinds = "text or code" if files == "code" else "text (Markdown, text, HTML, YAML, JSON, CSV, SQL...)"
         raise DocError(f"{t['name']}: no {kinds} file{where}")
@@ -1708,6 +1753,8 @@ def _read_bitbucket(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
             continue
         except requests.exceptions.RequestException as ex:
             skipped, last = skipped + 1, f"{f['path']}: {type(ex).__name__}"
+            continue
+        if not shebang_kept(f["path"], text):         # (0.10.12) a file without an extension that is no script
             continue
         masked += n
         pages.append((*repo_page(f["web"], f["path"], text), meta(f["path"])))

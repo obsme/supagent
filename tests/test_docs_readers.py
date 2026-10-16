@@ -186,14 +186,14 @@ def test_the_sign_in_goes_to_the_documents_own_site_only(ctx):
         sc.for_url("https://bitbucket.org/acme/runbooks") and not sc.for_url("https://evil.example.com/")
     shown = D.describe_auth(basic)
     assert shown == {"type": "basic", "user": "bob@example.com", "header": None, "secret_set": True,
-                     "verify_tls": None, "ca_bundle": "", "files": "docs"}             # (0.9.6.1: how it is read)
+                     "verify_tls": None, "ca_bundle": "", "files": "code"}             # (0.10.12: the code too by default)
     assert SECRET not in json.dumps(shown) and pair not in json.dumps(shown)
     plain = D.sign_in(Doc(kind="url", url="http://wiki.example.com/ops/", auth={"type": "bearer"}, secret=SECRET))
     assert plain.for_url("https://wiki.example.com/ops/") and not plain.for_url("http://wiki.example.com:8080/")
     assert not s.for_url("http://wiki.example.com/ops/")             # https to http: never
     assert D.describe_auth(Doc(kind="url", url="https://w.example.com/")) == {
         "type": None, "user": None, "header": None, "secret_set": False, "verify_tls": None, "ca_bundle": "",
-        "files": "docs"}
+        "files": "code"}
     said = D.scrub(f"failed: {SECRET} / Basic {pair}", basic)
     assert SECRET not in said and pair not in said and said.startswith("failed: ***")
 

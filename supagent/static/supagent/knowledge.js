@@ -1111,6 +1111,8 @@
   }
 
   // ------------------------------------------------------------------ Documents and sites
+  /* (0.10.12) a document's number of pages: a wiki of thousands is sent with its number, not its list */
+  function pageCount(x) { return x.page_count !== undefined && x.page_count !== null ? x.page_count : (x.pages || []).length; }
   var READS = { web: "web page or site", confluence: "Confluence wiki", bitbucket: "Bitbucket repository", upload: "uploaded file" };
   var SIGNIN = { bearer: "token (Bearer)", basic: "user and password or token", header: "token in a header" };
   function inSearch(x) {
@@ -1146,7 +1148,7 @@
   function docEditor(x, row) {
     var cell = el("td", { colspan: "8" }), rowEd = el("tr", { class: "editing" }, [cell]);
     var cat = el("input", { type: "text", "aria-label": "Category", placeholder: "category" }); cat.value = x.category || "";
-    var pages = el("input", { type: "number", min: "1", max: "5000", "aria-label": "Pages or files at most" }); pages.value = x.max_pages || 1;
+    var pages = el("input", { type: "number", min: "1", max: "50000", "aria-label": "Pages or files at most" }); pages.value = x.max_pages || 1;
     var days = el("input", { type: "number", min: "1", "aria-label": "Read again every (days)" }); days.value = x.refresh_days || 7;
     var reader = el("select", { "aria-label": "Read as" }, [["", "detected (" + (READS[x.reads_as] || x.reads_as) + ")"],
       ["web", READS.web], ["confluence", READS.confluence], ["bitbucket", READS.bitbucket]].map(function (o) {
@@ -1162,7 +1164,7 @@
     ca.value = a0.ca_bundle || "";
     var files = el("select", { "aria-label": "A repository: read" }, [["docs", "repository: documentation and text files"],
       ["code", "repository: all the code too (secrets masked)"]].map(function (o) {
-        return el("option", { value: o[0], text: o[1], selected: (a0.files || "docs") === o[0] ? "selected" : null }); }));
+        return el("option", { value: o[0], text: o[1], selected: (a0.files || "code") === o[0] ? "selected" : null }); }));
     files.hidden = !(x.reads_as === "bitbucket" || x.reader === "bitbucket");
     reader.addEventListener("change", function () { files.hidden = !(reader.value === "bitbucket" || (!reader.value && x.reads_as === "bitbucket")); });
     var res = el("span", { class: "result" });
@@ -1395,7 +1397,7 @@
           onclick: function () { docEditor(x, row); } }));
         if (canDelete) acts.appendChild(sureButton("Delete", function () { S.admin("DELETE", "docs/" + x.id).then(function (r) { if (!r.error) saved(); docsLoad(); }); },
           "Delete “" + (x.title || x.url || "this document") + "”?",
-          (x.pages && x.pages.length > 1 ? "Its " + x.pages.length + " pages leave" : "It leaves") + " the agent's search" +
+          (pageCount(x) > 1 ? "Its " + S.num(pageCount(x)) + " pages leave" : "It leaves") + " the agent's search" +
           (x.kind === "url" ? (x.auth && x.auth.type ? ", and its saved sign-in is deleted" : "") + "; the site can be added again." :
             "; upload it again to get it back.")));
         var how = x.kind === "url" ? (READS[x.reads_as] || x.reads_as) + (x.auth && x.auth.type ? " · signed in with a " +
@@ -1404,7 +1406,7 @@
           (x.reads_as === "bitbucket" && x.auth && x.auth.files === "code" ? " · all the code" : "") : READS.upload;
         [el("td", {}, [el("div", { text: x.title || x.url || "document" }),
             x.url ? el("div", { class: "muted nm", text: x.url }) : null, el("div", { class: "muted small-note", text: how })]),
-          el("td", { text: x.category || "" }), el("td", { class: "num", text: S.num((x.pages || []).length || (x.kind === "upload" ? 1 : 0)) }),
+          el("td", { text: x.category || "" }), el("td", { class: "num", text: S.num(pageCount(x) || (x.kind === "upload" ? 1 : 0)) }),
           el("td", { class: "num", text: S.bytes(x.chars) }), el("td", { class: "num", text: inSearch(x) }),
           el("td", {}, [badge(x.status || "", x.status === "ok" ? "ok" : x.status === "error" ? "bad" : ""), x.error ? el("div", { class: "muted", text: x.error }) : null,
             x.read && x.read.limit_reached ? el("div", { class: "muted", text: "limit of " + S.num(x.max_pages) + " pages reached" +
@@ -1692,7 +1694,7 @@
         result(res, r, "added: reading it now");
         if (!r.error) {
           ["doc-url", "doc-secret", "doc-user", "doc-header", "doc-ca"].forEach(function (id) { $(id).value = ""; });
-          $("doc-tls").value = ""; $("doc-files").value = "docs";
+          $("doc-tls").value = ""; $("doc-files").value = "code";
           $("doc-auth").value = ""; docAuth();
           saved(); setTimeout(docsLoad, 3000);
         }

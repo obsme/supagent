@@ -405,6 +405,8 @@ def g_user() -> Any:
 # (0.10.7) a question of how parts depend on each other, what a failure reaches, where a part runs or goes through:
 # the System map's tool is offered ("which stores go down with the rack, which applications depend on them?" was
 # answered from an inventory index alone, without the map that holds those dependencies)
+RANKED = re.compile(r"\b(?:most|least|top|highest|lowest|biggest|largest|smallest|fewest|more|less|average|total|"
+                    r"share|percent\w*|ratio|rank\w*|le\s+plus|le\s+moins)\b", re.I)   # (0.10.12) a figure asked
 SYSTEM_ASKED = re.compile(r"\b(?:depend\w*|go(?:es)?\s+down|went\s+down|(?:is|are)\s+down|los(?:es|t|ing)\s+power|"
                           r"affected|impact\w*|upstream|downstream|uplink\w*|connected\s+to|runs?\s+on|running\s+on|"
                           r"hosted\s+on|deployed\s+on|(?:go|goes|pass|passes)\s+through|owned\s+by|who\s+owns|"
@@ -2277,6 +2279,15 @@ def _has_data(answer: str) -> bool:
     return bool(answer_numbers(answer) or answer_names(answer))
 
 
+def says_done_only(text: str) -> bool:
+    """(0.10.12) A last text that only says the work is done ("The answer is complete. All tasks have been done.",
+    after the plan's last update): short, no figure or name, and nearly nothing beside the completion it says."""
+    t = (text or "").strip()
+    if not t or len(t) > 300 or not DONE_ONLY.search(t) or _has_data(t):
+        return False
+    return len(re.findall(r"[^\W\d_]{3,}", DONE_ONLY.sub(" ", t))) <= 4
+
+
 def asks_back(answer: str) -> bool:
     """The answer is a question to the user (what they meant): short, ends with a question, no
     result in it (rule 6)."""
@@ -2483,6 +2494,13 @@ CLOCK_ASKED = re.compile(r"\b(?:at what time|what time|which time|at which (?:ho
                          r"when did (?:it|this|that|the [\w-]+) (?:end|start|stop|begin|recover|finish|resume))\b", re.I)
 CLOCK_SAID = re.compile(r"(?<![\d:])\d{1,2}[:h]\d{2}(?![\d:])|\b\d{1,2}\s*(?:a\.?m\b\.?|p\.?m\b\.?)|\bmidnight\b|\bnoon\b|"
                         r"\bminuit\b|\bmidi\b", re.I)
+OWN_DATE_NUDGE = ("(Check before answering: your figures take the rows of {b} by their own {db} in the period, and "
+                  "the rows of {a} by {da}: these are two different sets ({b} rows of {a} rows from other periods are "
+                  "counted, and later {b} rows of this period's {a} rows are left out). Use the reading the question "
+                  "means{tie}, and say in the answer which one it is. Then write the whole answer for the user as if "
+                  "for the first time: they see neither the text above nor this check.)")
+OWN_DATE_TIE = (": the definition in this chat takes the {b} rows of those {a} rows, so take them by {key} (a join on "
+                "{key}, the period on {da} only)")
 TIME_NUDGE = ("(Check before answering: the question asks at what time; your answer gives no time of day. Run the query "
               "that returns the moment itself (the time of the row with that value: ordered by the value, the first "
               "row, with its time field), then write the whole answer again for the user with the time first, as if "
@@ -2809,6 +2827,18 @@ def unsupported_answer(answer: str, trace: list[dict], question: str = "") -> st
 WRITTEN_KEPT = 300         # (0.10.7) an answer of that length or more, with figures or names, is kept for the end
 STEP_ONLY = re.compile(r"^\W*(?:let me|let's|i'll|i will|i am going to|now,? i(?:'ll| will)|next,? i(?:'ll| will))\b"
                        r"[^\n]{0,200}?[:.\u2026]?\s*$", re.I)   # (0.10.7) a text that only announces a step
+DONE_ONLY = re.compile(      # (0.10.12) a completion said instead of the answer
+    r"\b(?:(?:the|my|this) (?:answer|analysis|investigation|work|request|question|report)s? (?:is|are|has been|have "
+    r"been|was) (?:now |fully |already )*(?:complete|completed|done|finished|answered|provided|given|above)|"
+    r"all (?:the |of the |my )?(?:tasks|steps|items|questions)(?: (?:in|of) the (?:work )?plan)? (?:are|have been|were) "
+    r"(?:now |all )*(?:done|completed|complete|finished|covered|answered)|"
+    r"i(?:'ve| have) (?:now |already )*(?:answered|completed|finished|covered|provided|given) (?:the|your|all|every|it)|"
+    r"nothing (?:else|more) to (?:add|do|report)|"
+    r"la r[\u00e9e]ponse est (?:compl[\u00e8e]te|termin[\u00e9e]e)|toutes les t[\u00e2a]ches sont (?:termin[\u00e9e]es|faites|"
+    r"accomplies))\b", re.I)
+DONE_NUDGE = ("(Check before answering: your text only says the work is done, and the user sees nothing else. Write "
+              "the whole answer to the question now, from the results above, as if for the first time: they see "
+              "neither the text above nor this check, so never mention it.)")
 EMPTY_RICH = "(The model wrote no text for this answer, even when asked again: the result of its last query is below.)"
 EMPTY_PLAIN = "(The model wrote no text for this answer, even when asked again: here is the result of its last query.)"
 ECHO_NUDGE = ("(Check before answering: your answer gives the previous answer again, word for word, but the "
@@ -3472,8 +3502,12 @@ class Agent:
             return False
         from supagent.knowledge.experience import COUNT_ASKED
 
-        if COUNT_ASKED.search(question or "") or self._queried(trace):
-            return False                               # "how many orders were affected?", a count the data gave
+        if COUNT_ASKED.search(question or "") or (self._queried(trace) and (
+                RANKED.search(question or "") or FIGURE_ASKED.search(question or ""))):
+            return False                               # "how many orders were affected?", "which team had the most
+        #                                                breaches?": a figure the data gave. (0.10.12) Not any query:
+        #                                                "which applications depend on them?" answered from an
+        #                                                inventory table missed a link only the System map has
         return "system_links" in {s["function"]["name"] for s in self._specs_for(question)}
 
     def _investigating(self, question: str) -> bool:
@@ -4055,6 +4089,7 @@ class Agent:
         saved_calls: set[str] = set()                   # identical saving calls: not run again either
         self.usage = {}
         self._last_written = ""
+        self._with_calls = ""                          # (0.10.12) read by the closing-line guard only
         add_usage(self.usage, getattr(self, "_router_usage", None) or {})     # the router's call, if any
         self._router_usage = {}
         if getattr(self, "general_question", False):     # a general question: answered without the platform
@@ -4082,7 +4117,7 @@ class Agent:
         suspect_asked = records_asked = period_kept = map_asked = which_asked = buckets_asked = False
         verdict_asked = cause_records_asked = reach_asked = fields_asked = where_asked = own_asked = False
         blamed_asked = waiter_asked = parts_asked = grafana_asked = change_asked = False
-        markup_asked = time_asked = False
+        markup_asked = time_asked = done_asked = own_date_asked = False
         repeated_asked = recurring_asked = trigger_asked = False
         claimed_asked = False                          # (0.10.7) the chat's period said with no query run with it
         self._period_sent_at = None
@@ -4179,7 +4214,8 @@ class Agent:
                 kept += ("reasoning_content", "reasoning")                      # kept from one call to the next
             messages.append({k: v for k, v in msg.items() if k in kept})
             calls = msg.get("tool_calls") or []
-            if not calls and nudged and not written_run and not trace:
+            if not calls and nudged and not written_run and not self._queried(trace):   # (0.10.12) a lookup
+                #                                        (describe_data) before it is no query: still run
                 written = self._written_call(msg.get("content") or "")
                 if written is not None:                # (0.10.7) once: the query written in the answer, with a result
                     written_run = True                 # no query gave, even after the check: it is run, and the
@@ -4202,6 +4238,18 @@ class Agent:
                     if not bare:                       # again, or no call allowed: what the results say, without it
                         return self._out_of_steps(messages[:-1], trace), trace
                     answer = bare
+                if says_done_only(answer):             # (0.10.12) "The answer is complete. All tasks have been done."
+                    before = getattr(self, "_last_written", "") or getattr(self, "_with_calls", "")
+                    if before:                         # the answer written before it (alone, or with a plan update)
+                        log.info("supagent: a last text that only says the work is done: the answer before it given")
+                        answer = before
+                        messages[-1] = {"role": "assistant", "content": answer}
+                    elif not done_asked:               # nothing written before it: asked once for the whole answer
+                        done_asked = True
+                        self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                        log.info("supagent: answer sent back (only says the work is done: %r)", answer[:120])
+                        messages.append({"role": "user", "content": DONE_NUDGE})
+                        continue
                 cut = repeating(answer)
                 if cut is not None and not looped:     # once: an answer going round in circles
                     looped = True
@@ -4333,6 +4381,18 @@ class Agent:
                     messages.append({"role": "user", "content": TIME_NUDGE})
                     if not forced and settings.get("agent.force_tool"):
                         forced = force_tool = True     # the next step runs the query of the moment
+                    continue
+                own = None if own_date_asked or asks_back(answer) else self._own_date(question, answer, trace)
+                if own:                                # (0.10.12) once: the refunds of the week by their own date,
+                    own_date_asked = True              # the week's orders by theirs: two different sets of orders
+                    self.usage["nudges"] = self.usage.get("nudges", 0) + 1
+                    log.info("supagent: answer sent back (%s by its own %s, %s by %s)", own[0], own[1], own[3], own[4])
+                    chat = [str(h.get("content") or "") for h in getattr(self, "chat_history", None) or []]
+                    from supagent.knowledge.owndate import ties
+
+                    tie = OWN_DATE_TIE.format(b=own[0], key=own[2], a=own[3], da=own[4]) if ties(chat) else ""
+                    messages.append({"role": "user", "content": OWN_DATE_NUDGE.format(
+                        b=own[0], db=own[1], a=own[3], da=own[4], tie=tie)})
                     continue
                 if before_check and len(trace) == before_check[1] and CHECK_TALK.search(answer or ""):
                     log.info("supagent: the reply to the no-tool check speaks of the check: the answer before it kept")
@@ -4832,6 +4892,10 @@ class Agent:
                 return (answer + claims_check(answer, trace, notes_in_play(self._note_texts, trace)) +
                         honesty_note(answer, trace) + note +
                         self._other_reading(answer, trace)), trace
+            said = re.sub(r"<think>.*?</think>", "", msg.get("content") or "", flags=re.S).strip()
+            if len(said) >= WRITTEN_KEPT and _has_data(said) and not asks_back(said) and not announces_answer(said):
+                self._with_calls = said                # (0.10.12) an answer written with a call (a plan update): for
+                #                                        a last text that only says the work is done, nothing else
             for at, tc in enumerate(calls):
                 self._check_stop()
                 name = tc["function"]["name"]
@@ -5502,6 +5566,26 @@ class Agent:
             log.warning("supagent: the check of a question about the future failed", exc_info=True)
             return None
 
+    def _own_date(self, question: str, answer: str, trace: list[dict]) -> tuple[str, str, str, str, str] | None:
+        """(0.10.12) The answer's figures take rows linked to a period's rows by their own date (knowledge.owndate)."""
+        try:
+            from supagent.knowledge.owndate import reading
+            from supagent.models import KObject
+
+            from superset.extensions import db
+
+            def fields_of(table: str) -> set[str]:
+                return {o.name for o in db.session.query(KObject).filter(
+                    KObject.kind == "field", KObject.parent == table, KObject.gone_at.is_(None)).all()}
+
+            return reading(trace, answer, getattr(self, "raw_question", None) or question, fields_of)
+        except Exception:  # pylint: disable=broad-except   (never an answer lost for a check)
+            from superset.extensions import db
+
+            db.session.rollback()
+            log.warning("supagent: the check of linked rows by their own date failed", exc_info=True)
+            return None
+
     def _unnamed(self, question: str, trace: list[dict]) -> tuple[str, str, str] | None:
         """The first value the question names that this answer's queries never use (knowledge.named)."""
         try:
@@ -5589,7 +5673,8 @@ class Agent:
                        None if getattr(self, "open_question", False) else
                        condition_refusal(getattr(self, "support", None), name, args)]
             from supagent.knowledge.sqllint import (duplicate_refusal, extreme_refusal, grouped_fixed_refusal,
-                                                    or_and_refusal, outer_join_refusal, per_day_refusal)
+                                                    or_and_refusal, outer_join_refusal, per_day_refusal,
+                                                    ranked_refusal)
             from supagent.knowledge.values import refusal as value_refusal
 
             reasons.append(duplicate_refusal(name, args))      # two columns, one aggregate: a condition lost
@@ -5597,6 +5682,7 @@ class Agent:
             reasons.append(outer_join_refusal(name, args))     # a LEFT JOIN undone by a WHERE on its optional side
             reasons.append(per_day_refusal(question, name, args))   # an average per day as AVG over the records
             reasons.append(extreme_refusal(name, args))        # MAX(...) AS min_...: the other extreme
+            reasons.append(ranked_refusal(name, args))         # (0.10.12) first rows by a label, not by the figure
             reasons.append(grouped_fixed_refusal(question, name, args))   # GROUP BY x WHERE x = one value
             if not getattr(self, "open_question", False):    # an investigation looks values up: none is news
                 reasons.append(value_refusal(name, args))      # a field compared with a value it does not have

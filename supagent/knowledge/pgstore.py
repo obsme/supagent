@@ -276,20 +276,32 @@ def _vec_text(v: Any) -> str | None:
     return "[" + ",".join(f"{float(x):.5g}" for x in v) + "]"
 
 
-def _chunk_rows(model: str | None) -> Iterator[dict[str, Any]]:
-    """The searchable pieces (supagent_chunk) with their vectors when they are of the model in use."""
+def _like(prefix: str) -> str:
+    """A LIKE pattern for the refs starting with `prefix` (backslash, PostgreSQL's default escape)."""
+    return prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _chunk_rows(model: str | None, prefixes: tuple[str, ...] | None = None) -> Iterator[dict[str, Any]]:
+    """The searchable pieces (supagent_chunk) with their vectors when they are of the model in use; `prefixes`: those
+    kinds of refs only, read as such (0.10.12: a save of one learned answer read, classified and cut into words every
+    piece of the knowledge, a wiki's thousands of pages with it, then kept the answers')."""
+    from sqlalchemy import or_
+
     from supagent.knowledge.embeddings import from_bytes
     from supagent.models import Chunk
+
+    def scoped(q: Any) -> Any:
+        return q.filter(or_(*[Chunk.ref.like(_like(p), escape="\\") for p in prefixes])) if prefixes else q
 
     try:
         from supagent.knowledge.facets import facets_of
 
-        refs = [r for (r,) in db.session.query(Chunk.ref)]
+        refs = [r for (r,) in scoped(db.session.query(Chunk.ref))]
         cats = facets_of(refs)
     except Exception:  # pylint: disable=broad-except   (not classified yet: the pieces alone)
         db.session.rollback()
         cats = {}
-    for c in db.session.query(Chunk).yield_per(500):
+    for c in scoped(db.session.query(Chunk)).yield_per(500):
         vec = from_bytes(c.vector) if (model and c.vector is not None and c.embed_model == model) else None
         mine = cats.get(c.ref) or []
         extra = " ".join(x.split(": ", 1)[1] for x in mine)
@@ -759,8 +771,13 @@ def sync(prefixes: tuple[str, ...] | None = None, chats: bool = True, names: boo
         if not _lock(con):
             return {"skipped": "another process is writing the store"}
         con.execute(text("SET statement_timeout = 0"))
-        have = {r.ref: r for r in con.execute(text(f"SELECT ref, hash, (embedding IS NOT NULL) AS has_v FROM {doc}"))
-                .all() if in_scope(r.ref)}
+        if prefixes is None:
+            rows = con.execute(text(f"SELECT ref, hash, (embedding IS NOT NULL) AS has_v FROM {doc}")).all()
+        else:                                            # (0.10.12) those kinds only, read as such
+            pats = [_like(p) for p in prefixes] + (["chat:%", "route:%"] if chats else [])
+            rows = con.execute(text(f"SELECT ref, hash, (embedding IS NOT NULL) AS has_v FROM {doc} "
+                                    "WHERE ref LIKE ANY(:pats)"), {"pats": pats}).all()
+        have = {r.ref: r for r in rows if in_scope(r.ref)}
         todo: list[dict[str, Any]] = []
         keep: set[str] = set()
 
@@ -773,7 +790,7 @@ def sync(prefixes: tuple[str, ...] | None = None, chats: bool = True, names: boo
                 todo.append(r)
                 out["changed" if old is not None else "added"] += 1
 
-        for r in _chunk_rows(model if dims else None):
+        for r in _chunk_rows(model if dims else None, prefixes):
             if prefixes is None or r["ref"].startswith(prefixes):
                 compare(r, True)
         if chats:
