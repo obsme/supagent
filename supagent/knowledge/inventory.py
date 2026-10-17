@@ -145,9 +145,16 @@ def _said(row: dict[str, Any]) -> str:
 def walk(names: list[str], depth: int = DEPTH) -> dict[str, Any] | None:
     """What the inventories say of these names and of what they stand on (None: no inventory, or none of them in
     it): per name, its row, what its relations name down to `depth` steps, what names it; then what they share."""
+    return _walk(names, depth)[0]
+
+
+def _walk(names: list[str], depth: int) -> tuple[dict[str, Any] | None, list[str]]:
+    """walk(), and the rows' names its lines stand on in their order (0.11.1: below() read them back from the lines
+    and cut a name with spaces at its first word: "Rack 12" read as "Rack")."""
     inv = load()
+    targets: list[str] = []
     if not inv["rows"]:
-        return None
+        return None, targets
     index, rows = inv["index"], inv["rows"]
     out: dict[str, Any] = {"parts": {}, "not_in_the_inventory": []}
     below: dict[str, set[str]] = {}
@@ -156,7 +163,7 @@ def walk(names: list[str], depth: int = DEPTH) -> dict[str, Any] | None:
         if row is None:
             out["not_in_the_inventory"].append(n)
             continue
-        lines, seen = [], {row["name"]}
+        lines, seen, tops = [], {row["name"]}, []
         reach: set[str] = set()
         frontier = [(row, 0)]
         while frontier:
@@ -167,6 +174,7 @@ def walk(names: list[str], depth: int = DEPTH) -> dict[str, Any] | None:
                     continue
                 port = f" port {detail}" if detail else ""
                 lines.append(f"{cur['name']} {kind.replace('_', ' ')} {_said(t)}{port} ({field})")
+                tops.append(t["name"])
                 reach.add(t["name"] + (f" port {detail}" if detail else ""))
                 reach.add(t["name"])
                 if t["name"] not in seen and d + 1 < depth:
@@ -176,28 +184,23 @@ def walk(names: list[str], depth: int = DEPTH) -> dict[str, Any] | None:
                     if tgt == row["name"]]
         out["parts"][row["name"]] = {"is": _said(row), "stands_on": lines[:20], "named_by": named_by[:20],
                                      "from": row["table"]}
+        targets += [t for k, t in enumerate(tops[:20]) if t not in targets and t not in tops[:k]]
         below[row["name"]] = reach
     if len(below) >= 2:
         common = set.intersection(*below.values())
         if common:
             out["in_common_below"] = sorted(common)
     if not out["parts"]:
-        return None
+        return None, []
     if not out["not_in_the_inventory"]:
         out.pop("not_in_the_inventory")
     out["note"] = ("from the inventory as it is now (what each part runs on, is connected to, depends on, down to "
                    f"{depth} steps): a cause below the services (a node, a rack, a switch port) shows here; check its "
                    "records (records_about) and its own data")
-    return out
+    return out, targets
 
 
 def below(names: list[str], depth: int = DEPTH) -> list[str]:
-    """The inventory's parts these names stand on (their nodes, the devices those connect to), for records_about."""
-    w = walk(names, depth) or {}
-    out: list[str] = []
-    for p in (w.get("parts") or {}).values():
-        for line in p.get("stands_on") or []:
-            m = re.search(r" (?:runs on|connected to|depends on|relates to) (\S+)", line)
-            if m and m.group(1) not in out and m.group(1) not in names:
-                out.append(m.group(1))
-    return out
+    """The inventory's parts these names stand on (their nodes, the devices those connect to), for records_about:
+    each by its row's whole name (0.11.1: a CMDB's "Rack 12", "Core Switch 1", not their first word)."""
+    return [t for t in _walk(names, depth)[1] if t not in names]

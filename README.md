@@ -109,7 +109,7 @@ Content-Security-Policy (Talisman nonces).
 ```bash
 # the Python of Superset's virtualenv
 PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-$PY -m pip install supagent-0.11.0-py3-none-any.whl         # Superset 6.1: nothing else to install
+$PY -m pip install supagent-0.11.1-py3-none-any.whl         # Superset 6.1: nothing else to install
 ```
 
 One line in `superset_config.py` registers it. It holds no logic:
@@ -151,6 +151,15 @@ row level security filters and dashboards keep them), the AI roles' users moved 
 then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with the knowledge written) and Viewer
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
+## Upgrade from 0.11.0 to 0.11.1
+
+pip install the wheel on every host and restart (tables unchanged, v20). A quality round on the reader of the
+documents and the code, the System map's learning and the Context's writer, and the fixes of the items 0.11.0's review
+reported; the next learning and the next Context build use them. Measured: main open set 162/162 (0 wrong without a
+mark), observability open set on the big model's profile 28/29; learning: right category 0.9461 -> 0.9582 over six
+corpora, link precision up on two, a blind corpus unchanged; the Context's checks passed; every page in a browser
+25/25; unit tests 2339.
 
 ## Upgrade from 0.10.12.1 to 0.11.0
 

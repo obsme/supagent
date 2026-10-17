@@ -250,9 +250,9 @@ def test_the_tool_gives_the_findings_to_who_may_see_the_chart(app, lab, monkeypa
             top = r["charts"][0]
             assert top["chart"] == "Failed jobs per application" and "nightly look" in top["looked"]
             assert top["unusual"][0].startswith("failed for APPLICATION BILLING: 100.0 against usually")
-        with acting_as("bob"):
-            r = tools.chart_anomalies(dashboard=lab["board"])
-            assert r["charts"] == [] and r["not_shown"] == 3
+        with acting_as("bob"):                                           # (0.11.1) a dashboard none of whose
+            r = tools.chart_anomalies(dashboard=lab["board"])            # charts is his: not there for him
+            assert r == {"error": f"no dashboard {lab['board']!r} (list_dashboards gives their titles and ids)"}
         calls = []
         monkeypatch.setattr(K, "run_query", lambda body: calls.append(1) or fake(_rows(spike=11.0))(body))
         monkeypatch.setattr(K, "may_see", lambda slc: (True, False))     # row-level security: looked at as them

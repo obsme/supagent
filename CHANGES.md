@@ -1,5 +1,93 @@
 # Changes
 
+## 0.11.1 — 2026-10-17
+
+A quality round on what the agent learns from the team's documents and code: the reader, the System map's learning
+and the Context's writer, and the fixes of every item 0.11.0's review left reported only. Measured on the release
+build itself (the release is the measured commit, byte for byte).
+
+The reader of documents and code
+* **Fewer wrong links read**: in a table of components with their application and their team, the team owns the
+  application when every component of it says the same team (16 wrong component-to-team links gone on a lab corpus); a
+  database whose row says it lives "on" a shared cluster is no longer put on that cluster's servers; in a Traefik
+  configuration (file provider, YAML or TOML), a server under a service's load balancer is that service running there,
+  not a call to the server; "routes to X on group-a" puts X on the group instead of a second call.
+* **Never stalled by a long line**: every heading, arrow and sentence pattern of the reader is linear on a line with a
+  long run of spaces (a configuration comment or a table padded with spaces): 60,000 spaces took for ever, now about
+  0.1 s.
+* **Ansible and inventories at size**: an Ansible inventory in YAML of 10,000 hosts is read in about a second (each
+  host's line was looked for from the top of the file); a host in the inventory (a CMDB) keeps its whole name ("Node
+  7" was "Node"), for the learning and for the agent's tools that walk it.
+
+The System map's learning
+* **Values filed in the right category more often**: a part the reading marks as another organization's is no longer
+  filed as one of the team's own services when the team has no category for externals; the category cues come from
+  every statement that names a part, not only the first one read; an environment goes to the team's category whose
+  description names it (a "landscape" for prod, preprod, int); a value that has parts of its own is never moved down
+  into its whole's inner category.
+* **Fewer wrong links**: a part is not proposed as part of a whole it already reaches through another whole of
+  another category (a server and the environment of its group); proposals of an earlier learning stay in To review.
+* **One value per thing**: the team words of other languages known to the merge include "tribu" (as "équipe",
+  "equipo", "squadra", "Mannschaft").
+* **Faster on big wikis**: the learned links no longer stated are checked against the documents in one pass (was one
+  scan of every document per link); after a minute, the links not yet checked are kept as written.
+
+The Context's writer
+* **Pages a new member of the team reads best**: the overview's applications in one table (application, what it
+  does, its data), the technical overview's data sources in one table, "Not known yet" in five points at most, one
+  spelling per part, each source cited once per paragraph and after each table, no long lists of names.
+* **Checked before it is saved**: a citation to evidence that does not exist is left out, a count sentence is left
+  out ("There are 42 servers."; a count that introduces names keeps the names), "In short" is moved first, a diagram
+  the LLM drew itself is left out (the page draws the relations); what is only said in the build's steps: a page
+  with no "In short", with no citation, a name the evidence never gives, one part written two ways.
+* **No counts handed to the LLM**: the relations, the wiki digests and the overview's brief give none.
+* **The relations diagram**: one box per part ("Checkout API", "checkout_api" and "checkout-api (prod)" are one),
+  several relations between two parts on one line, never a part pointing to itself, 24 parts at most.
+* **Wiki space, part and repository pages**: the central pages first (40 at most, "with a diagram"), the parts most
+  described first, a part's languages and first files, a repository's folders biggest first; no counts.
+* **The light LLM context** never shows a heading with nothing under it.
+
+The items 0.11.0 reported (each with its test)
+* **Row-level security**: the agent's tools that write their own SQL (comparisons, the records about a part, the
+  repeated keys, the logs compared) refuse a dataset with row-level security filters for the user, as the SQL tools
+  do since 0.11.0; describe_data leaves out such an index's profile.
+* **Chart anomalies**: only the dashboards and charts the user may see are found; "not there" and "not yours" are
+  said the same way.
+* **Exports**: a file the agent wrote is attached again only by the person who made it (a file of an earlier
+  version, with no owner, is not).
+* **Periods**: a bound at 24:00 is the next day's 00:00; an impossible date or time is no bound (every check of the
+  query ran before, none was skipped).
+* **The catalog**: a whole catalog of the wrong shape is refused (400), never a server error.
+* **Settings and secrets**: `llm.extra_headers`'s values masked where secrets are (the settings page, the command
+  line, backups; a backup restored elsewhere needs them set again); the LLM test shows nothing of the token; the
+  schema version is never lowered by an older version's init.
+* **The search**: a group's memories are found by its members (they were indexed for no group); a full sync reads
+  one document's text at a time.
+* **Grafana and OpenSearch Dashboards**: a role given through a Superset group opens them; panels under an open row
+  are that row's; interval variables replaced whole; a draft approved twice at once creates one rule; a label value
+  with a quote escaped; the cache drops its expired answers.
+* `LIMIT 1.5` is a tool error, not a crash.
+
+Measured before the release under a rule written before any result (gate G-0.11.1, NOTES 2026-10-17 11:2x) on the
+frozen build 810326f, the release's code, with Qwen3.6-35B-A3B (llama.cpp, its server restarted first). The agent: the
+main open set on the small model's profile 162 of 162 right (the rule: at most 3 misses), 0 wrong without a mark (the
+rule: 2); the observability open set on the big model's profile forced 28 of 29 (the rule: 27), 1 wrong without a mark
+(the rule: 1). The learning, with no LLM, against 0.11.0 on the same corpora: the values filed in the right category
+0.9461 -> 0.9582 on average over six development corpora, none lower (the owner's formats 0.7984 -> 0.8374); link
+precision 0.928 -> 0.985 and 0.833 -> 0.857 on two of them, none lower; a blind held-out corpus, scored once on each
+build: 0.6344 and 0.874 on both, no change. The Context written on a lab with the LLM: its three summary pages pass
+every check (In short first, no count sentence, every citation within the evidence, one box per part, no unknown part
+in the diagrams). Every page in a browser: 25 passed. The unit tests: 2339 passed. Not measured: gpt-oss-120b.
+
+Known limits: a draft alert rule whose approval was cut by a stopped process (between its claim and Grafana's answer)
+stays out of To review; a page written in another language than English is always said to have no "In short" in
+the build's checks (it is not changed). Not measured: gpt-oss-120b.
+
+Upgrade from 0.11.0: pip install the wheel on every host, restart the web servers, the workers and beat; nothing to
+run (tables unchanged, v20). The next learning reads the documents and the code again; the next Context build
+writes every summary, wiki space, repository and part page again, and they wait in To review. INSTALL.txt, *From
+0.11.0 to 0.11.1*.
+
 ## 0.11.0 — 2026-10-17
 
 The final release of this series: the owner's nine requests of 17 October 2026, a review of the code (the agent and

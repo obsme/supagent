@@ -122,9 +122,9 @@ def test_a_wiki_is_summarized_by_its_central_pages_not_its_first_one():
 
     d = _wiki(5000)
     out = C._digest(d, 12000)
-    assert len(out) <= 12000 and out.startswith("5000 pages (spaces: OPS)")
+    assert len(out) <= 12000 and out.startswith("Spaces: OPS. Its central pages first")   # (0.11.1) no count
     first = out.splitlines()[1]
-    assert first.startswith("- Page 4321 (1667 pages link to it): ") and "calls ledger" in first   # the hub first
+    assert first.startswith("- Page 4321: ") and "calls ledger" in first   # the hub first
     small = {"id": 2, "title": "Runbook", "content": "Short runbook text.", "pages": []}
     assert C._digest(small, 3000) == "Short runbook text."
 
@@ -154,15 +154,15 @@ def test_the_summaries_get_the_relations_the_documents_state(ctx):
         rels = C._part_relations()
         assert rels[:2] == [{"a": "Billing", "verb": "calls", "b": "Ledger", "pages": 3},
                             {"a": "Ledger", "verb": "runs_on", "b": "cluster-a", "pages": 1}]
-        assert C._relation_lines(rels[:2]) == ["Billing calls Ledger (3 pages)", "Ledger runs on cluster-a (1 page)"]
+        assert C._relation_lines(rels[:2]) == ["Billing calls Ledger", "Ledger runs on cluster-a"]   # no count
         ev = {"databases": {}, "inventory": {}, "relations": [], "entries": [], "answers": [], "memory": [],
               "docs": [_wiki(5000)], "part_relations": rels}
         specs = {s["slug"]: s for s in C.summary_specs(ev)}
         evidence = specs["overview"]["evidence"]
         stated = [e for e in evidence if e["ref"] == "facts"]
-        assert stated and "Billing calls Ledger (3 pages)" in stated[0]["relations"]
+        assert stated and "Billing calls Ledger" in stated[0]["relations"]
         doc_text = [e for e in evidence if e["ref"] == "doc:1"][0]["text"]
-        assert doc_text.startswith("5000 pages") and "Page 4321" in doc_text and len(doc_text) <= C.DOCS_CHARS
+        assert doc_text.startswith("Spaces: OPS.") and "Page 4321" in doc_text and len(doc_text) <= C.DOCS_CHARS
     finally:
         db.session.query(KUnit).filter(KUnit.doc_id == doc.id).delete(synchronize_session=False)
         db.session.delete(doc)

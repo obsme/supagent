@@ -74,8 +74,26 @@ def test_a_page_per_wiki_space_whatever_document_read_its_pages(app):
         got = {p["title"]: p for p in _space_pages({1: arch, 2: ops}, units, {"restart": {12}}, {"restart": "restart"})}
     assert sorted(got) == ["Wiki: Architecture", "Wiki: Operations"]
     o = got["Wiki: Operations"]["content"]
-    assert "A wiki space (OPS): 2 pages read." in o and o.count("- Operations") == 1        # its home once
-    assert "- Operations (links to: Runbook: restart)" in o and "(1 arrows in its diagrams)" in o
+    assert "A wiki space (OPS): its main pages" in o and o.count("- Operations") == 1        # its home once
+    assert "- Operations (links to: Runbook: restart)" in o and "- Runbook: restart (with a diagram)" in o
+    assert o.index("- Runbook: restart") < o.index("- Operations")       # (0.11.1) the page linked to first
     assert "## The parts its pages describe" in o and "restart" in o
     assert [x["ref"] for x in got["Wiki: Operations"]["sources"]] == ["doc:1", "doc:2"]
-    assert "A wiki space (ARCH): 1 page read." in got["Wiki: Architecture"]["content"]
+    assert "A wiki space (ARCH): its main pages" in got["Wiki: Architecture"]["content"]
+
+
+def test_part_and_repository_pages_say_where_the_code_is_without_counting_files(world):  # noqa: F811
+    """(0.11.1) A part's code: its languages and the files to start reading; a repository's: its languages and its
+    folders, the biggest first; no count of files on either page."""
+    import re
+
+    from supagent.knowledge import understand as U
+    from supagent.knowledge.context_docs import pages
+
+    U.run(reason="test")
+    got = {p["title"]: p["content"] for p in pages()}
+    code = got["Part: ledger"].split("## Its code", 1)[1].split("\n## ", 1)[0]
+    assert re.search(r"python[^;]*; files `[^`]+`, `", code) and not re.search(r"\b\d+ files?\b", code)
+    repos = [c for t, c in got.items() if t.startswith("Repository: ")]
+    assert repos and all("A repository; its files are mostly " in c and not re.search(r"\b\d+ files?\b", c)
+                         for c in repos)

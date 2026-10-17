@@ -64,8 +64,9 @@ def allowed(user: Any = None) -> bool:
     roles = {str(r).strip() for r in (_setting("osd.roles", []) or []) if str(r).strip()}
     if not roles:
         return True
-    names = {getattr(r, "name", "") for r in (getattr(user, "roles", None) or [])}
-    return bool(names & roles)
+    from supagent.security import role_names
+
+    return bool(role_names(user) & roles)        # (0.11.1) a role given through a Superset group counts too
 
 
 def said(text: Any, chars: int = TEXT_CHARS) -> str | None:

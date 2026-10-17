@@ -50,6 +50,29 @@ def _norm(name: str) -> str:
     return " ".join(str(name or "").lower().replace("_", "-").split())
 
 
+def _and(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+COUNTED = re.compile(r"\b\d[\d,]*\s+(?=(?:files?|workloads?|plays?|playbooks?|roles?|inventories|inventory|hosts?|"
+                     r"groups?|tasks?|templates?|charts?|manifests?|scripts?|modules?|services?|resources?)\b)", re.I)
+
+
+def _uncounted(sentence: str) -> str:
+    """(0.11.1) What a repository is, without its counts of files ("Code: Python 4 files." -> "Code: Python files.",
+    "Kubernetes manifests: 1 workloads (ledger)." -> "Kubernetes manifests: workloads (ledger).")."""
+    return COUNTED.sub("", str(sentence))
+
+
+def _code_of(us: list[Any]) -> str:
+    """(0.11.1) A part's code in a repository: its languages, the most used first, and its first files (the ones
+    nearest the repository's top: where to start reading)."""
+    langs = [k for k, _v in Counter(u.lang or "other" for u in us).most_common(5) if k != "other"]
+    paths = sorted({str(u.ukey) for u in us if u.ukey}, key=lambda x: (x.count("/"), len(x), x))
+    return ((", ".join(langs) + "; ") if langs else "") + "files " + ", ".join(f"`{x}`" for x in paths[:3]) + \
+        (" and others" if len(paths) > 3 else "")
+
+
 def _how(r: dict[str, Any]) -> str:
     how = ", ".join(HOW.get(s, s) for s in r.get("sources") or [])
     where = r.get("where") or ""
@@ -141,10 +164,8 @@ def pages() -> list[dict[str, Any]]:
                 by_doc[u.doc_id].append(u)
             lines += ["", "## Its code", ""]
             for doc_id, us in by_doc.items():
-                langs = Counter(u.lang or "other" for u in us)
-                refs.add(doc_id)
-                lines.append(f"- {docs[doc_id].title or docs[doc_id].url}: {len(us)} file{'s' if len(us) > 1 else ''} ("
-                             + ", ".join(f"{k} {v}" for k, v in langs.most_common(5)) + ")")
+                refs.add(doc_id)                         # (0.11.1) its languages and where to start reading, not
+                lines.append(f"- {docs[doc_id].title or docs[doc_id].url}: {_code_of(us)}")   # a count of files
         if out_rel.get(key):
             lines += ["", "## What it uses", ""]
             for r in sorted(out_rel[key], key=lambda x: (x["kind"], x["to"]))[:MAX_LINES]:
@@ -188,8 +209,8 @@ def pages() -> list[dict[str, Any]]:
             langs = Counter(u.lang or "other" for u in files)
             folders = Counter((u.ukey.split("/", 1)[0] if "/" in u.ukey else "(top)") for u in files)
             owners = Counter(u.owner for u in files if u.owner)
-            lines = [f"# {title}", "", f"A repository: {len(files)} file{'s' if len(files) > 1 else ''} read ("
-                     + ", ".join(f"{k} {v}" for k, v in langs.most_common(8)) + ")."]
+            main = [k for k, _v in langs.most_common(8) if k != "other"]       # (0.11.1) no count of its files
+            lines = [f"# {title}", "", "A repository" + (f"; its files are mostly {_and(main)}." if main else ".")]
             from supagent.models import Meta
 
             row = db.session.get(Meta, f"repo_kinds:{doc_id}")
@@ -198,38 +219,65 @@ def pages() -> list[dict[str, Any]]:
             except ValueError:
                 kinds = {}
             if kinds.get("sentences"):                     # what it is: an Ansible project, manifests, code...
-                lines += ["", "## What it is", ""] + [f"- {x}" for x in kinds["sentences"]]
+                lines += ["", "## What it is", ""] + [f"- {_uncounted(x)}" for x in kinds["sentences"]]
                 if "ansible" not in kinds.get("labels", []):
                     lines.append("- Not an Ansible project (no play, no inventory, no role with tasks).")
-            lines += ["", "## Folders", ""]
-            lines += [f"- {k}: {v} file{'s' if v > 1 else ''}" for k, v in folders.most_common(20)]
+            lines += ["", "## Folders", "", "The folders with the most files first.", ""]
+            for k, _v in folders.most_common(20):
+                used = [x for x, _n in Counter(u.lang or "other" for u in files
+                                               if (u.ukey.split("/", 1)[0] if "/" in u.ukey else "(top)") == k)
+                        .most_common(3) if x != "other"]
+                lines.append(f"- {k}" + (f" ({', '.join(used)})" if used else ""))
             if owners:
-                lines += ["", "## The services it is the code of", ""] + [f"- {k} ({v} file{'s' if v > 1 else ''})"
-                                                                         for k, v in owners.most_common(20)]
+                lines += ["", "## The services it is the code of", ""] + [f"- {k}" for k, _v in owners.most_common(20)]
             out.append({"section": "technical", "slug": f"repositories-{_slug(title)}", "title": f"Repository: {title}",
                         "content": "\n".join(lines), "database_ids": [],
                         "sources": [{"ref": f"doc:{doc_id}", "title": title}]})
         if wiki and any(isinstance(p, dict) and p.get("space") for p in d.pages or []):
             continue                                       # (0.10.1) a wiki's pages: a page per space, below
         if wiki:
-            ids = {str((p or {}).get("id")): (p or {}).get("title") for p in (d.pages or []) if isinstance(p, dict)}
-            lines = [f"# {title}", "", f"A wiki space: {len(wiki)} page{'s' if len(wiki) > 1 else ''} read.", "", "## Pages", ""]
-            for p in (d.pages or [])[:200]:
-                if not isinstance(p, dict) or not p.get("title"):
-                    continue
-                to = [ids.get(str(x)) for x in p.get("links") or [] if ids.get(str(x))]
-                lines.append(f"- {p['title']}" + (f" (links to: {', '.join(to[:8])})" if to else "")
-                             + (f" ({len(p.get('diagram_edges') or [])} arrows in its diagrams)" if p.get("diagram_edges")
-                                else ""))
-            named = sorted({shown[k] for k, ids_ in pages_about.items() if k in shown
-                            and ids_ & {u.id for u in wiki}})
-            if named:
-                lines += ["", "## The parts its pages describe", "", ", ".join(named[:80])]
+            mine = {u.id for u in wiki}
+            lines = [f"# {title}", "", "A wiki space: its main pages and the parts they describe.", ""]
+            lines += _wiki_lines([p for p in (d.pages or []) if isinstance(p, dict) and p.get("title")],
+                                 _described(pages_about, shown, mine))
             out.append({"section": "functional", "slug": f"wiki-{_slug(title)}", "title": f"Wiki: {title}",
                         "content": "\n".join(lines), "database_ids": [],
                         "sources": [{"ref": f"doc:{doc_id}", "title": title}]})
     out.extend(_space_pages(docs, units, pages_about, shown))
     return out
+
+
+WIKI_PAGES = 40            # (0.11.1) the pages listed on a wiki space's page (the central ones first)
+
+
+def _described(pages_about: dict[str, set[int]], shown: dict[str, str], mine: set[int]) -> list[str]:
+    """(0.11.1) The parts a wiki space's pages describe, the ones most of its pages describe first."""
+    n = {shown[k]: len(ids & mine) for k, ids in pages_about.items() if k in shown and ids & mine}
+    return sorted(n, key=lambda x: (-n[x], x.lower()))
+
+
+def _wiki_lines(entries: list[dict[str, Any]], named: list[str]) -> list[str]:
+    """(0.11.1) A wiki space's pages as a newcomer reads them: the central ones first (the ones its other pages link to
+    most), WIKI_PAGES at most (Documents and sites lists every page), each with the pages it links to and whether it
+    draws a diagram (not its arrows' count); then the parts its pages describe, the most described first (MAX_LINES)."""
+    ids = {str(p.get("id")): p.get("title") for p in entries if p.get("id") is not None}
+    inbound: Counter = Counter()
+    for p in entries:
+        for x in {str(x) for x in p.get("links") or []}:
+            if x in ids and x != str(p.get("id")):
+                inbound[x] += 1
+    order = sorted(range(len(entries)), key=lambda i: (-inbound[str(entries[i].get("id"))], i))
+    lines = ["## Its main pages", ""]
+    for i in order[:WIKI_PAGES]:
+        p = entries[i]
+        to = list(dict.fromkeys(ids[str(x)] for x in p.get("links") or [] if ids.get(str(x))))
+        lines.append(f"- {p['title']}" + (f" (links to: {', '.join(to[:8])})" if to else "")
+                     + (" (with a diagram)" if p.get("diagram_edges") else ""))
+    if len(entries) > WIKI_PAGES:
+        lines.append("- ... the other pages: Documents and sites")
+    if named:
+        lines += ["", "## The parts its pages describe", "", ", ".join(named[:MAX_LINES]) + "."]
+    return lines
 
 
 def _space_pages(docs: dict[int, Any], units: list[Any], pages_about: dict[str, set[int]],
@@ -258,18 +306,9 @@ def _space_pages(docs: dict[int, Any], units: list[Any], pages_about: dict[str, 
     out: list[dict[str, Any]] = []
     for space, these in sorted(items.items()):
         title = named_by.get(space) or space
-        ids = {str(p.get("id")): p.get("title") for _d, p in these}
-        lines = [f"# {title}", "", f"A wiki space ({space}): {len(these)} page{'s' if len(these) > 1 else ''} read.", "",
-                 "## Pages", ""]
-        for _d, p in these[:200]:
-            to = [ids.get(str(x)) for x in p.get("links") or [] if ids.get(str(x))]
-            lines.append(f"- {p['title']}" + (f" (links to: {', '.join(to[:8])})" if to else "")
-                         + (f" ({len(p.get('diagram_edges') or [])} arrows in its diagrams)" if p.get("diagram_edges")
-                            else ""))
+        lines = [f"# {title}", "", f"A wiki space ({space}): its main pages and the parts they describe.", ""]
         mine = {unit_ids.get((d.id, str(p.get(k)))) for d, p in these for k in ("id", "url")} - {None}
-        named = sorted({shown[k] for k, ids_ in pages_about.items() if k in shown and ids_ & mine})
-        if named:
-            lines += ["", "## The parts its pages describe", "", ", ".join(named[:80])]
+        lines += _wiki_lines([p for _d, p in these], _described(pages_about, shown, mine))
         out.append({"section": "functional", "slug": f"wiki-{_slug(title)}", "title": f"Wiki: {title}",
                     "content": "\n".join(lines), "database_ids": [],
                     "sources": [{"ref": f"doc:{i}", "title": d.title or d.url} for i, d in sorted(holders[space].items())]})

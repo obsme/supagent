@@ -249,7 +249,8 @@ def no_name(category: str | None, raw: str) -> str:
     identifier = bool(re.fullmatch(r"[a-z][a-z0-9]*(?:[-_][a-z0-9]+)+", v))   # (0.10.9.3) config-server,
     #                                 customers-service: one identifier of a code or a configuration is a name
     if not identifier and all(w in kinds or w in ENV_WORDS or w.isdigit() or not w for w in words) and \
-            c not in ("environment", "env", "environments"):
+            c not in ("environment", "env", "environments") and \
+            not (all(w in ENV_WORDS for w in words if w) and described(category, v)):   # (0.11.1) an environment
         from supagent.knowledge.placing import phrases
 
         from supagent.knowledge.catkind import kind_name
@@ -261,6 +262,20 @@ def no_name(category: str | None, raw: str) -> str:
             return ""
         return "a word for a kind of thing or an environment, not the name of one"
     return ""
+
+
+def described(category: str | None, value: str) -> bool:
+    """(0.11.1) The category's description (the person's words) names this very value among what it holds ("a
+    landscape: prod, preprod or int"): an environment's word is a name of that category (only an environment's: "a
+    service (an API, a worker)" makes no "worker" a name)."""
+    try:
+        from supagent import settings
+
+        about = str((settings.get("categories.about") or {}).get(str(category or "")) or "").lower()
+    except Exception:  # pylint: disable=broad-except   (outside an app: no description)
+        return False
+    v = " ".join(str(value or "").lower().split())
+    return bool(v and about and re.search(r"(?<![\w-])" + re.escape(v) + r"(?![\w-])", about))
 
 
 TEAM_WORDS = {"team", "teams", "equipe", "équipe", "squad", "crew", "tribe"}

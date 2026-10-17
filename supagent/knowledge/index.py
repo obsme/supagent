@@ -315,9 +315,11 @@ def _recipe_pieces() -> Iterator[dict[str, Any]]:
 
 def _memory_pieces() -> Iterator[dict[str, Any]]:
     for m in db.session.query(Memory).filter(Memory.status == "active"):
-        yield {"ref": f"memory:{m.id}", "kind": "memory", "scope": m.scope,
+        group = m.scope == "group" and m.group_id is not None
+        yield {"ref": f"memory:{m.id}", "kind": "memory",
+               "scope": f"g{m.group_id}" if group else m.scope,      # a group's: searched by its members (as notes)
                "user_id": m.user_id if m.scope == "user" else None,
-               "title": f"{m.kind} ({'team' if m.scope == 'team' else 'personal'})"
+               "title": f"{m.kind} ({'team' if m.scope == 'team' else 'group' if group else 'personal'})"
                + (f", {m.category}" if m.category else ""), "text": m.text}
 
 
@@ -340,10 +342,13 @@ def _doc_pieces(only: set[int] | None = None) -> Iterator[dict[str, Any]]:
     """The parts of the documents: page by page (a part never mixes two pages), each named after its document
     and its page and starting with the page's address, for the agent to say where it read it. (0.10.9.2) `only`:
     these documents' alone (a page removed, a document saved: never every document read again)."""
-    q = db.session.query(Doc).filter(Doc.enabled.is_(True), Doc.content.isnot(None))
+    q = db.session.query(Doc.id).filter(Doc.enabled.is_(True), Doc.content.isnot(None))
     if only is not None:
         q = q.filter(Doc.id.in_(sorted(only) or [-1]))
-    for d in q:
+    for (doc_id,) in q.order_by(Doc.id).all():   # (0.11.1) one document's content in memory at a time (a wiki's
+        d = db.session.get(Doc, doc_id)          # whole text each): never every document's at once
+        if d is None:
+            continue
         name = d.title or d.url or f"document {d.id}"
         category = f" ({d.category})" if d.category else ""
         pages = _doc_pages(d)

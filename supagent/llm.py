@@ -864,7 +864,7 @@ class LLM:
         out: dict[str, Any] = {"base_url": self.base, "auth": self.cfg.auth}
         if self.cfg.auth == "middleware":
             token = middleware_token(self.cfg)
-            out["token"] = f"{token[:6]}... ({len(token)} characters)"
+            out["token"] = f"received ({len(token)} characters)"     # (0.11.1) nothing of it shown
         out["model"] = self.model
         msg = self.chat([{"role": "user", "content": "Reply with the single word OK."}], max_tokens=16)
         out["answer"] = (msg.get("content") or "").strip()[:80]

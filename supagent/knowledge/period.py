@@ -499,14 +499,19 @@ INCLUSIVE_END = re.compile(r"(?<![\w@])\"?(\w+)\"?\s+BETWEEN\s+(?:(?:DATE|TIMEST
 
 
 def _literals(sql: str) -> list[dt.datetime]:
+    """The SQL's date and time literals: '2026-09-23 24:00' is the next day's 00:00; an impossible one
+    ('2026-09-31', '10:75') is none (never an error: the checks of the call read them)."""
     out = []
     for m in DATE_LIT.finditer(sql or ""):
+        hh, mm, ss = int(m.group(2) or 0), int(m.group(3) or 0), int(m.group(4) or 0)
         try:
             day = dt.date.fromisoformat(m.group(1))
-        except ValueError:
+            if (hh, mm, ss) == (24, 0, 0):
+                out.append(dt.datetime(day.year, day.month, day.day) + dt.timedelta(days=1))
+            else:
+                out.append(dt.datetime(day.year, day.month, day.day, hh, mm, ss))
+        except (ValueError, OverflowError):
             continue
-        out.append(dt.datetime(day.year, day.month, day.day, int(m.group(2) or 0), int(m.group(3) or 0),
-                               int(m.group(4) or 0)))
     return out
 
 
@@ -609,8 +614,12 @@ def day_time_bound(sql: str, tables: set[str]) -> str | None:
             if high is not None:
                 bounds.append((high.group(1), int(high.group(2)), int(high.group(3)), "<"))
         for day, hh, mm, kind in bounds:
-            if (hh, mm) == (0, 0) or kind in ("<=", ">", "<>", "!=") or (hh, mm) == (23, 59) and kind == "<":
-                continue
+            if (hh, mm) in ((0, 0), (24, 0)) or kind in ("<=", ">", "<>", "!=") or (hh, mm) == (23, 59) and kind == "<":
+                continue                                # (24:00: the next day's 00:00)
+            try:
+                dt.datetime.fromisoformat(f"{day} {hh:02d}:{mm:02d}")
+            except ValueError:
+                continue                                # no such day or time (2026-09-31, 10:75): no bound
             lit = f"{day} {hh:02d}:{mm:02d}"
             d = as_day(lit)
             what = {"<": f"the rows of {d} are taken in", "=": "it matches nothing"}.get(

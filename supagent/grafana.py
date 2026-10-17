@@ -89,8 +89,9 @@ def allowed(user: Any = None) -> bool:
     roles = {str(r).strip() for r in (_setting("grafana.roles", []) or []) if str(r).strip()}
     if not roles:
         return True
-    names = {getattr(r, "name", "") for r in (getattr(user, "roles", None) or [])}
-    return bool(names & roles)
+    from supagent.security import role_names
+
+    return bool(role_names(user) & roles)        # (0.11.1) a role given through a Superset group counts too
 
 
 def _headers() -> dict[str, str]:
@@ -204,10 +205,19 @@ def call(tool: str, args: dict[str, Any] | None = None, *, cached: bool = True) 
             _CACHE.clear()
     elif cached and ttl > 0:
         with _LOCK:
-            if len(_CACHE) > 2000:
-                _CACHE.clear()
+            _prune(ttl)
             _CACHE[key] = (time.time(), out)
     return out
+
+
+def _prune(ttl: float) -> None:
+    """Before an answer is kept (the caller holds _LOCK): the expired ones dropped (they were kept until 2000
+    keys), all of them past 2000."""
+    now = time.time()
+    for k in [k for k, (at, _v) in _CACHE.items() if now - at >= ttl]:
+        del _CACHE[k]
+    if len(_CACHE) > 2000:
+        _CACHE.clear()
 
 
 def call_many(items: list[tuple[str, dict[str, Any]]], concurrency: int = 4) -> list[Any]:
@@ -243,6 +253,8 @@ def call_many(items: list[tuple[str, dict[str, Any]]], concurrency: int = 4) -> 
         except Exception as ex:  # pylint: disable=broad-except   (the session itself failed: every call did)
             got = [GrafanaError(f"the Grafana MCP server did not answer: {type(ex).__name__}: {str(ex)[:300]}")] * len(todo)
         with _LOCK:
+            if ttl > 0:
+                _prune(ttl)
             for i, res in zip(todo, got):
                 out[i] = res
                 if ttl > 0 and not isinstance(res, GrafanaError):
@@ -333,7 +345,8 @@ def _panels(panels: list[Any], row: str | None = None) -> list[dict[str, Any]]:
         if not isinstance(p, dict):
             continue
         if p.get("type") == "row":
-            out += _panels(p.get("panels") or [], row=str(p.get("title") or "") or None)
+            out += _panels(p.get("panels") or [], row=str(p.get("title") or "") or None)   # collapsed: inside it
+            row = str(p.get("title") or "") or None     # (0.11.1) open: Grafana puts its panels after it, top level
             continue
         fc = p.get("fieldConfig") or {}
         ds = p.get("datasource") if isinstance(p.get("datasource"), dict) else {}
@@ -483,12 +496,18 @@ def alert_rules(state: str = "", query: str = "", folder: str = "", labels: dict
     if folder:
         args["folder_uid"] = _folder_uid(folder)
     if labels:
-        sel = ", ".join(f'{k}="{v}"' for k, v in labels.items() if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k)))
+        sel = ", ".join(f'{k}="{_quoted(v)}"' for k, v in labels.items()
+                        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k)))
         if sel:
             args["label_selectors"] = ["{" + sel + "}"]
     raw = call("alerting_rules_read", args, cached=cached)
     rows = raw if isinstance(raw, list) else (raw.get("rules") if isinstance(raw, dict) else None) or []
     return [_rule_line(r) for r in rows if isinstance(r, dict)]
+
+
+def _quoted(value: Any) -> str:
+    """A label value inside a selector's double quotes: a backslash and a quote escaped (a" or a\\ ends no string)."""
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _rule_line(r: dict[str, Any]) -> dict[str, Any]:
@@ -643,8 +662,8 @@ def _evaluable(expr: str) -> str | None:
     """A panel's query as it can be run on its own: Grafana's interval variables at their usual values, a matcher on a
     dashboard variable as any value; None when a variable is left (it needs the dashboard's choice)."""
     q = str(expr or "")
-    for var, value in VARIABLE_DEFAULTS:
-        q = q.replace(var, value)
+    for var, value in VARIABLE_DEFAULTS:      # a whole variable only ($__interval_ms is not $__interval and "_ms")
+        q = re.sub(re.escape(var) + r"(?!\w)", lambda _m, v=value: v, q)
     q = re.sub(r'(=~?|!~|!=)\s*"(?:\$\{?\w+(?::\w+)?\}?|\[\[\w+\]\])"', '=~".*"', q)
     return None if "$" in q or "[[" in q else " ".join(q.split())
 

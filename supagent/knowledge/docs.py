@@ -225,9 +225,9 @@ def _secret_maps(text: str) -> tuple[str, int]:
             if line.strip() and ind <= depth:
                 depth = None
             else:
-                m = re.match(r"^([ \t]*(?:-[ \t]+)?[\"']?[\w.-]+[\"']?[ \t]*:[ \t]*)(\S.*?)[ \t]*$", line)
+                m = re.match(r"^([ \t]*(?:-[ \t]+)?[\"']?[\w.-]+[\"']?[ \t]*:[ \t]*)(\S.*)$", line)   # (0.11.1) no
                 if m and not m.group(2).startswith(("{{", "***", "#", "|", ">", "&", "*")) and \
-                        _literal(m.group(2), False):
+                        _literal(m.group(2).rstrip(" \t"), False):          # backtracking on a run of spaces
                     line, n = m.group(1) + "***", n + 1
         if depth is None:
             m = re.match(r"^([ \t]*)(?:-[ \t]+)?[\"']?([A-Za-z_][\w.-]*)[\"']?[ \t]*:[ \t]*(?:#.*)?$", line)
@@ -1626,7 +1626,7 @@ def _one_file(t: dict[str, Any]) -> dict[str, Any]:
 
 
 FRONT_MATTER = re.compile(r"\A---[ \t]*\n(.*?)\n(?:---|\.\.\.)[ \t]*(?:\n|\Z)", re.S)
-FRONT_KEY = re.compile(r"^(title|description|summary)[ \t]*:[ \t]*(.+?)[ \t]*$", re.M | re.I)
+FRONT_KEY = re.compile(r"^(title|description|summary)[ \t]*:[ \t]*(.+)$", re.M | re.I)   # (its value stripped after)
 FIRST_HEADING = re.compile(r"^#[ \t]+(.+)$", re.M)    # (its closing #s taken off after: no backtracking)
 
 

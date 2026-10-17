@@ -111,10 +111,14 @@ def _category(kind: str, name: str, said: Any = None, published: bool = False, n
                        _norm(kind_name(c)) in (_norm(kind), _norm(kind) + "s", _norm(re.sub(r"s$", "", kind)))), None)
         if direct:                                         # is ("the following components:", "Domain: x") and the
             return direct                                  # person has a category of that very name
+    if kind == "external" and best_category("external", cats, about) is None:   # (0.11.1) what the documents say
+        return None                                        # is another organization's (an address outside, a
+    #                                                        provider): the deployment's category for such things;
+    #                                                        none, no value (never one of the system's own services)
     if kind == "environment":                              # (0.10.10) an inventory's environment: the person's
         from supagent.knowledge.placing import best_category as _best   # category for environments, else a group
-        own_env = _best("environment", cats, about)
-        if own_env:
+        own_env = _best("environment", cats, about) or _listed_in(name, cats, about)   # (0.11.1) or the one whose
+        if own_env:                                        # description names it ("a landscape: prod, preprod or int")
             return own_env
         kind = "group"
     if named:                                              # (0.10.10) the page names the category next to it ("the
@@ -173,6 +177,17 @@ def _category(kind: str, name: str, said: Any = None, published: bool = False, n
     return own or to                                       # community uses: a web application, ...")
 
 
+def _listed_in(name: str, cats: list[str], about: dict[str, str]) -> str | None:
+    """(0.11.1) The one category whose description names this very value among what it holds ("a landscape: prod,
+    preprod or int"): the person said where it goes; none or several: None."""
+    n = _norm(name)
+    if len(n) < 2:
+        return None
+    rx = re.compile(r"(?<![\w-])" + re.escape(n) + r"(?![\w-])")
+    hits = [c for c in cats if rx.search(_norm(about.get(c) or ""))]
+    return hits[0] if len(hits) == 1 else None
+
+
 SERVICE_CATEGORY = re.compile(r"\b(services?|applications?|apps?|systems?|platforms?|products?|sites?|websites?|"
                               r"portals?)$", re.I)   # (0.10.9.2) a site, a portal: what users use; its
 BARE_SITE = re.compile(r"(?<!web)(?<!web )\bsites?$", re.I)   # (0.10.9.2) "site" alone: a web site only when its
@@ -211,9 +226,14 @@ def _refile_inside() -> int:
     if not kids:
         return 0
     n = 0
-    for x in db.session.query(Link).filter(Link.kind == PART_OF, Link.status.in_(("proposed", "approved"))):
+    links = db.session.query(Link).filter(Link.kind == PART_OF, Link.status.in_(("proposed", "approved"))).all()
+    wholes = {x.b_ref for x in links}                     # (0.11.1) the values that have parts of their own
+    for x in links:
         if not (x.a_ref.startswith("facet:") and x.b_ref.startswith("facet:")):
             continue
+        if x.a_ref in wholes:                             # (0.11.1) itself the whole of parts (an application of its
+            continue                                      # microservices, part of a line filed as an application):
+        #                                                   never one of its own parts' kind
         part, whole = db.session.get(Facet, int(x.a_ref[6:])), db.session.get(Facet, int(x.b_ref[6:]))
         if part is None or whole is None or part.facet not in ("application", "component"):
             continue
@@ -375,23 +395,64 @@ def still_written(evidence: str | None) -> bool:
     ten words, whatever the line breaks between them): then the reading changed (a name approved since, read in the
     same sentence), not what the documents say, and its removal is not proposed: only a document updated or removed
     proposes one (the user's rule of 8 October)."""
+    return still_written_all([evidence])[0]
+
+
+STILL_WRITTEN_SECONDS = 60.0   # (0.11.1) the one reading of the documents for it: beyond, the rest counts as written
+
+
+def _in_order(text: str, words: list[str]) -> bool:
+    """Each word found after the one before it in the text (what LIKE '%w1%w2%...%' matched)."""
+    at = 0
+    for w in words:
+        at = text.find(w, at)
+        if at < 0:
+            return False
+        at += len(w)
+    return True
+
+
+def still_written_all(evidences: list[str | None]) -> list[bool]:
+    """(0.11.1) still_written for many links at once: the enabled documents read ONCE (a page of rows at a time),
+    each link's words looked for in each (its longest word first, then all of them in order, case aside); it stops
+    as soon as every link's words are found. Before, each approved learned link no longer stated ran its own LIKE
+    over every enabled document: on a wiki of tens of thousands of pages, a learning spent minutes there. A reading
+    longer than STILL_WRITTEN_SECONDS keeps the links not found yet as written (no removal proposed on a guess; the
+    next learning looks again)."""
+    import time
+
     from supagent.models import Doc
 
-    words = _quote_of(evidence).split()
-    if len(words) < 3:
-        return False
-
-    def pattern(ws: list[str]) -> str:
-        return "%" + "%".join(w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") for w in ws) + "%"
-
-    q = db.session.query(Doc.id).filter(Doc.enabled.is_(True))
-    for ws in ([words[:10], words[-10:]] if len(words) > 10 else [words]):
-        q = q.filter(Doc.content.like(pattern(ws), escape="\\"))
+    out = [False] * len(evidences)
+    todo: dict[int, tuple[str, list[list[str]]]] = {}
+    for i, evidence in enumerate(evidences):
+        words = _quote_of(evidence).lower().split()
+        if len(words) < 3:
+            continue
+        windows = [words[:10], words[-10:]] if len(words) > 10 else [words]
+        todo[i] = (max((w for ws in windows for w in ws), key=len), windows)
+    if not todo:
+        return out
+    t0 = time.monotonic()
     try:
-        return q.first() is not None
-    except Exception:  # pylint: disable=broad-except   (a database that cannot match the pattern: as before)
+        for (content,) in db.session.query(Doc.content).filter(Doc.enabled.is_(True)).yield_per(50):
+            text = (content or "").lower()
+            for i, (anchor, windows) in list(todo.items()):
+                if anchor in text and all(_in_order(text, ws) for ws in windows):
+                    out[i] = True
+                    del todo[i]
+            if not todo:
+                break
+            if time.monotonic() - t0 > STILL_WRITTEN_SECONDS:
+                log.warning("still written: %d links not looked for after %.0f s, kept as written", len(todo),
+                            time.monotonic() - t0)
+                for i in todo:
+                    out[i] = True
+                break
+    except Exception:  # pylint: disable=broad-except   (the documents not readable now: nothing proposed on a guess)
         db.session.rollback()
-        return False
+        return [True if i in todo else x for i, x in enumerate(out)]
+    return out
 
 
 def propose(dry_run: bool = False) -> dict[str, Any]:
@@ -614,12 +675,18 @@ def propose(dry_run: bool = False) -> dict[str, Any]:
         return name_keys(name)["written"] or _norm(name)
 
     for r in rels:
+        quotes = [r["quote"]] if r.get("quote") else []   # (0.11.1) every sentence or row that says it, not only the
+        first = " ".join(str(r.get("quote") or "").split())   # first one read ("Applications of x: y." first, then
+        for s in sorted(r.get("said") or ()):                 # "y is an application of the x business line.")
+            q = str(s).split("|", 1)[-1]
+            if q and not first.startswith(q):
+                quotes.append(q)
         for end in (r["from"], r["to"]):
-            if r.get("quote"):
-                c = cue_words(r["quote"], end)
+            for quote in quotes:
+                c = cue_words(quote, end)
                 if c:
                     near.setdefault(cue_key(end), Counter()).update(c)
-                nc = named_categories(r["quote"], end, cat_list)
+                nc = named_categories(quote, end, cat_list)
                 if nc:
                     near_cat.setdefault(cue_key(end), Counter()).update(nc)
     published = {_norm(r["to"]) for r in rels if r["kind"] in ("sends_to", "reads_from")}
@@ -789,6 +856,7 @@ def propose(dry_run: bool = False) -> dict[str, Any]:
 
     kept = kept_reasons()                                 # (0.10.5) the reasons a person answered Keep to
     stated: set[tuple[int, int, str]] = set()
+    wholes_of: list[tuple[Any, Any, dict[str, Any]]] = []
     said = {(_norm(x), _norm(y), LINK_OF.get(r["kind"])) for r in rels for x, y in [ends(r)]}   # (0.10.5) both
     for r in rels:                                        # ways stated: neither is the other one reversed
         kind = LINK_OF.get(r["kind"])
@@ -850,8 +918,33 @@ def propose(dry_run: bool = False) -> dict[str, Any]:
                 a.status == "approved":                    # (a VIP's routes_to is no flow: it stays)
             out["a server is no flow's subject"] = out.get("a server is no flow's subject", 0) + 1
             continue                                       # (0.10.6) a server or a group: where parts run
+        if kind == "part_of":                              # (0.11.1) proposed once every part's wholes are known
+            wholes_of.append((a, b, r))
+            continue
         if suggest_link(a.id, b.id, kind, SOURCE, _evidence(r), _confidence(r), note=WORDED.get(r["kind"])):
             out["links"] += 1
+    if wholes_of:                                         # (0.11.1) a server part of its group, the group part of
+        up: dict[int, set[int]] = {}                      # its environment: no server part of the environment too
+        for a, b, _r in wholes_of:                        # (the map shows it through the group; an inventory's
+            up.setdefault(a.id, set()).add(b.id)          # every host was a second link to its environment)
+        for x in db.session.query(Link.a_ref, Link.b_ref).filter(Link.kind == "part_of", Link.status != "rejected",
+                                                                 Link.a_ref.like("facet:%"), Link.b_ref.like("facet:%")):
+            try:
+                up.setdefault(int(x.a_ref[6:]), set()).add(int(x.b_ref[6:]))
+            except ValueError:
+                continue
+        cat_of = {f.id: f.facet for x in wholes_of for f in x[:2]}
+        need = {m for ms in up.values() for m in ms} - set(cat_of)
+        for i in range(0, len(need), 500):
+            cat_of.update(dict(db.session.query(Facet.id, Facet.facet).filter(Facet.id.in_(sorted(need)[i:i + 500]))))
+        for a, b, r in wholes_of:                         # (a group in a group of the same category: a server is a
+            if any(b.id in up.get(m, ()) for m in up.get(a.id, ())   # member of both, both kept)
+                   if m not in (a.id, b.id) and cat_of.get(m) not in (None, b.facet)):
+                out["part of it through another whole: not proposed"] = \
+                    out.get("part of it through another whole: not proposed", 0) + 1
+                continue
+            if suggest_link(a.id, b.id, "part_of", SOURCE, _evidence(r), _confidence(r), note=WORDED.get(r["kind"])):
+                out["links"] += 1
     if not dry_run and not shrunk:                       # what the documents proposed before and no longer state
         import datetime as _dt
 
@@ -863,6 +956,7 @@ def propose(dry_run: bool = False) -> dict[str, Any]:
             texts_at = _dt.datetime.fromisoformat(texts.value) if texts is not None and texts.value else None
         except ValueError:
             texts_at = None
+        unstated = []
         for x in db.session.query(Link).filter(Link.source == SOURCE, Link.a_ref.like("facet:%"),
                                                Link.b_ref.like("facet:%")):
             try:
@@ -878,12 +972,18 @@ def propose(dry_run: bool = False) -> dict[str, Any]:
                 db.session.delete(x)
                 out["withdrawn"] += 1
             elif x.status == "approved" and not x.proposed_drop:
-                if (x.seen_at is not None and texts_at is not None and texts_at <= x.seen_at) or \
-                        still_written(x.evidence):         # (0.10.5) no text changed since it was stated, or its
-                    out["still written"] = out.get("still written", 0) + 1   # words are still in a document: the
-                    continue                               # reading moved (a name approved since), not the documents
-                if propose_drop(x, "no document nor code states it any more", kept):
-                    out["removals"] += 1
+                if x.seen_at is not None and texts_at is not None and texts_at <= x.seen_at:
+                    out["still written"] = out.get("still written", 0) + 1   # (0.10.5) no text changed since
+                    continue
+                unstated.append(x)
+        #   (0.10.5) its words still in a document: the reading moved (a name approved since), not the documents;
+        #   (0.11.1) the documents read once for all of them, not once per link
+        for x, written in zip(unstated, still_written_all([x.evidence for x in unstated])):
+            if written:
+                out["still written"] = out.get("still written", 0) + 1
+                continue
+            if propose_drop(x, "no document nor code states it any more", kept):
+                out["removals"] += 1
     if not dry_run:                                      # (0.10.5) a sentence denying a link or putting it in the
         strong = {(_norm(r["from"]), _norm(r["to"])) for r in rels   # past: its removal proposed with the sentence,
                   if set(r.get("sources") or []) & {"code", "config"}}   # unless the code or a configuration states it

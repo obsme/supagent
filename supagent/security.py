@@ -116,6 +116,17 @@ def user_groups(user: Any = None) -> list[Any]:
         return []
 
 
+def role_names(user: Any) -> set[str]:
+    """(0.11.1) The names of a user's roles, those their Superset groups carry included (FAB 5: a role may come
+    through a group only); none for no user."""
+    if user is None:
+        return set()
+    roles = list(getattr(user, "roles", None) or [])
+    for gr in user_groups(user):
+        roles += list(getattr(gr, "roles", None) or [])
+    return {getattr(r, "name", "") for r in roles}
+
+
 def group_scopes(user: Any = None) -> list[str]:
     """The search scopes of the user's groups ("g<id>": what a group's note is indexed with)."""
     return [f"g{gr.id}" for gr in user_groups(user) if getattr(gr, "id", None) is not None]

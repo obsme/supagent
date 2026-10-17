@@ -143,7 +143,7 @@ def _settings_rows() -> dict[str, Any]:
 
         row = db.session.get(Setting, spec.key)
         if row is not None and row.value is not None:
-            out[spec.key] = row.value
+            out[spec.key] = settings.masked(spec.key, row.value)   # (a token in a header: restored as kept there)
     return out
 
 

@@ -127,7 +127,8 @@ def gliffy(text: str, name: str = "") -> dict[str, Any]:
 
 # Mermaid flowcharts: A --> B, A -->|label| B, A -- label --> B, A -.-> B, A ==> B, A[Text] --> B(Text),
 # A --> B --> C (a chain), A & B --> C & D (each to each)
-MERMAID_ARROW = re.compile(r"\s*(?:<)?(?:--+|==+|-\.+-?)(?:\s+([^-=>|]+?)\s+(?:--+|==+|-\.+-?))?>?\s*(?:\|([^|]*)\|)?\s*")
+MERMAID_ARROW = re.compile(r"(?<!\s)\s*(?:<)?(?:--+|==+|-\.+-?)(?:\s+([^-=>|]+?)\s+(?:--+|==+|-\.+-?))?>?\s*"
+                           r"(?:\|([^|]*)\|)?\s*")   # (0.11.1) from a run's start only: no backtracking
 # a node and its text in any shape: A[t], A(t), A([t]), A[[t]], A[(t)] (a database), A((t)), A{t}, A{{t}}, A>t], A[/t/]
 MERMAID_NODE = re.compile(r"^\s*([A-Za-z0-9_.:-]+)\s*(?:[\[\(\{>]+[/\\]?\s*\"?(.*?)\"?\s*[/\\]?[\]\)\}]+)?\s*$")
 

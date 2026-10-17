@@ -204,7 +204,8 @@ def test_check_reports_without_the_token(servers, pki):
     _state, token_url, base = servers
     L._TOKENS.clear()
     out = L.LLM(_cfg(pki, token_url, base)).check()
-    assert out["answer"].startswith("OK") and out["model"] == "test-model" and "..." in out["token"]
+    assert out["answer"].startswith("OK") and out["model"] == "test-model"
+    assert out["token"].startswith("received (") and "..." not in out["token"]     # (0.11.1) nothing of it shown
 
 
 def test_a_restarting_server_is_waited_for(monkeypatch):

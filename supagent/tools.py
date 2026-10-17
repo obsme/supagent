@@ -225,7 +225,10 @@ def _check_select(sql: str, max_rows: int) -> tuple[str, int]:
         raise ToolError("only SELECT is allowed")
     limit = stmt.args.get("limit")
     value = limit.expression if isinstance(limit, exp.Limit) else None
-    current = int(value.this) if isinstance(value, exp.Literal) and not value.is_string else None
+    try:
+        current = int(value.this) if isinstance(value, exp.Literal) and not value.is_string else None
+    except ValueError as ex:
+        raise ToolError(f"LIMIT {value.this}: give a whole number of rows") from ex
     if current is None or current > max_rows:
         stmt.set("limit", exp.Limit(expression=exp.Literal.number(max_rows + 1)))
         current = max_rows + 1
@@ -313,33 +316,102 @@ def unknown_tables(database: Any, sql: str) -> str:
             "names (describe_data lists them).")
 
 
+def _tables_read(sql: str) -> set[tuple[str, str]]:
+    """(schema or "", table name), in lower case, of the tables the SQL reads (its CTEs left out)."""
+    import sqlglot
+    from sqlglot import exp
+
+    tree = sqlglot.parse_one(sql, read="duckdb")
+    ctes = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
+    return {((t.db or "").lower(), t.name.lower()) for t in tree.find_all(exp.Table)
+            if t.name and t.name.lower() not in ctes}
+
+
+def _rls_key(ds: Any) -> tuple[str, str, str]:
+    """(table name in lower case, schema in lower case, table name) of a dataset: plain values the threads read."""
+    return ds.table_name.lower(), (ds.schema or "").lower(), ds.table_name
+
+
+def _rls_hit(named: set[tuple[str, str]], key: tuple[str, str, str]) -> bool:
+    return any(name == key[0] and schema in ("", key[1]) for schema, name in named)
+
+
+def _rls_said(key: tuple[str, str, str]) -> ToolError:
+    return ToolError(f'the dataset "{key[2]}" has row-level security filters for you, and this query '
+                     "would read around them: they apply on Superset's dataset path (a chart or Explore of "
+                     "the dataset), not here")
+
+
 def _rls_refusal(database: Any, sql: str) -> None:
     """ToolError when a table the SQL reads is a dataset of this database with row-level security filters for the
     user: the SQL runs on the database's own connection, which applies none. Only the datasets whose table name (and
     schema, when the SQL gives one) is the SQL's are looked at; none: the SQL runs as it is."""
-    import sqlglot
     from sqlalchemy import func
-    from sqlglot import exp
     from superset.connectors.sqla.models import SqlaTable
     from superset.extensions import db, security_manager
 
-    tree = sqlglot.parse_one(sql, read="duckdb")
-    ctes = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
-    named = {((t.db or "").lower(), t.name.lower()) for t in tree.find_all(exp.Table)
-             if t.name and t.name.lower() not in ctes}
+    named = _tables_read(sql)
     if not named:
         return
     found = (db.session.query(SqlaTable)
              .filter(SqlaTable.database_id == database.id,
                      func.lower(SqlaTable.table_name).in_(sorted({name for _schema, name in named}))).all())
     for ds in found:
-        if not any(name == ds.table_name.lower() and schema in ("", (ds.schema or "").lower())
-                   for schema, name in named):
-            continue
-        if security_manager.get_rls_filters(ds):
-            raise ToolError(f'the dataset "{ds.table_name}" has row-level security filters for you, and this query '
-                            "would read around them: they apply on Superset's dataset path (a chart or Explore of "
-                            "the dataset), not here")
+        if _rls_hit(named, _rls_key(ds)) and security_manager.get_rls_filters(ds):
+            raise _rls_said(_rls_key(ds))
+
+
+def _rls_datasets(database: Any) -> list[tuple[str, str, str]]:
+    """The datasets of this database with row-level security filters for the user (most have none: one query), as
+    _rls_key's plain values (a commit of the session expires its objects; a thread could not load them again)."""
+    from superset.connectors.sqla.models import RLSFilterTables, SqlaTable
+    from superset.extensions import db, security_manager
+
+    ruled = db.session.query(RLSFilterTables.c.table_id)
+    found = db.session.query(SqlaTable).filter(SqlaTable.database_id == database.id, SqlaTable.id.in_(ruled)).all()
+    return [_rls_key(ds) for ds in found if security_manager.get_rls_filters(ds)]
+
+
+class _RlsCursor:
+    """A cursor that refuses a query reading one of `ruled` (_rls_datasets) before running it, as _run does: the
+    tools that write their own SQL (compare_groups, compare_logs, what_they_share, records_about...) run it on the
+    database's own connection too. Its threads only parse (the datasets were read with the connection)."""
+
+    def __init__(self, cursor: Any, ruled: list[tuple[str, str, str]]) -> None:
+        self._cursor, self._ruled = cursor, ruled
+
+    def execute(self, sql: str, *args: Any, **kwargs: Any) -> Any:
+        if self._ruled:
+            named = _tables_read(sql)
+            for key in self._ruled:
+                if _rls_hit(named, key):
+                    raise _rls_said(key)
+        return self._cursor.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
+
+class _RlsConnection:
+    """A connection whose cursors are _RlsCursor's (everything else: the connection's own)."""
+
+    def __init__(self, conn: Any, database: Any, ruled: list[tuple[str, str, str]] | None = None) -> None:
+        self._conn = conn
+        self._ruled = _rls_datasets(database) if ruled is None else ruled
+
+    def cursor(self, *args: Any, **kwargs: Any) -> _RlsCursor:
+        return _RlsCursor(self._conn.cursor(*args, **kwargs), self._ruled)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
+@contextmanager
+def _rls_connection(database: Any) -> Iterator[Any]:
+    """_db_connection for the SQL a tool writes itself: a query of a dataset with row-level security filters for the
+    user is refused, as the agent's own SQL is (_run)."""
+    with _db_connection(database, extract=False) as conn:
+        yield _RlsConnection(conn, database)
 
 
 def _run(database: Any, sql: str, max_rows: int, extract: bool) -> tuple[list[str], list[tuple], bool]:
@@ -365,6 +437,43 @@ def _cleanup() -> None:
         path = os.path.join(_export_dir(), name)
         if os.path.isfile(path) and not name.startswith(".") and os.path.getmtime(path) < limit:
             os.remove(path)
+            try:
+                os.remove(_owner_file(path))
+            except OSError:
+                pass
+
+
+def _owner_file(path: str) -> str:
+    return os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.owner")
+
+
+def _user_key() -> str:
+    """The id of the user who asks ("" outside a user's request)."""
+    try:
+        from flask import g
+
+        uid = getattr(getattr(g, "user", None), "id", None)
+    except RuntimeError:          # (outside an app context)
+        uid = None
+    return str(uid) if uid is not None else ""
+
+
+def _own(path: str) -> None:
+    """Remember who made an export file: the folder is shared by every user, and only its maker attaches it again
+    by its id or name (_export_file)."""
+    with open(_owner_file(path), "w", encoding="utf-8") as fh:
+        fh.write(_user_key())
+
+
+def _mine(path: str) -> bool:
+    """The export file was made by the user who asks (one with no maker remembered, made before 0.11.1, is
+    nobody's: its maker gets it again from their answers, _kept_file)."""
+    me = _user_key()
+    try:
+        with open(_owner_file(path), encoding="utf-8") as fh:
+            return bool(me) and fh.read().strip() == me
+    except OSError:
+        return False
 
 
 def _file_name(name: str | None, default: str, ext: str) -> str:
@@ -455,6 +564,7 @@ def _export(sql: str, database: str | int | None, file_name: str | None, title: 
         "by": getattr(user, "username", ""), "database": db_obj.database_name, "rows": len(rows),
         "truncated": f"yes: first {cap:,} rows only" if truncated else
                      (f"maybe: the LIMIT {own:,} of the SQL was reached" if by_sql else "no"), "SQL": sql})
+    _own(path)
     res = {"id": _file_id(path), "path": path, "url": _public(path), "rows": len(rows),
            "columns": columns, "truncated": truncated, "bytes": os.path.getsize(path),
            "seconds": round(time.time() - t0, 1),
@@ -577,6 +687,7 @@ def chart_image(chart_id: int | None = None, explore_url: str | None = None, das
             path = os.path.join(_export_dir(), _file_name(label, "chart", "png"))
             with open(path, "wb") as fh:
                 fh.write(png)
+            _own(path)
             return {"id": _file_id(path), "path": path, "url": _public(path), "bytes": len(png),
                     "to_email_it": f'send_email(..., image_paths=["{_file_id(path)}"])'}
     except ToolError as ex:
@@ -758,6 +869,7 @@ def chart_from_sql(sql: str, kind: Literal["bar", "line"] = "bar", title: str = 
             path = os.path.join(_export_dir(), _file_name(title or "chart", "chart", "png"))
             with open(path, "wb") as fh:
                 fh.write(png)
+            _own(path)
             return {"id": _file_id(path), "path": path, "url": _public(path), "rows": n,
                     "bytes": len(png), "to_email_it": f'send_email(..., image_paths=["{_file_id(path)}"])'}
     except ToolError as ex:
@@ -773,11 +885,13 @@ def _export_file(path: str, suffixes: tuple[str, ...]) -> str:
     root = os.path.realpath(_export_dir())
     name = os.path.basename(str(path).strip())
     full = os.path.realpath(os.path.join(root, name))
-    if not (full.startswith(root + os.sep) and full.lower().endswith(suffixes) and os.path.isfile(full)):
+    if not (full.startswith(root + os.sep) and full.lower().endswith(suffixes) and os.path.isfile(full)
+            and _mine(full)):                 # (another user's file is not there for this one)
         ident = _file_id(name) if "-" in name else os.path.splitext(name)[0]
         hits = [f for f in (os.listdir(root) if os.path.isdir(root) else [])
                 if f.lower().endswith(suffixes) and not f.startswith(".")
-                and re.fullmatch(r"[0-9a-f]{6}", ident or "") and _file_id(f) == ident]
+                and re.fullmatch(r"[0-9a-f]{6}", ident or "") and _file_id(f) == ident
+                and _mine(os.path.join(root, f))]
         if len(hits) == 1:
             return os.path.join(root, hits[0])
         kept = _kept_file(name, ident, suffixes, root) if not hits else None
@@ -813,6 +927,7 @@ def _kept_file(name: str, ident: str, suffixes: tuple[str, ...], root: str) -> s
     full = os.path.join(root, os.path.basename(f.name))
     with open(full, "wb") as fh:
         fh.write(f.data)
+    _own(full)
     return full
 
 
@@ -1086,7 +1201,11 @@ def describe_data(topic: str | None = None, index: str | None = None) -> str:
             try:
                 for name, spec in indices.items():
                     spec = spec or {}
-                    prof = _profile(conn, name, spec.get("time_field"))
+                    try:        # values of every row: not for a user with row-level security filters there
+                        _rls_refusal(database, f'SELECT * FROM "{name}"')
+                        prof = _profile(conn, name, spec.get("time_field"))
+                    except ToolError:
+                        prof = {}
                     meta = conn.table_meta(name)
                     ds = db.session.query(SqlaTable).filter_by(table_name=name, database_id=database.id).first()
                     out.append(f"\nIndex {name}: {spec.get('description', '').strip()}")
@@ -1202,31 +1321,51 @@ def search_knowledge(query: str, kind: str | None = None, limit: int = 8) -> dic
         return {"error": f"{type(ex).__name__}: {str(ex)[:500]}"}
 
 
+def _may_open_board(dash: Any) -> bool:
+    from superset.extensions import security_manager
+
+    try:
+        security_manager.raise_for_access(dashboard=dash)
+        return True
+    except Exception:  # pylint: disable=broad-except   (not the user's to see)
+        return False
+
+
+def _may_open_chart(slc: Any) -> bool:
+    from supagent.knowledge.charts import may_see
+
+    return may_see(slc)[0]
+
+
 def _find_board(key: Any) -> Any:
-    """A dashboard by id or title (exact, else the only one whose title has it)."""
+    """A dashboard the user may see, by id or title (exact, else the only one whose title has it): one the user may
+    not see is not there (neither its title nor whether it exists is told)."""
     from superset.extensions import db as meta
     from superset.models.dashboard import Dashboard
 
     if isinstance(key, int) or str(key).strip().isdigit():
-        return meta.session.get(Dashboard, int(key))
+        d = meta.session.get(Dashboard, int(key))
+        return d if d is not None and _may_open_board(d) else None
     title = str(key).strip().strip("'\"").lower()
-    rows = meta.session.query(Dashboard).all()
+    rows = [d for d in meta.session.query(Dashboard).all()
+            if title and title in (d.dashboard_title or "").lower() and _may_open_board(d)]
     exact = [d for d in rows if (d.dashboard_title or "").lower() == title]
-    part = [d for d in rows if title and title in (d.dashboard_title or "").lower()]
-    return (exact or (part if len(part) == 1 else [None]))[0]
+    return (exact or (rows if len(rows) == 1 else [None]))[0]
 
 
 def _find_chart(key: Any) -> Any:
+    """A chart the user may see, as _find_board."""
     from superset.extensions import db as meta
     from superset.models.slice import Slice
 
     if isinstance(key, int) or str(key).strip().isdigit():
-        return meta.session.get(Slice, int(key))
+        c = meta.session.get(Slice, int(key))
+        return c if c is not None and _may_open_chart(c) else None
     name = str(key).strip().strip("'\"").lower()
-    rows = meta.session.query(Slice).all()
+    rows = [c for c in meta.session.query(Slice).all()
+            if name and name in (c.slice_name or "").lower() and _may_open_chart(c)]
     exact = [c for c in rows if (c.slice_name or "").lower() == name]
-    part = [c for c in rows if name and name in (c.slice_name or "").lower()]
-    return (exact or (part if len(part) == 1 else [None]))[0]
+    return (exact or (rows if len(rows) == 1 else [None]))[0]
 
 
 @mcp.tool
@@ -2660,7 +2799,8 @@ class _Comparison:
         if db_obj.backend == "osagg" and inside is None and cursors is None:     # a connection per thread (the queries of a field at a time)
             for _ in range(threads - 1):
                 try:
-                    more.append(_connection(db_obj, False, agent_query=True))
+                    more.append(_RlsConnection(_connection(db_obj, False, agent_query=True), db_obj,
+                                                    getattr(conn, "_ruled", None)))
                     self.cursors.put(more[-1].cursor())
                 except Exception:  # pylint: disable=broad-except   (one connection then)
                     break
@@ -3385,7 +3525,7 @@ def compare_groups(table: str, start: str, end: str, group_by: list[str] | None 
             tf, not_used = _row_time_field(table, time_field)
             security_manager.raise_for_access(database=db_obj, sql=f'SELECT COUNT(*) FROM "{table}"', schema="default")
             more: list[Any] = []             # the other connections of this call (closed with it)
-            with _db_connection(db_obj, extract=False) as conn, _closing(more):
+            with _rls_connection(db_obj) as conn, _closing(more):
                 meta.session.commit()        # no connection of Superset's own pool is held while the queries run
                 made = _Comparison(conn, db_obj, more, table, tf, t0, t1, where, group_by, measure, days, against)
                 made.not_used = not_used
@@ -3547,7 +3687,7 @@ def _shared_below(db_obj: Any, table: str, ident: str, window: str, focus_sql: s
     from supagent.models import KObject
 
     out: list[dict[str, Any]] = []
-    with _db_connection(db_obj, extract=False) as conn:
+    with _rls_connection(db_obj) as conn:
         cur = conn.cursor()
         cur.execute(f'SELECT "{ident}", COUNT(*) AS n, SUM(CASE WHEN ({focus_sql}) THEN 1 ELSE 0 END) AS k '
                     f'FROM "{table}" WHERE {window} GROUP BY 1')
@@ -3646,7 +3786,7 @@ def what_they_share(table: str, start: str, end: str, focus: str, where: str = "
             window = f'"{tf}" >= {G.lit(t0)} AND "{tf}" < {G.lit(t1)} AND ({scope_sql})'
             out_fields: list[dict[str, Any]] = []
             totals = None
-            with _db_connection(db_obj, extract=False) as conn:
+            with _rls_connection(db_obj) as conn:
                 meta.session.commit()
                 cur = conn.cursor()
                 for f in names:
@@ -3760,7 +3900,7 @@ def compare_logs(table: str, start: str, end: str, where: str = "", days: int = 
                 if against is not None:
                     raise
                 refs = []                            # (a setting nobody can read is no reference)
-            with _db_connection(db_obj, extract=False) as conn:
+            with _rls_connection(db_obj) as conn:
                 meta.session.commit()
                 label_column = getattr(conn, "label_column", None) if db_obj.backend == "osagg" else None
                 cond, labels = G.scope(where, label_column)
@@ -4134,14 +4274,18 @@ def repeated_keys(database: Any, table: str, key: str) -> int | None:
 
     from supagent.knowledge import groups as G
 
+    name, col = G.table(table), G.name(key)
+    security_manager.raise_for_access(database=database, sql=f'SELECT COUNT(*) FROM "{name}"', schema="default")
+    try:
+        _rls_refusal(database, f'SELECT * FROM "{name}"')   # (before the repeats kept: they are of every row)
+    except ToolError:
+        return None
     at = (int(getattr(database, "id", 0) or 0), table, key)
     hit = _REPEATS.get(at)
     if hit and _time.time() - hit[0] < REPEATS_TTL:
         return hit[1]
-    name, col = G.table(table), G.name(key)
-    security_manager.raise_for_access(database=database, sql=f'SELECT COUNT(*) FROM "{name}"', schema="default")
     found: int | None = None
-    with _db_connection(database, extract=False) as conn:
+    with _rls_connection(database) as conn:
         for sql in (f'SELECT "{col}" FROM "{name}" GROUP BY "{col}" HAVING COUNT(*) > 1 LIMIT 3',
                     f'SELECT COUNT(*) AS n, COUNT(DISTINCT "{col}") AS d FROM "{name}"'):
             try:
@@ -4320,9 +4464,10 @@ def records_about(names: list[str], until: str, days: int = 7) -> dict:
                     db_obj = _table_database(table, None)
                     security_manager.raise_for_access(database=db_obj, sql=f'SELECT COUNT(*) FROM "{G.table(table)}"',
                                                       schema="default")
+                    _rls_refusal(db_obj, f'SELECT * FROM "{G.table(table)}"')   # (its rows: some only for this user)
                 except Exception:  # pylint: disable=broad-except   (a table this user may not read: left out)
                     continue
-                with _db_connection(db_obj, extract=False) as conn:
+                with _rls_connection(db_obj) as conn:
                     meta.session.commit()
 
                     def run(sql: str, described: bool = False) -> Any:
@@ -4429,7 +4574,7 @@ def _recorded_alerts() -> list[dict]:
         sql = (f'SELECT * FROM "{G.table(ix.name)}" WHERE {still} AND "{start}" <= {G.lit(at)} '
                f'ORDER BY "{start}" DESC LIMIT 50')
         try:
-            with _db_connection(db_obj, extract=False) as conn:
+            with _rls_connection(db_obj) as conn:
                 cur = conn.cursor()
                 cur.execute(sql)
                 cols = [c[0] for c in (cur.description or [])]

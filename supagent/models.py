@@ -868,12 +868,13 @@ def create_or_upgrade() -> tuple[int, int]:
         _link_notes_as_evidence()
     if 0 < before < 17:
         _parts_as_links()
-    if row is None:
-        db.session.add(Meta(key="schema_version", value=str(SCHEMA_VERSION)))
+    after = max(before, SCHEMA_VERSION)    # never lowered: a newer version's tables (a rollback) keep its version, so
+    if row is None:                         # its upgrade again runs none of the older migrations once more
+        db.session.add(Meta(key="schema_version", value=str(after)))
     else:
-        row.value = str(SCHEMA_VERSION)
+        row.value = str(after)
     db.session.commit()
-    return before, SCHEMA_VERSION
+    return before, after
 
 
 from supagent.knowledge import pagecache as _pagecache  # noqa: E402,F401  (0.10.9.1: the pages' change stamp, every process)

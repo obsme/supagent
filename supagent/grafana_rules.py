@@ -547,7 +547,8 @@ def approve(action_id: int, by: str, shown_hash: str | None = None) -> dict[str,
     from supagent import settings
     from supagent.models import GrafanaAction
 
-    row = db.session.get(GrafanaAction, int(action_id))
+    row = (db.session.query(GrafanaAction).filter(GrafanaAction.id == int(action_id))
+           .with_for_update().one_or_none())          # (0.11.1) one approval at a time: a second one waits here
     if row is None or row.status != "proposed":
         raise RuleError("no draft waiting for approval")
     if shown_hash is not None and shown_hash != row.spec_hash:
@@ -557,12 +558,29 @@ def approve(action_id: int, by: str, shown_hash: str | None = None) -> dict[str,
     spec = dict(row.spec or {})
     if _hash(spec) != row.spec_hash:
         raise RuleError("the draft changed after it was drafted: draft it again")
+    if row.kind != "create_dashboard" and spec.get("folder_uid") != str(settings.get("grafana.alert_folder") or
+                                                                         "").strip():
+        raise RuleError("the folder of the settings changed since the draft: draft it again")
+    row.status = "approving"          # claimed, the lock let go: a second approval (a double click) finds no draft
+    db.session.commit()               # waiting; it never creates the rule again nor writes "failed" over "created"
+    try:
+        return _approve_claimed(row, spec, by)
+    except Exception:
+        db.session.rollback()
+        if row.status == "approving":                 # nothing decided (no answer of Grafana): the draft waits again
+            row.status = "proposed"
+            db.session.commit()
+        raise
+
+
+def _approve_claimed(row: Any, spec: dict[str, Any], by: str) -> dict[str, Any]:
+    """approve, the draft claimed: created in Grafana, read back."""
+    from superset import db
+
     if row.kind == "create_dashboard":                # (a dashboard: grafana_dashboards)
         from supagent import grafana_dashboards
 
         return grafana_dashboards.approve_row(row, by)
-    if spec.get("folder_uid") != str(settings.get("grafana.alert_folder") or "").strip():
-        raise RuleError("the folder of the settings changed since the draft: draft it again")
     existing = G.alert_rules(folder=spec["folder_uid"], limit=200, cached=False)
     if any(r.get("uid") == spec["uid"] or str(r.get("title") or "").lower() == spec["title"].lower()
            for r in existing):

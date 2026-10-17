@@ -350,10 +350,16 @@ def _yaml_inventory(path: str, text: str) -> Inventory | None:
                                             for v in ([top] if "all" in data else list(top.values()))):
         return None
     inv = Inventory(path)
+    first: dict[str, int] = {}                            # (0.11.1) each key's first line, read once: a search of
+    for i, line in enumerate(text.split("\n"), 1):       # the text from its top for each host took minutes at
+        at = line.find(":")                               # 10,000 hosts (a key ends at a colon then a space or the
+        while at >= 0 and line[at + 1:at + 2] not in ("", " ", "\t"):   # line's end: "web-01:", "db-1: {...}")
+            at = line.find(":", at + 1)
+        if at > 0:
+            first.setdefault(line[:at].strip().strip("'\""), i)
 
     def line_of(name: str) -> int:
-        m = re.search(r"(?m)^\s*" + re.escape(name) + r"\s*:", text)
-        return text.count("\n", 0, m.start()) + 1 if m else 1
+        return first.get(name, 1)
 
     above: set[int] = set()                               # (a YAML alias of a group inside itself: once)
 

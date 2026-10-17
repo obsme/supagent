@@ -818,6 +818,29 @@ def _written(spec: Spec, value: Any) -> Any:
     return new
 
 
+MASKED = "********"                     # (0.11.1) a header's value as shown or backed up
+MASKED_VALUES = ("llm.extra_headers",)  # JSON objects whose values may be tokens (Authorization: Bearer ...)
+
+
+def masked(key: str, value: Any) -> Any:
+    """A setting's value as printed, described or backed up: the values of llm.extra_headers masked, where secrets
+    are (a token put in a header); the value used is unchanged (get)."""
+    if key in MASKED_VALUES and isinstance(value, dict):
+        return {k: (MASKED if v not in (None, "") else v) for k, v in value.items()}
+    return value
+
+
+def _unmasked(key: str, value: Any) -> Any:
+    """A masked value written back (the settings page saved, a backup restored): each masked header keeps the value
+    stored (one not stored is left out), the others are written as given."""
+    if key not in MASKED_VALUES or not isinstance(value, dict) or MASKED not in value.values():
+        return value
+    old = get(key)
+    old = old if isinstance(old, dict) else {}
+    return {k: (old[k] if v == MASKED else v) for k, v in value.items()
+            if v != MASKED or old.get(k) not in (None, "")}
+
+
 def set_value(key: str, value: Any, by: str = "") -> None:
     """Store a setting (value None: back to the default)."""
     spec = BY_KEY.get(key)
@@ -831,7 +854,7 @@ def set_value(key: str, value: Any, by: str = "") -> None:
         row.secret = None if value in (None, "") else str(value)
         row.value = None
     else:
-        row.value = None if value is None else _written(spec, value)
+        row.value = None if value is None else _unmasked(key, _written(spec, value))
     row.updated_by = by
     stored = (row.value, row.secret)
     db.session.merge(row)
@@ -849,5 +872,5 @@ def describe() -> list[dict]:
         value = get(spec.key)
         out.append({"key": spec.key, "kind": spec.kind, "help": spec.help, "choices": list(spec.choices),
                     "secret": spec.secret, "default": None if spec.secret else spec.default,
-                    "value": (bool(value) if spec.secret else value)})
+                    "value": (bool(value) if spec.secret else masked(spec.key, value))})
     return out

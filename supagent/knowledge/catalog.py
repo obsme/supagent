@@ -280,18 +280,28 @@ def _prefix(metric: str) -> str:
     return metric.split("_", 1)[0] if "_" in metric else metric
 
 
+def _mapping(value: Any, what: str) -> dict[str, Any]:
+    """A part of a whole catalog that must be a mapping (empty: {}); CatalogError for another shape."""
+    if not value:
+        return {}
+    if not isinstance(value, dict):
+        raise CatalogError(f"{what}: a YAML mapping is expected")
+    return value
+
+
 def split_catalog(data: dict[str, Any]) -> list[dict[str, Any]]:
     """A whole catalog -> entries: glossary, one per index, metrics grouped by name prefix
-    (node_*, batch_*...), relationships, checks, the rest as a guide."""
+    (node_*, batch_*...), relationships, checks, the rest as a guide. CatalogError when indices,
+    metrics or metrics' tables are not mappings (indices: [a] is a list)."""
     out: list[dict[str, Any]] = []
     if data.get("glossary"):
         out.append({"title": "Glossary", "classification": "glossary", "category": "Business",
                     "content": _dump(data["glossary"])})
-    for name, spec in (data.get("indices") or {}).items():
+    for name, spec in _mapping(data.get("indices"), "indices").items():
         out.append({"title": f"Index {name}", "classification": "index", "category": "Indices",
                     "content": _dump({name: spec})})
-    metrics = data.get("metrics") or {}
-    tables = metrics.get("tables") or {}
+    metrics = _mapping(data.get("metrics"), "metrics")
+    tables = _mapping(metrics.get("tables"), "metrics: tables")
     head = {k: metrics[k] for k in ("database", "description") if metrics.get(k)}
     groups: dict[str, dict] = {}
     for name, spec in tables.items():

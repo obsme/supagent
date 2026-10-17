@@ -222,7 +222,8 @@ def _typo_words(a: list[str], b: list[str]) -> str:
 
 
 # (0.10.9.2) a team's word in the languages a wiki is written in ("the Security team", "l'équipe Sécurité")
-TEAM_WORDS = {"team", "equipe", "equipo", "squad", "squadra", "crew", "tribe", "mannschaft"}
+TEAM_WORDS = {"team", "equipe", "equipo", "squad", "squadra", "crew", "tribe", "tribu", "tribus", "mannschaft"}   # (0.11.1)
+#                                                       "tribu": a tribe in French, Spanish, Italian ("la tribu Care")
 TEAM_GLUE = {"of", "de", "du", "des", "d", "del", "der", "des"}
 
 

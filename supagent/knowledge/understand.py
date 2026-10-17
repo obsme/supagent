@@ -450,8 +450,8 @@ def discover(unit: dict[str, Any]) -> dict[str, Any]:
         for m in re.finditer(rx, text, re.M):
             out["names"].append(m.group(1).rsplit("/", 1)[-1])
     if lang == "markdown":
-        h = re.search(r"^#\s+(.+?)\s*$", text, re.M)
-        out["heading"] = h.group(1).strip("` ") if h else None
+        h = re.search(r"^#\s+(.+)$", text, re.M)      # (0.11.1) its trailing spaces taken off after: no backtracking
+        out["heading"] = h.group(1).rstrip().strip("` ") if h else None
     if path.endswith("pom.xml"):          # the project's artifact, not its dependencies' (0.10.4: nor its parent's)
         bare = re.sub(r"<(parent|dependencies|dependencyManagement|build|plugins|profiles)\b[\s\S]*?</\1>", "", text)
         m = re.search(r"<project[^>]*>[\s\S]*?<artifactId>([\w.-]+)</artifactId>", bare)
@@ -587,6 +587,48 @@ def lb_backend(text: str, pos: int) -> str | None:
         return None
     name = m.group(1).split(":")[0]
     return UPSTREAM_SUFFIX.sub("", name) or name
+
+
+# (0.11.1) a load balancer's backend in Traefik's file provider: the addresses of a service's servers, in YAML
+# ("http:" "services:" "<name>:" "loadBalancer:" "servers:" "- url: ...") or in TOML ("[[http.services.<name>.
+# loadBalancer.servers]]" "url = ...")
+LB_SERVICE_TOML = re.compile(r"\[\[?http\.services\.[\"']?([\w-]+)[\"']?\.loadBalancer\.servers\]\]?", re.I)
+LB_SERVICE_KEY = re.compile(r"(?:-[ \t]+)?[\"']?([\w.-]+)[\"']?[ \t]*:(?:[ \t]|$)")
+
+
+def lb_service(text: str, pos: int) -> str | None:
+    """(0.11.1) The name of the service a Traefik backend's address at pos stands for ("services: quote:
+    loadBalancer: servers: - url: http://app-1:8080": quote); None for any other address. The keys above the line
+    are read up to 40 lines (a configuration's block, never the whole file)."""
+    if "loadbalancer" not in text[max(0, pos - 2000):pos].lower():
+        return None
+    start = text.rfind("\n", 0, pos) + 1
+    line = text[start:pos]
+    ind = len(line) - len(line.lstrip(" "))
+    item = line.lstrip(" ").startswith("-")              # (an item may sit at its key's indentation)
+    keys: list[str] = []
+    at = start
+    for _ in range(40):
+        if at <= 0:
+            break
+        top = text.rfind("\n", 0, at - 1) + 1
+        above, at = text[top:at - 1], top
+        body = above.lstrip(" ")
+        if not body.strip() or body.startswith("#"):
+            continue
+        if body.startswith("["):                          # TOML: the table the address is in
+            m = LB_SERVICE_TOML.match(body)
+            return m.group(1) if m else None
+        k = len(above) - len(body)
+        if k < ind or (item and not keys and k == ind and not body.startswith("-")):
+            m = LB_SERVICE_KEY.match(body)
+            if not m:
+                return None
+            keys.append(m.group(1).lower() if len(keys) != 2 else m.group(1))
+            ind = k
+            if len(keys) == 4:
+                break
+    return keys[2] if keys[:2] == ["servers", "loadbalancer"] and keys[3:] == ["services"] else None
 
 
 # (0.10.9.1) a load balancer's upstream in its own file (nginx): its name and its servers
@@ -975,8 +1017,8 @@ def _outline(text: str, lang: str) -> list[dict[str, Any]]:
             out.append({"kind": "route", "name": f"{verb} {m.group(2) or m.group(4)}",
                         "line": text.count("\n", 0, m.start()) + 1})
         return sorted(out, key=lambda x: x["line"])[:300]
-    for m in re.finditer(r"^(#{1,4})\s+(.+?)\s*$", text, re.M):
-        out.append({"kind": "heading", "name": m.group(2)[:200], "level": len(m.group(1)),
+    for m in re.finditer(r"^(#{1,4})\s+(.+)$", text, re.M):   # (0.11.1) a long run of spaces in a line: no backtracking
+        out.append({"kind": "heading", "name": m.group(2).rstrip()[:200], "level": len(m.group(1)),
                     "line": text.count("\n", 0, m.start()) + 1})
     return out[:300]
 
@@ -1128,7 +1170,7 @@ def diagram_free(text: str) -> str:
 FLOW_SOURCE = re.compile(r"(^|-)(rabbitmq|rabbit|kafka|nats|activemq|artemis|pulsar|sqs|kinesis|queue|broker|mq|redis|"
                          r"mysql|mariadb|postgres|postgresql|pgsql|mongo|mongodb|cassandra|db|database|elasticsearch|"
                          r"opensearch|s3|minio|bucket|storage)(-|$)", re.I)   # (0.10.4) what is read, never calls
-ARROW = re.compile(r"\s*(→|⟶|->|-->|←|⟵|<-|<--)\s*")
+ARROW = re.compile(r"(?<!\s)\s*(→|⟶|->|-->|←|⟵|<-|<--)\s*")   # (0.11.1) from a run's start only: no backtracking
 FLOW_LABEL = re.compile(r"\b(alerts?|notifications?|events?|logs?|metrics?|messages?|spans?|traces?|records?)\b", re.I)
 SOURCE_LABEL = re.compile(r"\bdata\s*-?\s*sources?\b|\bdatasources?\b|\bsource\s+of\s+data\b", re.I)
 PARTS_COLUMN = re.compile(r"\b(services?|applications?|apps?|components?|containers?|software|processes|daemons?|"
@@ -1946,7 +1988,7 @@ def _list_sentences(text: str) -> list[tuple[int, str]]:
                 names_only = names_only and len(it.split()) <= 4 and bool(NAME_SPAN.match(it)) and \
                     not re.search(r"[,;]", it)            # (a list of sentences is no list of names: each item
         if items and names_only:                          # stays its own sentence)
-            out.append((m.start("intro"), m.group("intro") + " " + ", ".join(items) + "."))
+            out.append((m.start("intro"), LONG_SPACE.sub(" " * 8, m.group("intro")) + " " + ", ".join(items) + "."))
     return out
 
 
@@ -1958,10 +2000,15 @@ GROUP_LIST = re.compile(r"^\W*(?P<kind>(?:[A-Za-zÀ-ÿ-]+\s+){0,2}?(?:groups?|po
 KEYISH = re.compile(r"[ \t]*[A-ZÀ-Ý][\wÀ-ÿ'’.-]*(?:[ \t]+[\wÀ-ÿ'’.-]+){0,3}[ \t]*:[ \t]+\S")
 
 
+# (0.11.1) a run of spaces longer than 8 in a sentence (a table padded with spaces, a drawing in text), read as 8: the
+# sentence patterns backtrack over a run (a minute for one of 10,000 spaces), 8 spaces say what a longer run says
+LONG_SPACE = re.compile(r"[ \t]{9,}")
+
+
 def _sentences(text: str) -> Iterator[tuple[int, str]]:
     """A text's sentences, a line wrapped in the middle of one going on (a bullet, a heading, a blank line, a table's
     row start a new one); positions as in the text (0.10.4: the wrapped lines joined, where the sentence starts in
-    the text, so that its quote is its own line)."""
+    the text, so that its quote is its own line; 0.11.1: a long run of spaces as 8)."""
     pieces, flat_at, text_at, last, size = [], [], [], 0, 0
     for m in re.finditer(r"\n(?![ \t]*(?:[-*+#|>]|\d+[.)]\s|\n))[ \t]*", text):
         line = text[text.rfind("\n", 0, m.start()) + 1:m.start()]
@@ -1989,7 +2036,7 @@ def _sentences(text: str) -> Iterator[tuple[int, str]]:
         #                                                            a name, logs.test, db-01.example.net, keeps going)
         s = m.group(0).strip()
         if len(s) >= 8:
-            yield at(m.start() + len(m.group(0)) - len(m.group(0).lstrip())), s
+            yield at(m.start() + len(m.group(0)) - len(m.group(0).lstrip())), LONG_SPACE.sub(" " * 8, s)
 
 
 def _depths(sentence: str) -> list[int]:
@@ -2174,6 +2221,17 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                 else:
                     fact(me, verb, host.lower(), "vip", m.start())
                 continue
+            svc = lb_service(text, m.start())
+            if svc:                                     # (0.11.1) a Traefik service's server: the balancer calls the
+                server = names.hosts.get(norm(host)) or (names.hosts.get(norm(host.split(".")[0])) if "." in host
+                                                         else None)   # service the block names, which runs on
+                target = names.part(svc) or own.get(norm(svc)) or (upstream_part(svc, [host], names) if server
+                                                                    else None)   # the server (HAProxy's backend
+                if target and not names.hosts.get(norm(target)) and norm(target) != norm(me):   # keeps its call to
+                    fact(me, "calls", target, "part", m.start())   # the server too: here the server is the
+                    if server:                                  # service's own address, no other end)
+                        fact(target, "runs_on", server, "host", m.start(), conf=0.7)
+                    continue
             ups = ups_of.get(host.lower()) if "." not in host else None
             part = (upstream_part(host, ups, names) if ups else None) or _host_part(host, names)
             served = names.parts.get(norm(part)) or names.alias.get(norm(part)) or own.get(norm(part)) \
@@ -2319,10 +2377,10 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
         for job in re.finditer(r"(?m)^\s*-\s*job_name:\s*[\"']?([\w.-]+)[\"']?([\s\S]*?)(?=^\s*-\s*job_name:|\Z)", live):
             body, base = job.group(2), job.start(2)        # (0.10.6) a template's expression and a label's value
             items = [(base + m.start(1) + x.start(1), x.group(1)) for m in re.finditer(r"targets:\s*\[([^\]]*)\]", body)
-                     for x in re.finditer(r"([^,\s][^,]*?)\s*(?:,|$)", m.group(1))]   # ("instance: ...") are no
+                     for x in re.finditer(r"([^,\s][^,]*)(?:,|$)", m.group(1))]   # ("instance: ...") are no
             items += [(base + m.start(1) + x.start(1), x.group(1)) for m in   # target: the targets' list only
                       re.finditer(r"(?m)targets:[ \t]*\n((?:[ \t]*-[^\n]*(?:\n|$))+)", body)
-                      for x in re.finditer(r"(?m)^[ \t]*-[ \t]*(\S[^\n]*?)[ \t]*$", m.group(1))]
+                      for x in re.finditer(r"(?m)^[ \t]*-[ \t]*(\S[^\n]*)$", m.group(1))]
             for at, item in items:
                 t = re.fullmatch(r"[\"']?([A-Za-z][\w.-]*)(?::(\d+))?[\"']?", item.strip())
                 if not t or t.group(1) in ("http_2xx",) or t.group(1).lower() == "localhost":
@@ -2542,6 +2600,9 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                 continue
             hcol = 0 if roles and (roles[0] == "runs_on" or HOST_HEAD.fullmatch(header[0].strip(" *`"))) else next(
                 (i for i, h in enumerate(header) if i and HOST_HEAD.fullmatch(h.strip(" *`"))), None)
+            wcol, whole_team = _whole_team(roles, rows) if header and (   # (only where the row's whole is read:
+                DEPLOYABLE_HEAD.match(header[0].strip(" *`")) or STORE_HEAD.fullmatch(first_head) or   # its part_of
+                TOPIC_HEAD.match(first_head) or JOB_HEAD.match(first_head)) else (0, {})       # below, as the team's)
             for r0, cells in rows:
                 first = cells[0] if cells else ""
                 hcell = cells[hcol] if hcol is not None and hcol < len(cells) else ""
@@ -2613,9 +2674,12 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                         if (known or ID_TOKEN.fullmatch(value)) and not names.hosts.get(norm(value)) and \
                                 norm(known or value) != norm(part):
                             fact(known or value, verb, part, "part", r0, conf=0.7)
+                inside_row = any(_hosted_in(v, part, names, own) for r, c in zip(roles[1:], cells[1:]) if r == "runs_on"
+                                 for v in _cell_values(c)[:6])   # (0.11.1) a database inside a cluster ("db-pg-09,
+                #   db-pg-10 | on pg-shared-1"): the servers its row lists are the cluster's, no host of its own
                 for h, role, cell in zip(header[1:], roles[1:], cells[1:]):
                     for value in _cell_values(cell)[:6]:
-                        if not role or not re.search(r"\w", value):
+                        if not role or not re.search(r"\w", value) or (role == "runs_on" and inside_row):
                             continue
                         if role == "alias":               # (0.10.10) a store's name inside it (its schema), never
                             if re.fullmatch(r"[A-Za-z][\w.-]{1,40}", value) and norm(value) != norm(part) and \
@@ -2673,6 +2737,11 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                                     fact(value, "is_a", "domain", "kind", r0, conf=0.7)
                         elif role == "owned_by" and INFRA_VALUE["owned_by"].search(value) and len(value) <= 60:
                             value = re.sub(r"(?i)^(?:the|l['’]|la|le|die|der)\s+", "", value)   # (0.10.10) "the x squad"
+                            whole = whole_team.get(norm(cells[wcol].strip(" `*"))) if wcol < len(cells) else None
+                            if whole:                     # (0.11.1) the team of the row's whole, said on each of
+                                fact(names.part(whole) or own.get(norm(whole)) or whole, role, value, "owner", r0,
+                                     conf=0.75)          # its rows ("Component | App | Squad"): the whole's owner
+                                continue
                             fact(part, role, value, "owner", r0, conf=0.75)   # (0.10.9) a team: its owner on the map
                         else:
                             fact(part, role, value, "attribute", r0, conf=0.75)
@@ -2707,8 +2776,8 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
         hosted_here = unit_part and re.search(r"(?i)\b(?:pools?|groups?|namespaces?|clusters?|servers?|hosts?|nodes?)\b",
                                               unit.get("title") or "")
         sections = []                                     # (0.10.10) a catalogue page: each heading names a part,
-        for hm in re.finditer(r"(?m)^[ \t]*#{1,6}[ \t]+(.+?)[ \t]*$", prose):   # its "Key: value" lines that part's
-            h = re.sub(r"\s*\([^)]*\)\s*$", "", hm.group(1)).strip(" `*")   # ("### Quote API (app-1, app-2)")
+        for hm in re.finditer(r"(?m)^[ \t]*#{1,6}[ \t]+(.+)$", prose):   # its "Key: value" lines that part's
+            h = re.sub(r"\([^)]*\)$", "", hm.group(1).rstrip()).rstrip().strip(" `*")   # ("### Quote API (app-1)")
             said = [x for x in _named(h, names, own, home) if x[0] == 0 and len(h[len(x[1]):].split()) <= 2]
             #   ("### Quote Exporter": quote; "### Quote API": quote-api)
             sections.append((hm.start(), said[0][2] if said else names.part(h) or own.get(norm(h)) or (
@@ -2909,7 +2978,10 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                 if verb == "monitors" and not (lead and lead[0] < c0) and not said:
                     continue                                      # "Check the ...": a step of a runbook, no subject
                 objs = [p for at, w, p in found if c1 <= at < stop and (depth[at] == depth[c0])
-                        and norm(p) != norm(subj or "") and not names.hosts.get(norm(w))]
+                        and norm(p) != norm(subj or "") and not names.hosts.get(norm(w)) and not (
+                            (norm(w) in names.inventory_groups or norm(w) in names.groups) and
+                            re.search(r"\S\s+on\s+(?:the\s+)?$", s[c1:at]))]   # (0.11.1) "routes to X on grp-a":
+                #                                                   where X runs, no second end of the flow
                 for o in list(dict.fromkeys(objs))[:8]:           # (0.10.4) six services in a list: each of them
                     at_o = next((at for at, w, p in found if p == o and c1 <= at < stop), None)
                     if verb == "sends_to" and re.match(r"(?i)(stores?|keeps?|holds?)\b(?!.*\b(in|into|to)\b)",
@@ -3089,6 +3161,40 @@ def _content_role(i: int, rows: list[tuple[int, list[str]]], names: Names) -> st
     if all(len(v) <= 40 and len(v.split()) <= 4 and TEAM_END.search(v) for v in vals):
         return "owned_by"
     return None
+
+
+def _hosted_in(value: str, part: str, names: Names, own: dict[str, str]) -> str | None:
+    """(0.11.1) The part a place's cell puts the row's part inside ("on pg-shared-1": a database of that cluster): a
+    part known as no server nor group of servers; None for any other place (a host, a group, words)."""
+    m = re.match(r"(?i)^(?:on|in)\s+(?:the\s+)?(\S.*)$", value.strip())
+    inside = (names.service(m.group(1)) or own.get(norm(m.group(1)))) if m else None
+    return inside if inside and not names.hosts.get(norm(m.group(1))) and norm(inside) != norm(part) else None
+
+
+def _whole_team(roles: list[str | None], rows: list[tuple[int, list[str]]]) -> tuple[int, dict[str, str]]:
+    """(0.11.1) The column of a table's rows' whole and {norm(whole): its name} when the table's team column is the
+    whole's ("Component | App | Squad": every component of one application has that application's squad): each whole
+    of two rows or more has one team, and one of them at least; {} for a table whose rows of one whole have different
+    teams (each row its own owner)."""
+    if "part_of" not in roles[1:] or "owned_by" not in roles[1:]:
+        return 0, {}
+    w, o = 1 + roles[1:].index("part_of"), 1 + roles[1:].index("owned_by")
+    teams: dict[str, set[str]] = defaultdict(set)
+    count: dict[str, int] = defaultdict(int)
+    shown: dict[str, str] = {}
+    for _r0, cells in rows:
+        if max(w, o) >= len(cells):
+            continue
+        whole, team = cells[w].strip(" `*"), cells[o].strip(" `*")
+        if not re.search(r"\w", whole) or not re.search(r"\w", team) or "," in whole:
+            continue
+        teams[norm(whole)].add(norm(team))
+        count[norm(whole)] += 1
+        shown.setdefault(norm(whole), whole)
+    shared = [x for x in teams if count[x] >= 2]
+    if not shared or any(len(teams[x]) > 1 for x in shared):
+        return w, {}
+    return w, {x: shown[x] for x in teams if len(teams[x]) == 1}
 
 
 def _named_after_its_group(first: str, roles: list[str | None], cells: list[str], names: Names) -> bool:

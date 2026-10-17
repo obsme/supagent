@@ -95,33 +95,57 @@ why it matters), then the sections asked, each opening with its main point. Expl
 in sentences; group what belongs together; define a term the first time it is used and keep one name for one
 thing. Say the chains between parts in words (A sends to B, which stores in C): the relations diagram is added
 to the page by the system, so draw none yourself. Leave out what does not help understanding: counts of
-objects, documents or pages, sizes, identifiers, long lists of metric, field or index names (name the few that
-matter and say that the Data dictionary has the others), and repetitions. Cite the evidence you use as [E1],
-[E2]... once per paragraph, not after every sentence. Use ## headings, short paragraphs, bullet lists, and a
-Markdown table where it compares things; no HTML, no code fences unless quoting a query. Write in the language
+objects, documents or pages, sizes, identifiers, long lists of names (metrics, fields, indices, servers, values:
+name the few that matter and say where the others are, the Data dictionary or the Inventory pages), and
+repetitions: say a thing once, where it belongs.
+Name each part as the evidence names it, the same way every time. Cite the evidence you use as [E1], [E2]...
+(only the ids given) once per paragraph and after each table, not after every sentence. Use ## headings, short
+paragraphs, bullet lists, and a Markdown table where several things are compared on the same points (one row
+each) instead of a list repeated per group; no HTML, no code fences unless quoting a query. Write in the language
 of most of the evidence. The page: {title}. {brief}"""
 DIAGRAM_EDGES = 30         # (0.11.0) relations drawn on a summary page's diagram at most (the most stated first)
 DIAGRAM_HEAD = "diagram: relations"     # the first line of the block the pages draw (dictionary.js: S.diagrams)
 
 
 QUALIFIED = re.compile(r"\s*\([^()]*\)$")     # a name's qualifier in parentheses ("payment_vms (infra prod)")
+DIAGRAM_NODES = 24         # (0.11.1) parts drawn on a diagram at most (the page drops the edges beyond 40 unsaid)
+
+
+def part_key(name: str) -> str:
+    """(0.11.1) One part however it is written: "Checkout API", "checkout_api", "checkout-api (prod)" are one."""
+    return " ".join(re.sub(r"[_\-\s]+", " ", QUALIFIED.sub("", str(name or "")).lower()).split())
 
 
 def diagram_block(rels: list[dict[str, Any]], limit: int = DIAGRAM_EDGES) -> str:
     """(0.11.0) The relations the documents and the code state, as a block the Context page draws as a diagram (and
-    any other reader reads as lines: "A -> B : calls"), the most stated first; "" when there are fewer than two."""
-    lines, seen = [], set()
-    for r in rels:
-        a, b = " ".join(str(r["a"]).split())[:60], " ".join(str(r["b"]).split())[:60]
-        key = (QUALIFIED.sub("", a).lower(), QUALIFIED.sub("", b).lower(), r["verb"])   # "x (prod)" is x: once
-        if not a or not b or key in seen or "->" in a or "->" in b:
+    any other reader reads as lines: "A -> B : calls"), the most stated first; "" when there are fewer than two.
+    (0.11.1) One box per part: its spellings (case, "_" or "-", a qualifier) are one name, the plain one the documents
+    use most; what a part does to another is one line ("A -> B : calls, reads from"); a part is never drawn as using
+    itself; DIAGRAM_NODES parts at most (the most stated relations first)."""
+    names: dict[str, str] = {}
+    pairs: dict[tuple[str, str], list[str]] = {}
+    clean = [(" ".join(str(r["a"]).split())[:60], " ".join(str(r["b"]).split())[:60], r["verb"]) for r in rels]
+    clean = [(a, b, v) for a, b, v in clean if a and b and "->" not in a and "->" not in b]
+    for a, b, _v in clean:                            # the plain spelling first seen (the most stated): its name
+        for x in (a, b):
+            k = part_key(x)
+            if k and (k not in names or (QUALIFIED.search(names[k]) and not QUALIFIED.search(x))):
+                names[k] = x
+    for a, b, verb in clean:
+        ka, kb = part_key(a), part_key(b)
+        if not ka or not kb or ka == kb:
             continue
-        seen.add(key)
-        lines.append(f"{a} -> {b} : {RELATION_VERBS.get(r['verb'], r['verb'])}")
-        if len(lines) >= limit:
-            break
-    if len(lines) < 2:
+        if (ka, kb) not in pairs:
+            drawn = {k for pair in pairs for k in pair}
+            if len(pairs) >= limit or len(drawn | {ka, kb}) > DIAGRAM_NODES:
+                continue
+            pairs[(ka, kb)] = []
+        said = RELATION_VERBS.get(verb, verb)
+        if said not in pairs[(ka, kb)]:
+            pairs[(ka, kb)].append(said)
+    if len(pairs) < 2:
         return ""
+    lines = [f"{names[ka]} -> {names[kb]} : {', '.join(verbs)}" for (ka, kb), verbs in pairs.items()]
     return "```text\n" + DIAGRAM_HEAD + "\n" + "\n".join(lines) + "\n```"
 
 
@@ -441,8 +465,9 @@ def _part_relations(limit: int = RELATIONS_POOL) -> list[dict[str, Any]]:
 
 
 def _relation_lines(rels: list[dict[str, Any]]) -> list[str]:
-    return [f"{r['a']} {RELATION_VERBS.get(r['verb'], r['verb'])} {r['b']} ({r['pages']} page"
-            f"{'s' if r['pages'] > 1 else ''})" for r in rels]
+    """The relations as sentences, the most stated first; (0.11.1) without how many pages state each (a count the
+    pages repeated: "stated by 9 pages")."""
+    return [f"{r['a']} {RELATION_VERBS.get(r['verb'], r['verb'])} {r['b']}" for r in rels]
 
 
 def _shares(chosen: list[dict[str, Any]]) -> dict[int, int]:
@@ -481,8 +506,9 @@ def _digest(d: dict[str, Any], chars: int) -> str:
             if target and target != key(p):
                 inbound[target] += 1
     spaces = sorted({str(p["space"]) for p in pages if p.get("space")})
-    head = (f"{len(pages)} pages" + (f" (spaces: {', '.join(spaces[:10])})" if spaces else "") +
-            "; its central pages first (the most linked to), each with its first lines:\n")
+    # (0.11.1) no count of its pages, nor of the pages linking to each (the summaries said "the wiki has 5,000 pages")
+    head = ((f"Spaces: {', '.join(spaces[:10])}. " if spaces else "") +
+            "Its central pages first (the ones its other pages link to most), each with its first lines:\n")
     out, used = [head], len(head)
     for p in sorted(pages, key=lambda p: (-inbound[key(p)], str(p.get("path") or "").count("/"),
                                           len(str(p.get("title") or "")))):
@@ -490,7 +516,7 @@ def _digest(d: dict[str, Any], chars: int) -> str:
         first, _, body = block.partition("\n")
         title = str(p.get("title") or first.lstrip("# ").strip())
         lead = " ".join((body if first.startswith("# ") else block).split())[:DIGEST_LEAD]
-        line = f"- {title}" + (f" ({inbound[key(p)]} pages link to it)" if inbound[key(p)] else "") + f": {lead}\n"
+        line = f"- {title}: {lead}\n"
         if used + len(line) > chars:
             break
         out.append(line)
@@ -548,7 +574,7 @@ def summary_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
     shares = _shares(chosen)
     docs = [{"ref": f"doc:{d['id']}", "title": d["title"], "text": _digest(d, shares[d["id"]])} for d in chosen]
     pool = ev.get("part_relations") or []
-    stated = [{"ref": "facts", "title": "what the documents and the code state about the parts",
+    stated = [{"ref": "facts", "title": "what the documents and the code state about the parts (the most stated first)",
                "relations": _relation_lines(pool[:PART_RELATIONS])}] if pool else []
     entries = [{"ref": f"entry:{e['id']}", "title": e["title"], "classification": e["classification"],
                 "text": e["content"][:600]} for e in ev["entries"] if e["classification"] != "formula"][:40]
@@ -560,14 +586,17 @@ def summary_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
         {"section": "functional", "slug": "overview", "title": "How the system works", "database_ids": all_dbs,
          "brief": "Explain what the system does for its users, its applications and their roles, the main processes "
                   "and chains between applications (who calls, uses, depends on and runs on what: the relations the "
-                  "documents state, with how many pages state each), and where the data of each one is (## What it "
-                  "does, ## Applications, ## Processes and chains, ## Where the data is).",
+                  "documents state, the most stated first), and where the data of each one is (## What it "
+                  "does; ## Applications: one table, a row per application (application, what it does, its data), "
+                  "never a list per domain; ## Processes and chains; ## Where the data is: the data sources and what "
+                  "each holds, without repeating the table).",
          "evidence": docs + stated + entries + questions + databases + inventory, "diagram": pool},
         {"section": "technical", "slug": "architecture", "title": "Technical overview", "database_ids": all_dbs,
          "brief": "Describe the data sources, the infrastructure (servers, services, clusters, environments, regions), "
                   "how the data sources and the parts relate (the relations the documents state: what calls, runs on, "
-                  "connects to what) and what is not known (## Data sources, ## Infrastructure, ## Links, "
-                  "## Not known yet).",
+                  "connects to what) and what is not known (## Data sources: one table, a row per data source "
+                  "(data source, engine, what it holds); ## Infrastructure; ## Links; ## Not known yet: at most five "
+                  "points, the gaps a newcomer would hit first).",
          "evidence": databases + inventory + relations + stated + docs,
          "diagram": [r for r in pool if r["verb"] in INFRA_VERBS]},
     ]
@@ -584,7 +613,8 @@ def summary_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
             if re.search(r"(?<![\w-])" + re.escape(app) + r"(?![\w-])", a["question"] or "", re.I):
                 ev_app.append({"ref": f"recipe:{a['id']}", "title": (a["question"] or "")[:80],
                                "question": a["question"]})
-        mine = [r for r in pool if app.lower() in (r["a"].lower(), r["b"].lower())][:40]
+        key = part_key(app)                         # (0.11.1) "Billing_Service (prod)" is billing-service too
+        mine = [r for r in pool if key in (part_key(r["a"]), part_key(r["b"]))][:40]
         if mine:                                    # (0.10.12) its chain as the documents and the code state it
             ev_app.append({"ref": "facts", "title": f"what the documents state about {app}",
                            "relations": _relation_lines(mine)})
@@ -611,6 +641,252 @@ def _page_text(msg: dict[str, Any]) -> str:
     return re.sub(r"<think>.*\Z", "", text, flags=re.S)
 
 
+# (0.11.1) what the page's checks look for in the LLM's answer, before it is saved
+CITATION = re.compile(r"[ \t]?\[\s*(E\d+(?:\s*[,;]\s*E?\d+)*)\s*\]")
+COUNT_NOUNS = (r"(?:servers?|hosts?|machines?|vms?|instances?|metrics?|indices|indexes|fields?|labels?|documents?|docs|"
+               r"pages?|files?|objects?|entries|series|values?|dashboards?|panels?|tables?|columns?|datasets?|charts?|"
+               r"repositories|repos?|wikis?|wiki spaces?|applications?|apps?|services?|components?|categories|"
+               r"domains?|relations?|items?|terms?|data sources?|databases?)")
+COUNT = re.compile(r"(?<![\w.:/#-])(?:(?:about|around|some|over|nearly|roughly|approximately|almost|more than|"
+                   r"fewer than|less than|up to|at least)\s+)?(?:\d{1,3}(?:,\d{3})+|\d+)\s+(?:(?:distinct|different|"
+                   r"unique|known|active|learned|main|other|more|separate)\s+)?(" + COUNT_NOUNS +
+                   r")\b(?!\s+(?:per|each|every)\b)", re.I)
+COUNT_VERB = re.compile(r"(?:\bthere\s+(?:are|is|were|was)|\b(?:has|have|had|holds?|contains?|counts?|lists?|includes?|"
+                        r"totals?|numbers?|comprises?|spans?|consists\s+of|gathers?|groups?|keeps?|stores?|tracks?|"
+                        r"describes?|covers?|knows?|learned|reads?))\s*$", re.I)
+COUNT_PASSIVE = re.compile(r"\s+(?:are|were|is|was|have\s+been|has\s+been)\s+(?:learned|known|listed|indexed|described|"
+                           r"documented|read|collected|found|defined|available|stored|tracked|monitored|referenced)\b",
+                           re.I)
+IN_SHORT = re.compile(r"^\s*(?:#{1,6}\s*)?(?:\*\*|__)?in\s+short\b", re.I)
+NOT_KNOWN = re.compile(r"^#{2,6}\s*(?:what is\s+)?not\s+known\s+yet\b", re.I)
+NOT_KNOWN_POINTS = 5       # the points of a page's "Not known yet" (the ones a newcomer needs first)
+DRAWN_LANGS = {"mermaid", "plantuml", "puml", "dot", "graphviz"}     # a diagram drawn in the page by the LLM
+DRAWN = re.compile(r"^\s*(?:graph\s+(?:TD|TB|BT|RL|LR)\b|flowchart\b|sequenceDiagram\b|classDiagram\b|erDiagram\b|"
+                   r"stateDiagram|@startuml\b|digraph\b|diagram: relations\s*$)", re.I)
+DRAWN_HEADING = re.compile(r"\bdiagram\b", re.I)
+LIST_ITEM = re.compile(r"^\s*(?:[-*+>]\s+|\d+[.)]\s+)")      # a list's line (a paragraph may start with **bold**)
+SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\[*_`(\"'])")
+
+
+def _without_counts(line: str) -> tuple[str, list[str]]:
+    """A line of a page without its counts of objects, documents or pages: a count in parentheses left out ("the wiki
+    (5,000 pages) says" -> "the wiki says"); a sentence that is a count ("There are 42 servers.", "The wiki holds 5,000
+    pages [E3].") left out; a count before the names it introduces left out of the sentence ("There are 3 services:
+    a, b and c." -> "The services: a, b and c."). Other figures (02:00, 30 days, port 8080) stay."""
+    removed: list[str] = []
+
+    def paren(m: re.Match) -> str:
+        inner = m.group(1)
+        if not COUNT.search(inner):
+            return m.group(0)
+        rest = re.sub(r"\b(?:about|some|over|stated|by|in|across|state|states|it|them|mentioned|and|of|the|total|all|"
+                      r"read|learned|described|linked|link|to|from)\b|[,;~]", " ", COUNT.sub(" ", inner), flags=re.I)
+        if rest.strip():
+            return m.group(0)
+        removed.append(m.group(0).strip())
+        return ""
+
+    line = re.sub(r"\s*\(([^()]{1,120})\)", paren, line)
+    lead_m = re.match(r"^(\s*(?:[-*+>]\s+|\d+[.)]\s+)?)", line)
+    lead = lead_m.group(1) if lead_m else ""
+    kept: list[str] = []
+    carried: list[str] = []                    # the sources of a sentence left out: cited by the one next to it
+
+    def keep(sentence: str) -> None:
+        kept.append(_cite_into(sentence, carried) if carried else sentence)
+        carried.clear()
+
+    for sentence in SENTENCE_END.split(line[len(lead):]):
+        m = COUNT.search(sentence)
+        bare = re.sub(r"^(?:\*\*|__)", "", sentence)
+        if m is None or not (COUNT_VERB.search(sentence[:m.start()]) or
+                             (bare.find(m.group(0)) == 0 and COUNT_PASSIVE.match(sentence[m.end():]))):
+            keep(sentence)
+            continue
+        tail = CITATION.sub("", sentence[m.end():])
+        noun = m.group(1)
+        if re.match(r"\s*(?::|\(|,?\s*(?:such as|including|namely|like)\b)", tail):    # the names follow: kept
+            head = sentence[:m.start()]
+            there = re.match(r"^(\s*)there\s+(?:are|is|were|was)\s*$", head, re.I)
+            new = (there.group(1) + "The " + noun) if there else head + noun
+            keep(new + sentence[m.end():])
+            removed.append(m.group(0))
+            continue
+        if len(re.findall(r"[^\W\d_][\w'-]*", tail)) <= 8 and not re.match(r"\s*[;,]", tail) and \
+                not IN_SHORT.match(bare):                    # a count and little else: the sentence goes
+            removed.append(sentence.strip())
+            ids = [x.strip() for c in CITATION.finditer(sentence) for x in re.split(r"[,;]", c.group(1))]
+            if kept:
+                kept[-1] = _cite_into(kept[-1], ids)
+            else:
+                carried.extend(ids)
+            continue
+        keep(sentence[:m.start()] + noun + sentence[m.end():])
+        removed.append(m.group(0))
+    text = " ".join(s.strip() for s in kept if s.strip())
+    return (lead + text if text else ""), removed
+
+
+def _cite_into(sentence: str, ids: list[str]) -> str:
+    """(0.11.1) `sentence` citing `ids` too, at its end (in the citation it ends with, if any)."""
+    ids = [x for x in dict.fromkeys(ids) if x]
+    if not ids:
+        return sentence
+    end = re.search(r"\s*[.!?:;]*\s*$", sentence)
+    body, tail = sentence[:end.start()], sentence[end.start():]
+    last = None
+    for last in CITATION.finditer(body):
+        pass
+    if last is not None and last.end() == len(body):
+        have = [x.strip() for x in re.split(r"[,;]", last.group(1))]
+        space = last.group(0)[:1] if last.group(0)[:1] in " \t" else ""
+        return body[:last.start()] + space + "[" + ", ".join(have + [x for x in ids if x not in have]) + "]" + tail
+    return body + " [" + ", ".join(ids) + "]" + tail
+
+
+def _cited_once(line: str) -> tuple[str, int]:
+    """(0.11.1) A paragraph's citations, each source once: where it is cited last (the end of what it supports);
+    "A [E1]. B [E1]. C [E1, E2]." -> "A. B. C [E1, E2].". How many were left out."""
+    found = list(CITATION.finditer(line))
+    ids = [[x.strip() for x in re.split(r"[,;]", m.group(1))] for m in found]
+    last = {x: i for i, group in enumerate(ids) for x in group}
+    if len(last) == sum(len(g) for g in ids):
+        return line, 0
+    out, at = [], 0
+    for i, m in enumerate(found):
+        keep = [x for x in ids[i] if last[x] == i]
+        out.append(line[at:m.start()] + (m.group(0)[:1] if m.group(0)[:1] in " \t" else "") +
+                   ("[" + ", ".join(keep) + "]" if keep else "") if keep else line[at:m.start()])
+        at = m.end()
+    out.append(line[at:])
+    return "".join(out), sum(len(g) for g in ids) - len(last)
+
+
+def check_page(text: str, evidence: list[dict[str, Any]], spec: dict[str, Any] | None = None) -> tuple[str, list[str]]:
+    """(0.11.1) The LLM's page checked before it is saved, as a new member of the team reads it: a citation [E#] to no
+    evidence given is left out (the page's sources are E1...En); a count of objects, documents or pages left out
+    (_without_counts); "In short" first (written elsewhere, or as a heading, it is moved to the top; a title repeated
+    as a "# " heading is left out: the page shows its title); "Not known yet" kept to NOT_KNOWN_POINTS points. What is
+    said but not changed: no "In short" at all, a `name` the evidence never gives (an invented part, maybe). Returns
+    (the page, what was changed or found, for the build's steps); tables and code are left as they are."""
+    notes: list[str] = []
+    n = len(evidence)
+    wrong: list[str] = []
+
+    def cite(m: re.Match) -> str:
+        ids = [x.strip().upper() for x in re.split(r"[,;]", m.group(1))]
+        ids = [x if x.startswith("E") else "E" + x for x in ids]
+        good = [x for x in ids if 1 <= int(x[1:]) <= n]
+        wrong.extend(x for x in ids if x not in good)
+        lead = m.group(0)[:1] if m.group(0)[:1] in " \t" else ""
+        return lead + "[" + ", ".join(good) + "]" if good else ""
+
+    counts: list[str] = []
+    out: list[str] = []
+    fence: list[str] | None = None
+    drawn = again = 0
+    for line in (text or "").splitlines():
+        if fence is not None:                             # a code block: kept as written, unless it draws a diagram
+            fence.append(line)
+            if line.lstrip().startswith("```"):
+                body = [x for x in fence[1:-1] if x.strip()]
+                if fence[0].strip()[3:].strip().lower() in DRAWN_LANGS or (body and DRAWN.match(body[0])):
+                    drawn += 1                            # (the page draws its own, from what the documents state)
+                else:
+                    out += fence
+                fence = None
+            continue
+        if line.lstrip().startswith("```"):
+            fence = [line]
+            continue
+        line = CITATION.sub(cite, line)
+        if line.lstrip().startswith(("|", "#")) or not line.strip():
+            out.append(line)
+            continue
+        new, removed = _without_counts(line)
+        counts += removed
+        line = new if removed else line
+        if line and not LIST_ITEM.match(line):
+            line, n_again = _cited_once(line)             # a paragraph: each source cited once, at its end
+            again += n_again
+        if line:
+            out.append(line)
+    out += fence or []                                    # a code block never closed: as written
+    if wrong:
+        notes.append("citations to no evidence left out: " + ", ".join(sorted(set(wrong), key=lambda x: int(x[1:]))))
+    if counts:
+        notes.append("counts left out: " + "; ".join(clip(c, 80) for c in counts[:5]))
+    if again:
+        notes.append(f"citations said again in a paragraph left out: {again}")
+    blocks = re.split(r"\n\s*\n", "\n".join(out).strip())
+    if blocks and re.match(r"^#\s", blocks[0]) and "\n" not in blocks[0].strip():
+        blocks = blocks[1:]                                   # the page's title again: the page shows it
+    if drawn:                                             # its heading, when the diagram was all its section held
+        notes.append("a diagram the LLM drew left out (the page draws the relations itself)")
+        level = [len(m.group(1)) if (m := re.match(r"^(#{1,6})\s", b)) and "\n" not in b.strip() else 0
+                 for b in blocks]
+        blocks = [b for i, b in enumerate(blocks) if not level[i] or not DRAWN_HEADING.search(b) or
+                  (i + 1 < len(blocks) and (not level[i + 1] or level[i + 1] > level[i]))]
+    first = next((i for i, b in enumerate(blocks) if b.strip()), None)
+    if first is not None and not IN_SHORT.match(blocks[first]):
+        at = next((i for i, b in enumerate(blocks) if IN_SHORT.match(b)), None)
+        if at is None:
+            notes.append('no "In short" paragraph')
+        else:
+            heading = re.compile(r"^\s*#{1,6}\s")
+            moved = [blocks[at]]
+            if heading.match(blocks[at]) and "\n" not in blocks[at].strip():   # a heading "In short": its paragraphs
+                end = next((j for j in range(at + 1, len(blocks)) if heading.match(blocks[j])), len(blocks))
+                moved = blocks[at + 1:end]
+                blocks = blocks[:at] + blocks[end:]
+                if moved:
+                    moved[0] = "In short: " + moved[0].lstrip()
+            else:
+                blocks = blocks[:at] + blocks[at + 1:]
+            if at and heading.match(blocks[at - 1]) and (at == len(blocks) or heading.match(blocks[at])):
+                blocks = blocks[:at - 1] + blocks[at:]       # its section held only "In short": no empty heading left
+            blocks = moved + blocks
+            notes.append('"In short" moved first' if moved else 'no "In short" paragraph')
+    page = "\n\n".join(blocks)
+    lines, inside, points, dropped = page.splitlines(), False, 0, 0
+    kept: list[str] = []
+    for line in lines:
+        if line.startswith("#"):
+            inside, points = bool(NOT_KNOWN.match(line)), 0
+        elif inside and re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", line):
+            points += 1
+            if points > NOT_KNOWN_POINTS:
+                dropped += 1
+                continue
+        elif inside and dropped and line.startswith((" ", "\t")) and line.strip():
+            continue                                          # the rest of a point left out
+        kept.append(line)
+    if dropped:
+        notes.append(f"not known yet: {dropped} points left out")
+        page = "\n".join(kept)
+    said = json.dumps(evidence, ensure_ascii=False, default=str).lower() + " " + \
+        " ".join(str((spec or {}).get(k) or "") for k in ("title", "brief")).lower()
+    folded = re.sub(r"[_\-\s]+", " ", said)
+    unknown = []
+    for name in re.findall(r"`([^`\s]{3,60})`", page):
+        if name.lower() not in said and part_key(name) not in folded and name not in unknown:
+            unknown.append(name)
+    if unknown:
+        notes.append("names not in the evidence: " + ", ".join(f"`{x}`" for x in unknown[:10]))
+    spelled: dict[str, dict[str, str]] = defaultdict(dict)          # one part, one name (case aside)
+    for found in re.findall(r"`([^`\n]{2,60})`|\*\*([^*\n]{2,60})\*\*|(?<![\w-])([^\W\d_]\w*(?:[-_]\w+)+)(?![\w-])",
+                            re.sub(r"```.*?```", "", page, flags=re.S)):
+        name = next(x for x in found if x).strip()
+        if name and not re.fullmatch(r"E\d+", name):
+            spelled[part_key(name)].setdefault(name.lower(), name)
+    twice = [" / ".join(sorted(v.values())) for k, v in spelled.items() if k and len(v) > 1]
+    if twice:
+        notes.append("one part, several names: " + "; ".join(twice[:5]))
+    if n and not re.search(r"\[E\d+", page):                 # (a reader cannot check what the page says)
+        notes.append("no citation")
+    return re.sub(r"\n{3,}", "\n\n", page).strip(), notes
+
+
 def write_summary(spec: dict[str, Any], llm: Any) -> dict[str, Any]:
     """One summary page. An answer cut by the length limit (finish_reason "length") is asked to go on, at most
     CONTINUATIONS times (one cut while reasoning, with nothing written yet, is asked again with twice the room);
@@ -635,13 +911,20 @@ def write_summary(spec: dict[str, Any], llm: Any) -> dict[str, Any]:
         messages = messages + [{"role": "assistant", "content": part}, {"role": "user", "content": CONTINUE}]
     text = text.strip()
     if cut and text:
-        whole = text.rsplit("\n", 1)[0].rstrip() if "\n" in text else text
-        text = whole + "\n\n" + CUT_NOTE
+        text = text.rsplit("\n", 1)[0].rstrip() if "\n" in text else text
+    checks: list[str] = []
+    try:                                          # (0.11.1) checked before it is saved; a check that fails never
+        text, checks = check_page(text, prompt_items, spec) if text else (text, [])     # costs the page
+    except Exception as ex:  # pylint: disable=broad-except
+        log.warning("supagent context: the checks of the page %s: %s", spec.get("title"), ex)
+        checks = [f"checks not done: {type(ex).__name__}"]
+    if cut and text:
+        text += "\n\n" + CUT_NOTE
     block = diagram_block(spec.get("diagram") or [])
     if text and block:                            # (0.11.0) the relations the documents state, drawn by the page
         text += ("\n\n## Relations diagram\n\nWhat the documents and the code state about the parts (the most stated "
                  "first; read each line as the part on the left, what it does, the part on the right).\n\n" + block)
-    return {"content": text, "sources": sources, "tokens": tokens, "cut": cut}
+    return {"content": text, "sources": sources, "tokens": tokens, "cut": cut, "checks": checks}
 
 
 # --------------------------------------------------------------------------- #
@@ -1026,6 +1309,7 @@ def build_context(reason: str = "manual", llm: bool = True, force: bool = False)
                 steps.begin("summary pages (LLM)")
                 res: dict[str, int] = defaultdict(int)
                 failed: list[str] = []
+                checked: list[str] = []
                 client = None
                 for spec in specs:
                     check()
@@ -1073,10 +1357,14 @@ def build_context(reason: str = "manual", llm: bool = True, force: bool = False)
                         continue
                     if out.get("cut"):
                         res["cut"] += 1                       # saved as it is, written again at the next build
+                    if out.get("checks"):                     # (0.11.1) what the checks changed or found on the page
+                        res["checked"] += 1
+                        checked.append(f"{spec['title']}: {'; '.join(out['checks'])}"[:600])
                     res[save_page({**spec, "content": out["content"], "sources": out["sources"]}, "summary",
                                   _hash([h, "cut"]) if out.get("cut") else h, 1, out["tokens"])] += 1
                     steps.update(**res)
-                steps.end(**res, **({"failed_pages": failed[:12]} if failed else {}))
+                steps.end(**res, **({"failed_pages": failed[:12]} if failed else {}),
+                          **({"checked_pages": checked[:12]} if checked else {}))
                 if res.get("left") or failed:
                     status = "partial"
                 if failed:

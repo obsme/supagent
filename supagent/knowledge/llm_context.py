@@ -94,11 +94,15 @@ def _page(ev: dict[str, Any], full: bool) -> dict[str, Any]:
             (f" (with {a['tool']})" if a.get("tool") else "") + _mark(a.get("database_id")) for a in answers])
     entries_of("Other notes of the catalog", None, lim["entry"])
     lines = list(head)
-    for sec in sections:                         # within the version's size: whole lines, the first sections first
-        for i, line in enumerate(sec):
-            if sum(len(x) + 1 for x in lines) + len(line) > lim["total"]:
+    used = sum(len(x) + 1 for x in lines)
+    for sec in sections:                         # within the version's size: whole lines, the first sections first;
+        if used + sum(len(x) + 1 for x in sec[:4]) - 1 > lim["total"]:     # (0.11.1) a section only with its first
+            continue                             # line (a heading with nothing under it said the data held nothing)
+        for line in sec:
+            if used + len(line) > lim["total"]:
                 break
             lines.append(line)
+            used += len(line) + 1
     rules = [e for e in entries if e["classification"] in ("rule", "guide")]
     if rules:                                    # last, whole: the agent's instructions give them apart
         lines += ["", "## Rules of the team", ""] + [
