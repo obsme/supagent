@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import contextlib
 import json
 import logging
 import os
 import re
-from typing import Any
+from typing import Any, Iterator
 
 import sqlalchemy as sa
 from flask import Response, g, request
@@ -280,6 +281,40 @@ def _body() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+@contextlib.contextmanager
+def _as_this_person() -> Iterator[None]:
+    """(0.11.0) The tools called inside act as the person of this request (security.current_actor reads the flag the
+    agent's own context sets), not as the service user; in the request's own context and session."""
+    before = getattr(g, "supagent_acting", False)
+    g.supagent_acting = True
+    try:
+        yield
+    finally:
+        g.supagent_acting = before
+
+
+def _int(value: Any, default: Any) -> Any:
+    """(0.11.0) A number sent by the page (a query argument, a field of the body): `default` when it is missing or
+    not a number (a 400 rather than a server error)."""
+    if value is None or value == "":
+        return default
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _page_count() -> Any:
+    """(0.11.0) The number of pages of a document, counted by the database (its pages' list never loaded)."""
+    from superset import db
+
+    from supagent.models import Doc
+
+    if db.engine.dialect.name == "postgresql":
+        return sa.case((sa.func.json_typeof(Doc.pages) == "array", sa.func.json_array_length(Doc.pages)), else_=0)
+    return sa.case((sa.func.json_type(Doc.pages) == "array", sa.func.json_array_length(Doc.pages)), else_=0)
+
+
 def _budget_report() -> dict | None:
     """(0.10.9.1) What the agent gives the LLM in each context profile, for the Settings page (supagent.budget)."""
     try:
@@ -328,9 +363,11 @@ class ChatView(BaseView):
         from supagent.pagekeep import fit_steps
 
         files = []
-        for f in m.files or []:
+        ids = [f["id"] for f in m.files or [] if isinstance(f, dict) and f.get("id")]
+        kept = {i for (i,) in db.session.query(File.id).filter(File.id.in_(ids))} if ids else set()   # (0.11.0) not
+        for f in m.files or []:                                                     # the files' data (MBs each)
             item = dict(f)
-            if f.get("id") and db.session.get(File, f["id"]) is not None:
+            if f.get("id") in kept:
                 item["url"] = f"api/files/{f['id']}"
             files.append(item)
         final = m.status in ("done", "error", "cancelled")
@@ -407,7 +444,9 @@ class ChatView(BaseView):
             return _json({"error": "question too long (8000 characters at most)"}, 400)
         cid = body.get("conversation_id")
         if cid:
-            conv = self._conversation(int(cid))
+            conv = self._conversation(_int(cid, 0))
+            db.session.query(Conversation.id).filter(Conversation.id == conv.id).with_for_update().first()   # (0.11.0)
+            #   one question at a time: a double click waits for the first one's row, then sees it busy
             busy = db.session.query(Message).filter(Message.conversation_id == conv.id,
                                                     Message.status.in_(("pending", "running", "cancelling"))).all()
             if expire_stale(busy):
@@ -566,12 +605,16 @@ class ChatView(BaseView):
 
         from supagent.models import Memory
 
+        from supagent.security import user_groups
+
         me = g.user.id
+        groups = [x.id for x in user_groups()] or [-1]
+        shared = sa.or_(Memory.scope == "team", sa.and_(Memory.scope == "group", Memory.group_id.in_(groups)))
         mine = (db.session.query(Memory).filter(Memory.scope == "user", Memory.user_id == me,
                                                 Memory.status != "disabled").order_by(Memory.id.desc()).all())
-        team = (db.session.query(Memory).filter(Memory.scope == "team", Memory.status == "active")
+        team = (db.session.query(Memory).filter(shared, Memory.status == "active")      # (0.11.0) and the groups'
                 .order_by(Memory.id.desc()).limit(200).all())
-        proposed = (db.session.query(Memory).filter(Memory.scope == "team", Memory.status == "proposed",
+        proposed = (db.session.query(Memory).filter(shared, Memory.status == "proposed",
                                                     Memory.user_id == me).all())
         return _json({"mine": [self._memory_json(m, me) for m in mine],
                       "team": [self._memory_json(m, me) for m in team],
@@ -726,9 +769,21 @@ class ChatView(BaseView):
 
         n = self._note(note_id)
         body = _body()
+        changes = {k: v for k, v in body.items() if k in ("text", "title", "tags", "meeting_on", "scope")}
+        scope = changes.get("scope")
+        if scope is not None and scope != n.scope:      # (0.11.0) shared as when it is made: by a role that shares,
+            if scope in ("team", "group") and not _can_share():    # a group of the author's
+                return _json({"error": "your role (AI Viewer) writes notes for yourself only"}, 403)
+            if scope == "group":
+                try:
+                    group = N.group_of(body.get("group_id") or body.get("group"), g.user, admin=_is_admin())
+                except N.NoteError as ex:
+                    return _json({"error": str(ex)}, 400)
+                if group is None:
+                    return _json({"error": "a note for a group needs the group"}, 400)
+                n.group_id = group.id
         try:
-            N.update(n, {k: v for k, v in body.items() if k in ("text", "title", "tags", "meeting_on", "scope")},
-                     by=g.user.username)
+            N.update(n, changes, by=g.user.username)
         except N.NoteError as ex:
             return _json({"error": str(ex)}, 400)
         if "pinned" in body and _can_edit():               # pinned for everyone: an editor's
@@ -787,7 +842,7 @@ class ChatView(BaseView):
             abort(404)
         self._conversation(m.conversation_id)
         body = _body()
-        value = int(body.get("value") or 0)
+        value = _int(body.get("value"), 0)
         reason = " ".join(str(body.get("reason") or "").split())[:1000]
         if reason and value == -1 and m.feedback == -1:          # the reason of a Not helpful given before
             m.feedback_reason = reason
@@ -867,8 +922,8 @@ class ChatView(BaseView):
 def _page_args(default_size: int = 50) -> tuple[int, int]:
     """The page (from 0) and its size asked by a list of the pages."""
     try:
-        page = max(0, int(request.args.get("page") or 0))
-        size = min(200, max(5, int(request.args.get("size") or default_size)))
+        page = max(0, _int(request.args.get("page"), 0))
+        size = min(200, max(5, _int(request.args.get("size"), default_size)))
     except ValueError:
         page, size = 0, default_size
     return page, size
@@ -954,7 +1009,8 @@ class _RecipesMixin:
 
             try:
                 if status == "confirmed" and "query" in body and str(body["query"] or "").strip() != (r.query or "").strip():
-                    check_recipe_query(r, str(body["query"]))      # a changed query is confirmed only if it runs
+                    with _as_this_person():              # (0.11.0) a PromQL one too, not as the service user
+                        check_recipe_query(r, str(body["query"]))      # a changed query is confirmed only if it runs
                 edit_recipe(r, body.get("question"), body.get("query"), by=g.user.username, path=body.get("path"))
             except RecipeError as ex:
                 db.session.rollback()
@@ -992,7 +1048,8 @@ class _RecipesMixin:
             abort(404)
         query = str(_body().get("query") or r.query or "")
         try:
-            return _json(check_recipe_query(r, query))
+            with _as_this_person():                     # (0.11.0) with their own permissions, a PromQL one too
+                return _json(check_recipe_query(r, query))
         except RecipeError as ex:
             return _json({"error": str(ex)}, 400)
 
@@ -1052,7 +1109,7 @@ class KnowledgeView(_RecipesMixin, BaseView):
                     "link": link_of(r["ref"])} for r in found]
             return _json({"results": out, "total": len(out), "capped": len(out) >= SEARCH_ALL,
                           "read": correct(q)["changes"]})       # the words read otherwise (cached: no second look)
-        return _json({"results": search(q, k=min(int(request.args.get("k") or 12), 30), kinds=kinds),
+        return _json({"results": search(q, k=min(_int(request.args.get("k"), 12), 30), kinds=kinds),
                       "read": correct(q)["changes"]})
 
     @expose("/api/item", methods=("GET",))
@@ -1259,7 +1316,7 @@ class KnowledgeView(_RecipesMixin, BaseView):
 
         page, size = _page_args()
         total: dict[str, int] = {}
-        rows = changes(int(request.args.get("days") or 7), limit=size, offset=page * size, total=total)
+        rows = changes(_int(request.args.get("days"), 7), limit=size, offset=page * size, total=total)
         return _json({"changes": rows, "total": total.get("total", 0), "page": page, "size": size})
 
     @expose("/api/knowledge", methods=("GET",))
@@ -1284,11 +1341,13 @@ class KnowledgeView(_RecipesMixin, BaseView):
                             "fmt": e.fmt, "content": e.content or "", "updated_at": e.updated_at,
                             "by": "the agent" if e.updated_by == AGENT else (e.updated_by or e.created_by or "")})
         pieces = AdminView._doc_pieces()
+        rows = (db.session.query(Doc, sa.func.length(Doc.content), sa.func.substr(Doc.content, 1, 1500), _page_count())
+                .options(defer(Doc.content), defer(Doc.pages))      # (0.11.0) a wiki's text and pages never loaded
+                .filter(Doc.enabled.is_(True)).order_by(Doc.title).all())
         docs = [{"id": d.id, "title": d.title or d.url or f"document {d.id}", "kind": d.kind, "url": d.url,
-                 "category": d.category, "status": d.status, "pages": len(d.pages or []) or None,
-                 "chars": len(d.content or ""), "excerpt": (d.content or "")[:1500], "fetched_at": d.fetched_at,
-                 "pieces": pieces.get(d.id)}
-                for d in db.session.query(Doc).filter(Doc.enabled.is_(True)).order_by(Doc.title)]
+                 "category": d.category, "status": d.status, "pages": int(n_pages or 0) or None,
+                 "chars": int(chars or 0), "excerpt": head or "", "fetched_at": d.fetched_at, "pieces": pieces.get(d.id)}
+                for d, chars, head, n_pages in rows]
         team = [{"id": m.id, "kind": m.kind, "text": m.text, "category": m.category, "created_at": m.created_at}
                 for m in (db.session.query(Memory).filter(Memory.scope == "team", Memory.status == "active")
                           .order_by(Memory.created_at.desc()))]
@@ -1308,11 +1367,11 @@ class KnowledgeView(_RecipesMixin, BaseView):
 
         from supagent.models import Association, Message
 
-        try:
-            offset, limit = max(0, int(request.args.get("offset") or 0)), max(1, min(100, int(request.args.get("limit") or 25)))
-            only_db = int(request.args["database"]) if request.args.get("database") else None
-        except ValueError:
+        if any(request.args.get(k) not in (None, "") and _int(request.args.get(k), None) is None
+               for k in ("offset", "limit", "database")):
             return _json({"error": "offset, limit and database are numbers"}, 400)
+        offset, limit = max(0, _int(request.args.get("offset"), 0)), max(1, min(100, _int(request.args.get("limit"), 25)))
+        only_db = _int(request.args.get("database"), None)
         q = " ".join((request.args.get("q") or "").lower().split())
         dbs = _visible_databases()
         names = {i: n for i, n in db.session.query(Database.id, Database.database_name).filter(Database.id.in_(dbs or [-1]))}
@@ -1406,7 +1465,7 @@ class KnowledgeView(_RecipesMixin, BaseView):
         from supagent.models import KObject, Source
 
         try:
-            dbid = int(request.args.get("database") or 0)
+            dbid = _int(request.args.get("database"), 0)
         except ValueError:
             return _json({"error": "database is a number"}, 400)
         if dbid not in _visible_databases():
@@ -1699,7 +1758,7 @@ class KnowledgeView(_RecipesMixin, BaseView):
                 if not _can_delete():                     # an editor proposes it (the link stays until decided)
                     return _json({"error": "your role may not remove a link: propose its removal (AI Admin "
                                            "decides)"}, 403)
-                ok = sysmap.delete_interaction(int(body["remove_interaction"]))
+                ok = sysmap.delete_interaction(_int(body.get("remove_interaction"), 0))
                 touch()
                 db.session.commit()
                 return _json({"removed": ok})
@@ -1716,7 +1775,7 @@ class KnowledgeView(_RecipesMixin, BaseView):
                 db.session.commit()
                 return _json({"decided": ok})
             if isinstance(body.get("describe"), dict):
-                f = db.session.get(Facet, int(body["describe"].get("id") or 0))
+                f = db.session.get(Facet, _int((body.get("describe") or {}).get("id"), 0))
                 if f is None:
                     abort(404)
                 f.description = str(body["describe"].get("description") or "").strip()[:2000] or None
@@ -1750,7 +1809,7 @@ class KnowledgeView(_RecipesMixin, BaseView):
             if body.get("remove_value"):                      # a value taken off the map
                 if not _can_delete():
                     return _json({"error": "your role may not remove a value (Admin)"}, 403)
-                return _json(sysmap.remove_value(int(body["remove_value"]), g.user.username))
+                return _json(sysmap.remove_value(_int(body.get("remove_value"), 0), g.user.username))
             if isinstance(body.get("add_category"), dict):    # a category, a subcategory when inside another
                 x = body["add_category"]
                 return _json(sysmap.add_category(str(x.get("name") or ""), str(x.get("inside") or ""),
@@ -1789,8 +1848,13 @@ class KnowledgeView(_RecipesMixin, BaseView):
         except Exception:  # pylint: disable=broad-except   (the links are shown without it)
             db.session.rollback()
             log.warning("supagent: where a value is in the data: not read", exc_info=True)
-        return _json({"links": sysmap.links_of_value(int(fid)), "data": data, "can_edit": _can_edit(),
-                      "can_delete": _can_delete()})
+        links = sysmap.links_of_value(int(fid))
+        if not _can_edit():                             # (0.11.0) a viewer: the parts their map shows, or found
+            visible = {v["id"] for v in sysmap.map_data(False).get("values") or []}   # in the data they may query
+            if int(fid) not in visible and not data:
+                abort(404)
+            links = [x for x in links if (x.get("other") or {}).get("id") in visible]
+        return _json({"links": links, "data": data, "can_edit": _can_edit(), "can_delete": _can_delete()})
 
     @expose("/api/map/export.pdf", methods=("POST",))
     @has_access_api
@@ -1913,7 +1977,7 @@ class AdminView(BaseView):
     # edit: the knowledge written (an editor's); delete: the knowledge deleted (an admin's)
     method_permission_name = {
         "index": "write", "get_settings": "write", "put_settings": "write", "test_llm": "write", "test_source": "write", "hosts_data": "write", "learn": "write",
-        "classify_now": "write", "backups": "write", "backup_file": "write", "backup_restore": "write",
+        "classify_now": "write", "backups": "write", "backup_file": "write", "backup_restore": "write", "backup_upload": "write",
         "stop_learning": "write", "runs": "write", "status": "write", "usage": "write", "usage_data": "write",
         "entries": "read", "entry_history": "read", "export_catalog": "read", "team_memory": "read", "docs": "read",
         "doc_pages": "read", "doc_page_remove": "delete", "doc_page_restore": "edit",
@@ -1937,8 +2001,8 @@ class AdminView(BaseView):
 
         from supagent.models import Memory
 
-        rows = (db.session.query(Memory).filter(Memory.scope == "team").order_by(Memory.status.desc(),
-                                                                                 Memory.id.desc()).limit(500).all())
+        rows = (db.session.query(Memory).filter(Memory.scope.in_(("team", "group")))    # (0.11.0) the groups' too
+                .order_by(Memory.status.desc(), Memory.id.desc()).limit(500).all())
         names: dict[int, str] = {}
         out = []
         # a memory "in the catalog": the entry that replaced it (the page opens it to edit it)
@@ -1952,7 +2016,7 @@ class AdminView(BaseView):
                 u = security_manager.get_user_by_id(m.user_id) if m.user_id else None
                 names[m.user_id] = u.username if u is not None else "?"
             out.append({"id": m.id, "text": m.text, "kind": m.kind, "category": m.category, "status": m.status,
-                        "source": m.source, "by": names[m.user_id], "created_at": m.created_at,
+                        "source": m.source, "by": names[m.user_id], "created_at": m.created_at, "scope": m.scope,
                         "approved_by": m.approved_by, "entry_id": entries.get(f"memory:{m.id}")})
         return _json({"memory": out})
 
@@ -1964,8 +2028,8 @@ class AdminView(BaseView):
         from supagent.models import Memory
 
         m = db.session.get(Memory, mem_id)
-        if m is None:
-            abort(404)
+        if m is None or (m.scope == "user" and m.user_id != g.user.id and not _is_admin()):
+            abort(404)                                  # (0.11.0) a person's own memory: theirs and an admin's
         body = _body()
         status = body.get("status")
         if status in ("active", "disabled", "proposed"):
@@ -1984,16 +2048,20 @@ class AdminView(BaseView):
 
     # ---- documents and sites
     @staticmethod
-    def _doc_json(d: Any, pieces: dict[int, int] | None = None, chars: int | None = None) -> dict:
+    def _doc_json(d: Any, pieces: dict[int, int] | None = None, chars: int | None = None,
+                  page_count: int | None = None) -> dict:
         """A document for the page: never its secret (describe_auth says whether one is set). (0.10.12) Its pages
-        listed when they are few (a wiki of thousands: their number; the list of its pages is its own page)."""
+        listed when they are few (a wiki of thousands: their number; the list of its pages is its own page; (0.11.0)
+        counted by the database when `page_count` is given, the list then read only when it is short)."""
         from supagent.knowledge.docs import describe_auth, read_log, reader_of
 
         last = read_log(d.id) if d.kind == "url" else {}
-        pages = d.pages or []
+        if page_count is None:
+            page_count = len(d.pages or [])
+        pages = (d.pages or []) if page_count <= DOC_PAGES_LISTED else []
         return {"id": d.id, "kind": d.kind, "title": d.title, "url": d.url, "category": d.category,
-                "pages": [{k: p.get(k) for k in ("url", "title", "chars")} for p in pages] if len(pages) <= DOC_PAGES_LISTED
-                else [], "page_count": len(pages),
+                "pages": [{k: p.get(k) for k in ("url", "title", "chars")} for p in pages if isinstance(p, dict)],
+                "page_count": page_count,
                 "chars": chars if chars is not None else len(d.content or ""), "max_pages": d.max_pages,
                 "refresh_days": d.refresh_days, "enabled": d.enabled, "status": d.status, "error": d.error,
                 "fetched_at": d.fetched_at, "created_by": d.created_by, "reader": d.reader or "",
@@ -2010,10 +2078,15 @@ class AdminView(BaseView):
         from supagent.models import Chunk
 
         out: dict[int, int] = {}
-        for (ref,) in db.session.query(Chunk.ref).filter(Chunk.kind == "doc"):
-            ident = ref.split(":", 1)[1].split("#", 1)[0]
+        if db.engine.dialect.name == "postgresql":     # (0.11.0) counted by the database: a wiki's 500,000 pieces
+            head = sa.func.split_part(Chunk.ref, "#", 1)   # were read one by one
+        else:
+            head = sa.case((sa.func.instr(Chunk.ref, "#") > 0, sa.func.substr(Chunk.ref, 1, sa.func.instr(Chunk.ref, "#") - 1)),
+                           else_=Chunk.ref)
+        for ref, n in db.session.query(head, sa.func.count()).filter(Chunk.kind == "doc").group_by(head):
+            ident = str(ref or "").split(":", 1)[-1]
             if ident.isdigit():
-                out[int(ident)] = out.get(int(ident), 0) + 1
+                out[int(ident)] = out.get(int(ident), 0) + int(n or 0)
         return out
 
     @expose("/api/docs", methods=("GET",))
@@ -2024,9 +2097,10 @@ class AdminView(BaseView):
         from supagent.models import Doc
 
         pieces = self._doc_pieces()
-        rows = (db.session.query(Doc, sa.func.length(Doc.content)).options(defer(Doc.content))   # (0.10.12) a wiki's
-                .order_by(Doc.id.desc()).all())                                                 # text never loaded
-        return _json({"docs": [self._doc_json(d, pieces, int(n or 0)) for d, n in rows]})
+        rows = (db.session.query(Doc, sa.func.length(Doc.content), _page_count())                 # (0.10.12) a wiki's
+                .options(defer(Doc.content), defer(Doc.pages)).order_by(Doc.id.desc()).all())    # text, (0.11.0) and its
+        return _json({"docs": [self._doc_json(d, pieces, int(n or 0), int(k or 0)) for d, n, k in rows]})   # pages'
+        #                                                                                       list when it is long
 
     @expose("/api/docs", methods=("POST",))
     @has_access_api
@@ -2039,8 +2113,8 @@ class AdminView(BaseView):
         body = _body()
         kind = "url" if body.get("url") else "upload"
         d = Doc(kind=kind, title=(str(body.get("title") or "").strip() or None), category=body.get("category"),
-                created_by=g.user.username, max_pages=max(1, min(int(body.get("max_pages") or 1), MAX_DOC_PAGES)),
-                refresh_days=max(1, int(body.get("refresh_days") or 7)))
+                created_by=g.user.username, max_pages=max(1, min(_int(body.get("max_pages"), 1), MAX_DOC_PAGES)),
+                refresh_days=max(1, _int(body.get("refresh_days"), 7)))
         if kind == "url":
             from supagent.knowledge.docs import configure
 
@@ -2097,9 +2171,9 @@ class AdminView(BaseView):
             if "category" in body:
                 d.category = str(body.get("category") or "").strip()[:128] or None
             if "max_pages" in body:
-                d.max_pages = max(1, min(int(body.get("max_pages") or 1), MAX_DOC_PAGES))
+                d.max_pages = max(1, min(_int(body.get("max_pages"), 1), MAX_DOC_PAGES))
             if "refresh_days" in body:
-                d.refresh_days = max(1, int(body.get("refresh_days") or 7))
+                d.refresh_days = max(1, _int(body.get("refresh_days"), 7))
             if "enabled" in body:
                 d.enabled = bool(body.get("enabled"))
             if d.kind == "url":
@@ -2371,7 +2445,8 @@ class AdminView(BaseView):
             start = end - dt.timedelta(days=1)
         grain = request.args.get("grain") or ("day" if end - start > dt.timedelta(days=3) else "hour")
         tz = request.args.get("tz", type=int) or 0
-        return _json(report(start, end, grain, tz_offset_minutes=max(-900, min(900, tz))))
+        return _json(report(start, end, grain, tz_offset_minutes=max(-900, min(900, tz)),
+                            tz_name=request.args.get("tzname") or None))
 
     @expose("/api/hosts", methods=("GET",))
     @has_access_api
@@ -2396,6 +2471,8 @@ class AdminView(BaseView):
         from supagent import settings
 
         body = _body().get("settings") or {}
+        if not isinstance(body, dict):                  # (0.11.0) {"settings": {key: value}} only
+            return _json({"error": "settings: an object of setting: value"}, 400)
         errors, saved = {}, []
         for key, value in body.items():
             spec = settings.BY_KEY.get(key)
@@ -2502,6 +2579,25 @@ class AdminView(BaseView):
             return _json({"backups": [], "directory": backup.directory(), "error": str(ex)[:300], "parts": list(backup.PARTS)})
         return _json({"backups": files, "directory": backup.directory(), "parts": list(backup.PARTS)})
 
+    @expose("/api/backups/upload", methods=("POST",))
+    @has_access_api
+    def backup_upload(self) -> Response:
+        """(0.11.0) A backup file brought from elsewhere (multipart, field "file"): kept in the directory as
+        supagent-knowledge-<now>-uploaded.zip when it is a backup this version can restore; then restored like the
+        others (Restore)."""
+        from supagent.knowledge import backup
+
+        f = request.files.get("file")
+        if f is None or not f.filename:
+            return _json({"error": "no file sent (field \"file\")"}, 400)
+        try:
+            saved = backup.save_upload(f.stream, f.filename)
+        except ValueError as ex:
+            return _json({"error": str(ex)[:300]}, 400)
+        except OSError as ex:
+            return _json({"error": f"the file could not be written in {backup.directory()}: {str(ex)[:200]}"}, 500)
+        return _json({"saved": saved})
+
     @expose("/api/backups/<name>", methods=("GET",))
     @has_access_api
     def backup_file(self, name: str) -> Any:
@@ -2545,8 +2641,17 @@ class AdminView(BaseView):
     def stop_learning(self) -> Response:
         """Stop the running learning run, at once: it keeps what it learned, and a new run can
         start right away (the request or LLM call in progress ends in the background)."""
-        from supagent.knowledge.stopping import request_stop
+        from superset import db
 
+        from supagent.knowledge.learner import KINDS
+        from supagent.knowledge.stopping import request_stop
+        from supagent.models import Run
+
+        going = (db.session.query(Run).filter(Run.kind.in_(KINDS), Run.status.in_(("running", "stopping")))
+                 .order_by(Run.id.desc()).first())
+        if going is not None and going.kind in ("backup", "restore"):     # (0.11.0) they never look for a stop:
+            return _json({"error": f"a {going.kind} cannot be stopped: it ends by itself (a few minutes); "
+                                   "a restore can be undone with the backup it made first"}, 409)   # said so
         run_id = request_stop()
         if run_id is None:
             return _json({"error": "no learning run is running"}, 409)
@@ -2685,6 +2790,8 @@ class AdminView(BaseView):
         from supagent.knowledge.curated import catalog_texts
 
         body = _body()
+        if body.get("mode") == "replace" and not _can_delete():   # (0.11.0) it deletes the entries the file lacks
+            return _json({"error": "your role may not delete catalog entries: import without replacing"}, 403)
         before = catalog_texts()
         try:
             counts = import_catalog(str(body.get("content") or ""), by=g.user.username,
@@ -2711,7 +2818,7 @@ class AdminView(BaseView):
         from supagent.governed.gate import CONFIRMED
         from supagent.models import Facet, Link, Memory, Recipe, Route, Tag
 
-        limit = min(max(int(request.args.get("limit", 50)), 1), 500)
+        limit = min(max(_int(request.args.get("limit"), 50), 1), 500)
         # (0.10.1) a filter: a part, a repository, a document, a word: what the proposals name or where they were read
         q = " ".join(str(request.args.get("q") or "").split())[:200]
         like = f"%{q}%" if q else None
@@ -2722,7 +2829,7 @@ class AdminView(BaseView):
             hit_refs = [f"facet:{i}" for (i,) in db.session.query(Facet.id).filter(
                 or_(Facet.value.ilike(like), Facet.description.ilike(like),
                     _sa.cast(Facet.synonyms, _sa.String).ilike(like)))]
-        mem_q = db.session.query(Memory).filter(Memory.scope == "team", Memory.status == "proposed")
+        mem_q = db.session.query(Memory).filter(Memory.scope.in_(("team", "group")), Memory.status == "proposed")
         if like:
             mem_q = mem_q.filter(Memory.text.ilike(like))
         memories = [{"id": m.id, "text": m.text, "kind": m.kind, "category": m.category, "source": m.source,
@@ -2907,7 +3014,7 @@ class AdminView(BaseView):
 
         from supagent.knowledge.datafields import decide
 
-        body = request.get_json(silent=True) or {}
+        body = _body()                                  # (0.11.0) a body that is no object: as an empty one
         read = bool(body.get("read"))
         if read and not _is_admin():
             return _json({"error": "your role may not change where a category is read from (Admin)"}, 403)
@@ -2923,7 +3030,7 @@ class AdminView(BaseView):
         """(0.10.2) A warning of what would confuse the agent or the search, set aside by an approver."""
         from supagent.knowledge.lint import dismiss
 
-        key = str((request.get_json(silent=True) or {}).get("key") or "").strip()
+        key = str(_body().get("key") or "").strip()
         if not key:
             return _json({"error": "no key"}, 400)
         dismiss(key)
@@ -2961,7 +3068,7 @@ class AdminView(BaseView):
                 found.append((i, c, v, status))
             found.sort(key=lambda r: (bool(text) and not r[2].lower().startswith(text), place[r[1]], r[2].lower()))
             try:
-                limit = min(max(int(request.args.get("limit") or BRIEF_VALUES), 1), BRIEF_VALUES)
+                limit = min(max(_int(request.args.get("limit"), BRIEF_VALUES), 1), BRIEF_VALUES)
             except ValueError:
                 limit = BRIEF_VALUES
             return _json({"facets": [{"id": i, "facet": c, "value": v, "status": st} for i, c, v, st in found[:limit]],
@@ -3014,7 +3121,8 @@ class AdminView(BaseView):
             return _json({"error": "choose the category: " + ", ".join(editable())}, 400)
         if not value:
             return _json({"error": "write the value"}, 400)
-        f = db.session.query(Facet).filter(Facet.facet == facet, Facet.value.ilike(value)).first()
+        f = (db.session.query(Facet).filter(Facet.facet == facet, sa.func.lower(Facet.value) == sa.func.lower(value))
+             .first())                                  # (0.11.0) the same name, not a pattern ("db_01" is no "db101")
         if f is not None and f.status != "rejected":
             return _json({"error": f'"{f.value}" is already a value of this category', "id": f.id}, 409)
         if f is None:
@@ -3101,7 +3209,7 @@ class AdminView(BaseView):
         removed = None
         if request.method == "POST":
             if not _can_edit():
-                abort(403)
+                return _json({"error": "your role may not change the categories"}, 403)
             body = _body()
             name = " ".join(str(body.get("name") or "").lower().split())
             if not NAME_OK.match(name) or name == "aspect":
@@ -3185,7 +3293,7 @@ class AdminView(BaseView):
             db.session.commit()
             return _json({"id": f.id, "status": status})
         if body.get("merge_into"):
-            to = db.session.get(Facet, int(body["merge_into"]))
+            to = db.session.get(Facet, _int(body.get("merge_into"), 0))
             if to is None or to.facet != f.facet or to.id == f.id:
                 return _json({"error": "merge into another value of the same category"}, 400)
             merge_value(f, to)
@@ -3209,8 +3317,12 @@ class AdminView(BaseView):
                                    + ", ".join(editable())}, 400)
         name = " ".join(str(body.get("value") or "").split())[:128] or f.value
         if new_facet != f.facet or name.lower() != f.value.lower():
-            there = (db.session.query(Facet).filter(Facet.facet == new_facet, Facet.value.ilike(name),
-                                                    Facet.id != f.id).first())
+            there = (db.session.query(Facet).filter(Facet.facet == new_facet,
+                                                    sa.func.lower(Facet.value) == sa.func.lower(name),   # (0.11.0) not a
+                                                    Facet.id != f.id).first())                  # pattern
+            if there is not None and there.status != "rejected" and not _can_delete():
+                return _json({"error": f'"{there.value}" exists already: merging into it takes a role that may '
+                                       "delete"}, 403)          # (0.11.0) as merge_into
             if there is not None:                    # that value exists there already: one value, its items together
                 if there.status == "rejected":
                     there.status = f.status
@@ -3315,6 +3427,8 @@ class AdminView(BaseView):
         if x is None:
             abort(404)
         body = _body()
+        if x.status == "approved" and body.get("status") == "rejected" and not _can_delete():
+            return _json({"error": "your role may not remove an approved link"}, 403)   # (0.11.0) a removal
         edited = False
         if body.get("kind") or body.get("reverse"):    # (0.10.6) corrected in To review: its kind, its direction
             from supagent.knowledge.sysmap import INTERACTIONS
@@ -3327,6 +3441,7 @@ class AdminView(BaseView):
                                                 Link.id != x.id).first() is not None:
                 return _json({"error": "this link is on the map already (or was rejected): reject this one"}, 409)
             x.kind, x.a_ref, x.b_ref = kind, a_ref, b_ref
+            x.explained_by = g.user.username            # (0.11.0) a person's correction: the learning keeps it
             edited = True
         if "note" in body or "detail" in body:          # the explanations, corrected by the admin who approves
             for key, size in (("note", 500), ("detail", 2000)):

@@ -123,11 +123,11 @@
     box.innerHTML = "";
     var t = document.getElementById("welcome").content.cloneNode(true);
     t.querySelectorAll(".chip").forEach(function (b) {
-      b.addEventListener("click", function () { input.value = b.textContent; submit(); });
+      b.addEventListener("click", function () { askThis(b.textContent); });
     });
     box.appendChild(t);
     markList();
-    input.focus();
+    focusInput();
   }
 
   // focus: a message to show (a chat found by the search), else the end of the conversation
@@ -511,7 +511,7 @@
         el("div", { class: "bubble", text: m.content }),
         el("div", { class: "stamp", text: "Asked " + S.whenFull(m.created_at || new Date()) }),
         el("div", { class: "tools" }, [copyButton("Copy", function () { return m.content; }, "Question"),
-          el("button", { type: "button", class: "linkish", text: "Ask again", onclick: function () { input.value = m.content; submit(); } })])
+          el("button", { type: "button", class: "linkish", text: "Ask again", onclick: function () { askThis(m.content); } })])
       ]);
     }
     var node = el("div", { class: "msg assistant" + (m.status === "error" ? " error" : ""), "data-id": m.id,
@@ -572,7 +572,7 @@
     if (m.status === "done") meta.appendChild(feedbackView(m));
     if (m.status === "error" || m.status === "cancelled") {
       meta.appendChild(el("button", { type: "button", class: "linkish", text: "Ask again", onclick: function () {
-        if (node._question) { input.value = node._question; submit(); }
+        if (node._question) askThis(node._question);
       } }));
     }
     if (m.finished_at) {
@@ -634,7 +634,7 @@
         polling = setTimeout(function () { poll(id); }, 1500);
       } else {
         busy(null);
-        input.focus();
+        focusInput();
         /* the agent names the chat after its first answer (a short generic title): show it */
         [6000, 20000].forEach(function (ms) { setTimeout(function () { loadConversations(null).then(markList); }, ms); });
       }
@@ -643,6 +643,20 @@
 
   function scrollDown() { box.scrollTop = box.scrollHeight; }
 
+  /* (0.11.0) the question box takes the focus only when this page has it: docked on Superset's pages (a frame of the
+     same site), a focus() here would take the keyboard from the page being typed in (SQL Lab: Enter would send it) */
+  function focusInput() { if (document.hasFocus()) input.focus(); }
+
+  /* (0.11.0) a question asked by a click (a suggestion, Ask again): never while one is on its way (a double click asks
+     once), never while an answer is written (Send is Stop then: it would stop that answer), said so */
+  function askThis(text) {
+    if (sending) return;
+    if (running) { toast("An answer is being written: wait for it, or press Stop first"); return; }
+    input.value = text;
+    submit();
+  }
+
+  var sending = false;                    // (0.11.0) a question or a /note on its way: Enter, a click, a chip again do nothing
   function submit() {
     if (running) {                        // the button says Stop
       var stopping = running;
@@ -651,6 +665,7 @@
       });
       return;
     }
+    if (sending) return;
     var q = input.value.trim();
     if (!q) return;
     var cmd = /^\s*\/(note|mynote)\b[ \t]*:?\s*/i.exec(q);     // "/note ..." (team), "/mynote ..." (me): saved, no LLM
@@ -658,19 +673,23 @@
       var noteText = q.slice(cmd[0].length).trim(), scope = cmd[1].toLowerCase() === "mynote" ? "user" : "team";
       if (!noteText) { openNotes(); return; }
       send.disabled = true;
+      sending = true;
       S.chat("POST", "notes", { text: noteText, scope: scope, source: "command" }).then(function (r) {
         send.disabled = false;
+        sending = false;
         var said = r.error ? r.error : (scope === "team" ? "Note saved for the team" : "Note saved for you") +
           ": \u201c" + (r.note.title || "") + "\u201d (Notes, on the left)";
         box.appendChild(el("div", { class: "msg assistant notice" + (r.error ? " error" : "") }, [el("div", { class: "bubble", text: said })]));
         scrollDown();
         if (!r.error) input.value = "";
-      });
+      }, function () { send.disabled = false; sending = false; });
       return;
     }
     send.disabled = true;
+    sending = true;
     S.chat("POST", "ask", { question: q, conversation_id: current }).then(function (r) {
       send.disabled = false;
+      sending = false;
       if (r.error) {
         box.appendChild(el("div", { class: "msg assistant error" }, [el("div", { class: "bubble", text: r.error })]));
         scrollDown();
@@ -688,15 +707,16 @@
       box.appendChild(render({ id: r.message_id, role: "assistant", status: "pending", steps: [] }, qm));
       scrollDown();
       poll(r.message_id);
-    });
+    }, function () { send.disabled = false; sending = false; });    // (0.11.0) an answer cut on the way: Send again
   }
 
   // ---------------------------------------------------------------- memory
-  function memoryItem(m, canDelete) {
+  /* canEdit: Edit; canForget: Forget (0.11.0: a team's memory is forgotten by an AI Admin only, as the server allows) */
+  function memoryItem(m, canEdit, canForget) {
     var text = el("span", { class: "memory-text", text: m.text });
     var li = el("li", {}, [text,
       el("span", { class: "muted", text: " \u00b7 " + m.kind + (m.category ? ", " + m.category : "") + (m.source === "chat" ? " \u00b7 learned from a chat" : "") })]);
-    if (canDelete) {           /* (0.10.9.1) edited in place: the text as written, its kind */
+    if (canEdit) {             /* (0.10.9.1) edited in place: the text as written, its kind */
       li.appendChild(el("button", { class: "link", type: "button", text: "Edit", onclick: function () {
         var box = el("textarea", { class: "memory-edit", rows: Math.min(12, Math.max(2, (m.text || "").split("\n").length + 1)) });
         box.value = m.text || "";
@@ -717,7 +737,7 @@
         box.focus();
       } }));
     }
-    if (canDelete) {
+    if (canForget) {
       li.appendChild(S.sureButton("Forget", function () { S.chat("DELETE", "memory/" + m.id).then(loadMemory); }, {
         ask: "Forget this?", yes: "Forget", detail: m.scope === "team" ? "The team's agent no longer uses it." :
           "The agent no longer uses it in your answers." }));
@@ -729,16 +749,17 @@
       var mine = document.getElementById("memory-mine"), team = document.getElementById("memory-team"),
           prop = document.getElementById("memory-proposed");
       mine.innerHTML = ""; team.innerHTML = ""; prop.innerHTML = "";
-      (d.mine || []).forEach(function (m) { mine.appendChild(memoryItem(m, true)); });
-      (d.team || []).forEach(function (m) { team.appendChild(memoryItem(m, d.is_admin)); });
-      (d.proposed || []).forEach(function (m) { prop.appendChild(memoryItem(m, true)); });
+      (d.mine || []).forEach(function (m) { mine.appendChild(memoryItem(m, true, true)); });
+      (d.team || []).forEach(function (m) { team.appendChild(memoryItem(m, d.is_admin, d.is_admin && S.canDelete)); });
+      (d.proposed || []).forEach(function (m) { prop.appendChild(memoryItem(m, true, true)); });
       if (!(d.mine || []).length) mine.appendChild(el("li", { class: "muted", text: "Nothing yet." }));
       if (!(d.team || []).length) team.appendChild(el("li", { class: "muted", text: "Nothing yet." }));
       document.getElementById("memory-proposed-box").hidden = !(d.proposed || []).length;
     });
   }
   document.getElementById("open-memory").addEventListener("click", function () {
-    forWhom("memory-scope", "For the team (after an admin's approval)");
+    // (0.11.0) an editor's team memory is approved at once: no approval to wait for
+    forWhom("memory-scope", S.canEdit ? "For the team" : "For the team (after an admin's approval)");
     document.getElementById("memory-drawer").hidden = false;
     loadMemory();
   });
@@ -770,8 +791,8 @@
     var li = el("li", { class: n.pinned ? "pinned" : "" }, [el("div", { class: "note-title", text: n.title || "Note" }),
       el("div", { class: "note-meta", text: meta.join(" \u00b7 ") }), body]);
     var acts = el("div", { class: "note-acts" });
-    if (n.can_change) {
-      acts.appendChild(el("button", { type: "button", class: "linkish", text: "Edit", onclick: function () { editNote(li, n); } }));
+    if (n.can_change) acts.appendChild(el("button", { type: "button", class: "linkish", text: "Edit", onclick: function () { editNote(li, n); } }));
+    if (n.can_change && (n.mine || S.canDelete)) {      // (0.11.0) another's note: deleted by an AI Admin only (as the server)
       acts.appendChild(S.sureButton("Delete", function () { S.chat("DELETE", "notes/" + n.id).then(function () { loadNotes(true); }); }, {
         ask: "Delete the note \u201c" + (n.title || "Note") + "\u201d?", detail: "It cannot be restored." }));
     }

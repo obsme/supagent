@@ -63,9 +63,10 @@ ABOUT: dict[str, str] = {
     "piece_chars": "Characters of each piece of that knowledge",
     "context_chars": "Characters of each section of the learned Context given with the question (the small model: "
                      "its part about the question; the big one: the section, up to this size)",
-    "llm_context_chars": "Characters of the LLM context the learning writes, given with every question (the big "
-                         "model: its full version; the small one: its light version, only when agent.llm_context "
-                         "is set on)",
+    "llm_context_chars": "Characters, at most, of the LLM context the learning writes given with a question (the big "
+                         "model: from its full version; the small one: from its light version, only when "
+                         "agent.llm_context is set on). (0.11.0) Only its lines about the question, in the room the "
+                         "chat leaves: never the whole page",
     "tool_chars": "Characters of a tool's result (a query's rows, a search's findings)",
     "describe_chars": "Characters of a description of the data (describe_data)",
     "compare_chars": "Characters of a comparison of groups (compare_groups)",
@@ -209,6 +210,21 @@ def _fixed_chars() -> int:
         return len(text) + len(json.dumps(specs, default=str))
     except Exception:  # pylint: disable=broad-except
         return 0
+
+
+SHORT_ASSUMED = 65_536     # (0.11.0) the window of a short profile whose server states none: the one its sizes were
+#                            measured with (a smaller model says its window, or agent.context_tokens says it)
+
+
+def start_room() -> int:
+    """(0.11.0) Characters the start of an answer may take (the instructions and the tools, what the team keeps, the
+    chat, the documentation): START_SHARE of the model's window, about CHARS_PER_TOKEN characters a token (a window
+    not stated: the long profile's assumed one, the short profile's 64k). The chat is fitted in it after what
+    the team keeps (knowledge.contextplan)."""
+    w = window()
+    if not w:
+        w = long_assumed() if profile() == "long" else SHORT_ASSUMED
+    return int(START_SHARE * w * CHARS_PER_TOKEN)
 
 
 def estimate(prof: str, w: int | None) -> dict[str, Any]:

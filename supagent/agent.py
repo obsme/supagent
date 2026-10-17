@@ -2766,6 +2766,21 @@ SQL_BLOCK = re.compile(r"```(?:sql)?[ \t]*\n\s*((?:WITH|SELECT)\b.*?)```", re.I 
 TEMPLATE = re.compile(r"<[a-z][\w ]{0,30}>|\{\w+\}|:\w+\b|\?\s*(?:,|\)|$)", re.I)    # a template, not a run
 
 
+def _distinct_recipes(recipes: list[dict]) -> list[dict]:
+    """(0.11.0) The learned answers given, one per way: a later one with the same tool, database and query (case and
+    spaces aside) is a copy of an earlier one; the same query on another database is not."""
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    for r in recipes:
+        q = " ".join(str(r.get("query") or "").lower().split())
+        key = (r.get("tool"), r.get("database_id"), q)
+        if q and key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
 def _setting_on(key: str) -> bool:
     """A check's setting, on when it cannot be read (no app: a check called outside a request)."""
     try:
@@ -3353,6 +3368,16 @@ def honesty_note(answer: str, trace: list[dict]) -> str:
 
 
 RULES_GIVEN = 30         # the team's rules in the instructions (the next ones are found by the search)
+LLM_CONTEXT_HEAD = ("\n\nWhat the team's knowledge says (the LLM context the learning wrote, given with every "
+                    "question; the team's rules are above). Use it to know the data and the words; describe_data "
+                    "gives the fields. It holds no answer: a figure, a list, or what a given record is or has (whose, "
+                    "which one, where, when) always comes from a query run for this question, never from this text "
+                    "nor from a list of values given before:\n")
+LLM_EXCERPT_HEAD = ("\n\nWhat the team's knowledge says about this question (the lines of the LLM context the learning "
+                    "wrote that name what it asks; the team's rules are in the instructions). Use it to know the data "
+                    "and the words; describe_data gives the fields. It holds no answer: a figure, a list, or what a "
+                    "given record is or has (whose, which one, where, when) always comes from a query run for this "
+                    "question, never from this text nor from a list of values given before:\n")
 RULES_NEAR_CHARS = 1500  # the rules given again next to the question, in full, up to this size
 RULE_CHARS = 1500        # of each (a longer rule: its parts are also found by the search)
 
@@ -3581,6 +3606,8 @@ class Agent:
                 text += "\n- " + rule_line(r)
                 if shown is not None and len(r["text"]) <= room("rule_chars"):
                     shown.add(f"entry:{r['id']}")
+        if _setting_on("agent.context_tiers"):      # (0.11.0) its lines about the question go with the question
+            return text
         try:                                         # (0.10.9.1) the LLM context the learning writes: given always
             from supagent.knowledge.llm_context import for_prompt
 
@@ -3589,11 +3616,7 @@ class Agent:
             log.warning("supagent: the LLM context: not given", exc_info=True)
             known = ""
         if known:
-            text += ("\n\nWhat the team's knowledge says (the LLM context the learning wrote, given with every "
-                     "question; the team's rules are above). Use it to know the data and the words; describe_data "
-                     "gives the fields. It holds no answer: a figure, a list, or what a given record is or has (whose, "
-                     "which one, where, when) always comes from a query run for this question, never from this text "
-                     "nor from a list of values given before:\n" + known)
+            text += LLM_CONTEXT_HEAD + known
         return text
 
     def _rules_reminder(self) -> str:
@@ -3614,21 +3637,30 @@ class Agent:
         return ("\n\nApply the team's rules of the instructions to every query of this answer (they win over the "
                 "learned answers below).")
 
-    def _question_blocks(self, question: str, shown: set[str] | None = None) -> str:
+    def _question_blocks(self, question: str, shown: set[str] | None = None,
+                         between: Callable[[int], int] | None = None) -> str:
         """What is found for this question and this user, given with the question: their memories,
         the team's words (glossary), where the data is, the knowledge that matches, the learned
         answers. Nothing twice: the knowledge found leaves out what the instructions (`shown`) and
-        the other blocks give."""
+        the other blocks give. (0.11.0, agent.context_tiers) In tiers: what the team keeps first (the
+        memories, the rules, the team's words, where the data is, the learned answers), each said once;
+        `between` is then given the characters they take (the chat is fitted in what they leave) and
+        gives the room left for the documentation: the knowledge found and the LLM context's lines
+        about the question."""
         shown = set() if shown is None else shown
+        tiers = _setting_on("agent.context_tiers")
+        between = between or getattr(self, "_between", None)
         text = ""
         self.memory_over = 0
+        self.llm_excerpt, self.llm_full = "", ""
+        said = self._rule_texts() if tiers else []      # given already: a memory saying one is not given again
         try:
             from flask import g
 
             from supagent.knowledge.memory import prompt_block
 
             remembered = prompt_block(getattr(getattr(g, "user", None), "id", None), shown,
-                                      getattr(self, "said_in_chat", None))
+                                      getattr(self, "said_in_chat", None), said=said if tiers else None)
             text += remembered
             self.memory_over = max(0, len(remembered) - room("memory_chars"))   # (0.10.9.1) memories first: what
             #                                                                   they take beyond their room, the
@@ -3670,10 +3702,19 @@ class Agent:
                 recipes = recipes[:3]
         except Exception:  # pylint: disable=broad-except
             recipes = []
+        if tiers:                                        # (0.11.0) one way per query: a copy of a way given
+            recipes = _distinct_recipes(recipes)
         shown |= {f"recipe:{r['id']}" for r in recipes}
+        first = len(text) + sum(len(str(r.get("question") or "")) + min(len(str(r.get("query") or "")), 900) +
+                                min(len(str(r.get("brief") or "")), 900) + len(str(r.get("path") or "")) + 80
+                                for r in recipes)
+        docs_room = between(first) if (tiers and between is not None) else None
+        said += [str(r.get("question") or "") for r in recipes]
         if getattr(self, "understood", None) is not None:   # shown to the user with the answer's steps
             self.understood["similar"] = [{"question": str(r["question"])[:200], "status": r.get("status"),
                                            "uses": r.get("uses")} for r in recipes]
+        titles: set[str] = set()                         # (0.11.0) the titles the knowledge found gave
+        found_text = ""
         if settings.get("search.enabled"):
             try:
                 from supagent.knowledge.search import knowledge_block
@@ -3686,12 +3727,27 @@ class Agent:
                 ask = f"{base}\n{reading}" if reading else base      # the question it goes on from (its subject)
                 if getattr(self, "chat_values", None):   # (0.10.7) the values the follow-up's category stands for
                     ask += "\n" + " ".join(self.chat_values)
-                text += knowledge_block(ask, shown,
-                                        with_charts=bool(about & {"status", "read_charts", "charts"}),
-                                        prefer=ROUTE_KINDS.get(moa.route) if moa is not None and moa.active else None,
-                                        memory_over=getattr(self, "memory_over", 0))
+                found_text = knowledge_block(ask, shown,
+                                             with_charts=bool(about & {"status", "read_charts", "charts"}),
+                                             prefer=ROUTE_KINDS.get(moa.route) if moa is not None and moa.active
+                                             else None,
+                                             memory_over=getattr(self, "memory_over", 0),
+                                             team_texts=said if tiers else None,
+                                             titles=titles if tiers else None)
+                text += found_text
             except Exception:  # pylint: disable=broad-except
                 log.warning("supagent: knowledge found: not given", exc_info=True)
+        if tiers:                                       # (0.11.0) the LLM context's lines about the question, with
+            try:                                        # the search or without it
+                ask = getattr(self, "intent_text", None) or question
+                if reading:
+                    ask = f"{ask}\n{reading}"
+                if getattr(self, "chat_values", None):  # the values the follow-up's category stands for (as the search)
+                    ask += "\n" + " ".join(self.chat_values)
+                self._llm_excerpt(ask, shown, titles, None if docs_room is None else docs_room - len(found_text))
+                text += self.llm_excerpt
+            except Exception:  # pylint: disable=broad-except
+                log.warning("supagent: the LLM context's lines: not given", exc_info=True)
         if WHO_ASKED.search(question or ""):             # (0.10.7) who did it: where the part writes it, said first
             try:
                 from supagent.knowledge.brief import server_places
@@ -3730,6 +3786,43 @@ class Agent:
                 if r.get("path"):                        # the data it used and its steps (0.9)
                     text += f"\n  its path: {r['path']}"
         return text.strip()
+
+    def _rule_texts(self) -> list[str]:
+        """The team's rules the instructions give (their texts): what a memory or a piece found says again."""
+        try:
+            from supagent.knowledge.catalog import rules
+
+            return [str(r.get("text") or "") for r in rules()[:RULES_GIVEN]]
+        except Exception:  # pylint: disable=broad-except
+            return []
+
+    def _llm_excerpt(self, ask: str, shown: set[str], titles: set[str], left: int | None) -> None:
+        """(0.11.0) The LLM context's lines about the question (self.llm_excerpt, its head included), in what the chat
+        and the knowledge found leave (`left`; at most size("llm_context_chars")): the lines of a database the
+        question is about, and those naming what it asks; a line of an entry given already is left out. The whole
+        page stays the support of the query's conditions as before (self.llm_full: its formulas)."""
+        try:
+            from supagent.knowledge.contextplan import excerpt
+            from supagent.knowledge.llm_context import page_text
+
+            full = page_text()
+        except Exception:  # pylint: disable=broad-except   (the question is answered without it)
+            log.warning("supagent: the LLM context: not given", exc_info=True)
+            return
+        if not full:
+            return
+        self.llm_full = full
+        cap = room("llm_context_chars")
+        scope = getattr(self, "scope", None)
+        dbs = [scope.names.get(i, "") for i in (scope.named if scope is not None else {})]
+        ids = [int(i) for i in (r.split(":", 1)[1].split("#", 1)[0] for r in shown if r.startswith("entry:"))
+               if i.isdigit()]                          # (search refs read "entry:<id>#<piece>")
+        room_left = (min(cap, left) if left is not None else cap) - len(LLM_EXCERPT_HEAD)
+        if room_left <= 0:
+            return
+        lines = excerpt(full, ask, room_left, shown_titles=titles, shown_ids=ids, databases=dbs)
+        if lines:
+            self.llm_excerpt = LLM_EXCERPT_HEAD + lines
 
     def _call(self, name: str, args: dict) -> tuple[str, str]:
         """(tool really called, its result text)."""
@@ -3882,17 +3975,36 @@ class Agent:
         shown: set[str] = set()                          # given once: not again in the knowledge found
         messages: list[dict] = [{"role": "system", "content": self._system(question, shown)}]
         recent = (history or [])[-HISTORY_MESSAGES:]
-        for h in recent:
-            if h.get("content"):
-                messages.append({"role": h["role"], "content": str(h["content"])[:room("history_chars")]})
+        said_chat = recent                              # (0.11.0) what the user said in the chat, given or not
         lang = question_language(question)
         hint = f" {ANSWER_IN[lang]}" if lang else ""
         # (0.10.7) what the user said: the question, as understood, and the chat's messages (a memory that applies
         # "when the user says X" is given when they did)
         self.said_in_chat = " ".join([question, self.intent_text or ""] + [
             str(h.get("content") or "") for h in recent if h.get("role") == "user"])
+        given = recent
+
+        def chat_in(first: int) -> int:                 # (0.11.0) the chat in the room what the team keeps leaves;
+            nonlocal given                              # the room it leaves for the documentation
+            from supagent.budget import start_room
+            from supagent.knowledge.contextplan import fit_history
+
+            each = room("history_chars")
+            left = start_room() - len(messages[0]["content"]) - self._specs_chars(question) - first
+            given = fit_history(recent, max(0, left - room("search_chars")), each)
+            self.chat_left_out = len([h for h in recent if h.get("content")]) - len(given)
+            return max(room("search_chars"), left - sum(min(len(str(h["content"])), each) for h in given))
+
         # "create a chart of that finding": where the data is, from the question it refers to
-        blocks = self._question_blocks(self.intent_text, shown)
+        self._between = chat_in
+        try:
+            blocks = self._question_blocks(self.intent_text, shown)
+        finally:
+            self._between = None
+        recent = given
+        for h in recent:
+            if h.get("content"):
+                messages.append({"role": h["role"], "content": str(h["content"])[:room("history_chars")]})
         self.given_refs = set(shown)                    # what the prompt was given (the learned items' ranking)
         behind = queries_note(recent)                   # what "that finding" was computed from
         if behind:
@@ -3980,8 +4092,15 @@ class Agent:
             from supagent.knowledge.conditions import build
 
             people = [question, self.intent_text, getattr(self, "people_words", "")] + [
-                str(h.get("content") or "") for h in recent if h.get("role") == "user"]
-            self.support = build(messages, people)
+                str(h.get("content") or "") for h in said_chat if h.get("role") == "user"]
+            support = messages
+            if getattr(self, "llm_full", ""):           # (0.11.0) the LLM context counts as when it was given whole
+                last = messages[-1]["content"]          # (its formulas), whatever lines of it the question was given
+                if getattr(self, "llm_excerpt", ""):
+                    last = last.replace(self.llm_excerpt.strip(), "")
+                support = [messages[0], {"role": "system", "content": self.llm_full}] + messages[1:-1] + [
+                    {"role": "user", "content": last}]
+            self.support = build(support, people)
         except Exception:  # pylint: disable=broad-except
             log.warning("supagent: what was said: not read", exc_info=True)
             self.support = None
@@ -4015,9 +4134,23 @@ class Agent:
             return False
         return True
 
+    def _specs_chars(self, question: str = "") -> int:
+        """Characters of the tools' descriptions sent with this question's requests (the tools offered for it)."""
+        try:
+            specs = self._specs_for(question) if getattr(self, "specs", None) is not None else []
+            return len(json.dumps(specs, default=str))
+        except Exception:  # pylint: disable=broad-except   (a description that cannot be measured: counted as none)
+            return 0
+
     def _general_messages(self, question: str, history: list[dict] | None) -> list[dict]:
         messages: list[dict] = [{"role": "system", "content": GENERAL_SYSTEM}]
-        for h in (history or [])[-HISTORY_MESSAGES:]:
+        recent = (history or [])[-HISTORY_MESSAGES:]
+        if _setting_on("agent.context_tiers"):          # (0.11.0) the chat in the room the start of an answer has
+            from supagent.budget import start_room
+            from supagent.knowledge.contextplan import fit_history
+
+            recent = fit_history(recent, start_room() - len(GENERAL_SYSTEM), room("history_chars"))
+        for h in recent:
             if h.get("content"):
                 messages.append({"role": h["role"], "content": str(h["content"])[:room("history_chars")]})
         lang = question_language(question)

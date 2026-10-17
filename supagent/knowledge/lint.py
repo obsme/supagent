@@ -15,6 +15,10 @@ the approver can see and analyse, with a proposed solution"). Each check is dete
   shared_pages  documents holding the same pages (a wiki given as one document per space, read to the last page
                 its links lead to): every page cut and embedded again per document -> one document per wiki
   two_meanings  a glossary term defined twice, differently: the agent may count by either -> keep one definition
+  duplicates    (0.11.0) a memory, a catalog entry or a learned answer said twice (the same words, or one said whole
+                by the other: the agent is given it once, the rest is noise), or two alike that may repeat or
+                contradict each other (another unit, another value): -> remove the copy (one click), or keep one /
+                make each say when it applies
 
     superset supagent lint [--json]
 """
@@ -360,10 +364,144 @@ def two_meanings() -> list[dict[str, Any]]:
     return out
 
 
+DUP_ITEMS = 3000           # (0.11.0) memories, entries or learned answers compared at most per kind (the newest)
+DUP_CHARS = 4000           # an entry longer than this is a document: shared_pages and the Context say its copies
+DUP_SAID = 2               # pairs said per warning at most (the rest counted)
+
+
+def _pairs(items: list[tuple[str, str, str]]) -> list[tuple[str, str, str, str, str]]:
+    """(kind, ref a, text a, ref b, text b) of the copies (one says the other) and the alike pairs among `items`
+    (ref, text, group): compared within a group only, candidates by the words they share (no all-pairs pass)."""
+    from supagent.knowledge.contextplan import ALIKE, alike, says, words
+
+    index: dict[str, list[int]] = defaultdict(list)
+    sets = []
+    for i, (_ref, text, _g) in enumerate(items):
+        ws = set(words(text))
+        sets.append(ws)
+        for w in ws:
+            index[w].append(i)
+    out, seen = [], set()
+    for i, (ref, text, group) in enumerate(items):
+        if not sets[i]:
+            continue
+        shared: Counter = Counter()
+        for w in sets[i]:
+            if len(index[w]) <= 200:                  # a word in many items says nothing of a copy
+                shared.update(j for j in index[w] if j > i)
+        need = max(2, int(0.6 * len(sets[i])))
+        for j, n in shared.most_common(20):
+            if n < need or (i, j) in seen or not (items[j][2] == group or "memory:team" in (group, items[j][2])
+                                                   and group.startswith("memory:") and items[j][2].startswith("memory:")):
+                continue                                # one person's (or group's) own, and the team's against all
+            seen.add((i, j))
+            other = items[j][1]
+            if says(text, other) or says(other, text):
+                out.append(("copy", ref, text, items[j][0], other))
+            elif alike(text, other) >= ALIKE:
+                out.append(("alike", ref, text, items[j][0], other))
+    return out
+
+
+def duplicates() -> list[dict[str, Any]]:
+    """(0.11.0) What the team keeps said twice: memories (of one person, a group or the team), catalog entries (the
+    glossary has two_meanings), learned answers (the same query). A copy: removed in one click (the memory, the
+    learned answer) or disabled (the entry); alike: said with both texts, for a person to decide."""
+    from supagent.models import Entry, Memory, Recipe
+
+    out: list[dict[str, Any]] = []
+    mems = (db.session.query(Memory).filter(Memory.status == "active").order_by(Memory.id.desc())
+            .limit(DUP_ITEMS).all())
+    by_ref = {f"memory:{m.id}": m for m in mems}
+    items = [(f"memory:{m.id}", m.text or "", "memory:team" if m.scope == "team" else
+              f"memory:{m.scope}:{m.user_id if m.scope == 'user' else m.group_id or ''}") for m in mems]
+    entries = (db.session.query(Entry).filter(Entry.enabled.is_(True), Entry.classification != "glossary")
+               .order_by(Entry.id.desc()).limit(DUP_ITEMS).all())
+    by_ref.update({f"entry:{e.id}": e for e in entries})
+    items += [(f"entry:{e.id}", f"{e.title}: {e.content or ''}", f"entry:{e.classification}") for e in entries
+              if len(e.content or "") <= DUP_CHARS]
+
+    def name(ref: str) -> str:
+        x = by_ref.get(ref)
+        if ref.startswith("memory:"):
+            return f"the memory “{' '.join(str(getattr(x, 'text', '') or '').split())[:90]}”"
+        return f"the entry “{getattr(x, 'title', ref)}”"
+
+    def fix_of(ref: str) -> dict[str, Any]:
+        if ref.startswith("memory:"):
+            return {"label": f"Remove the copy ({name(ref)[:60]}…)", "memory": int(ref.split(':')[1])}
+        e = by_ref.get(ref)                           # the entry as it is: saved again disabled (its version kept)
+        return {"label": f"Disable the copy ({name(ref)[:60]}…)", "entry": int(ref.split(':')[1]),
+                "values": {"title": e.title, "classification": e.classification, "fmt": e.fmt, "content": e.content,
+                           "category": e.category, "version": e.version, "enabled": False}}
+
+    copies: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for kind, a, _ta, b, _tb in _pairs(items):
+        what = "memory" if a.startswith("memory:") else "entry"
+        if kind == "copy":
+            older, newer = sorted((a, b), key=lambda r: int(r.split(":")[1]))
+            copies[what].append((older, newer))
+            continue
+        out.append({"kind": "duplicates", "subject": "alike " + ("memories" if what == "memory" else "entries"),
+                    "refs": sorted([a, b]),
+                    "why": f"{name(a)} and {name(b)} are alike but not the same: the agent is given both and may "
+                           "follow either (another unit, another value, another case)",
+                    "fix": "Read both: keep one (remove or disable the other), or make each say when it applies"})
+    for what, pairs in copies.items():                # one warning per set of copies: the oldest kept, the others
+        top: dict[str, str] = {}                      # removed (or disabled)
+
+        def root(r: str) -> str:
+            while top.get(r, r) != r:
+                r = top[r]
+            return r
+
+        for a, b in pairs:
+            ra, rb = root(a), root(b)
+            if ra != rb:
+                keep_r, drop_r = sorted((ra, rb), key=lambda r: int(r.split(":")[1]))
+                top[drop_r] = keep_r
+        sets: dict[str, set[str]] = defaultdict(set)
+        for a, b in pairs:
+            sets[root(a)].update((a, b))
+        for kept, members in sets.items():
+            others = sorted(members - {kept}, key=lambda r: int(r.split(":")[1]))
+            out.append({"kind": "duplicates", "subject": f"{what} said {'twice' if len(others) == 1 else 'more than once'}",
+                        "refs": sorted(members),
+                        "why": (f"{name(others[0])} says what {name(kept)} says" if len(others) == 1 else
+                                f"{len(others)} copies of {name(kept)} (" + ", ".join(
+                                    "#" + r.split(":")[1] for r in others[:8]) + ") say what it says") +
+                               ": the agent is given it once, the "
+                               f"cop{'y is' if len(others) == 1 else 'ies are'} noise in the knowledge and the search",
+                        "fix": f"Remove the cop{'y' if len(others) == 1 else 'ies'}, keep {name(kept)}",
+                        "remove": [fix_of(r) for r in others[:10]]})
+    recipes = (db.session.query(Recipe).filter(Recipe.status.in_(("confirmed", "helpful")))
+               .order_by(Recipe.id.desc()).limit(DUP_ITEMS).all())
+    same_query: dict[tuple, list[Any]] = defaultdict(list)
+    for r in recipes:
+        q = " ".join(str(r.query or "").lower().split())
+        if q:
+            same_query[(r.database_id, q)].append(r)
+    rank = {"confirmed": 0, "helpful": 1}
+    for (_db, _q), rs in same_query.items():
+        if len(rs) < 2:
+            continue
+        rs.sort(key=lambda r: (rank.get(r.status, 2), -(r.uses or 0), r.id))
+        keep, extra = rs[0], rs[1:]
+        out.append({"kind": "duplicates", "subject": "learned answer said twice",
+                    "refs": sorted(f"recipe:{r.id}" for r in rs),
+                    "why": f"{len(rs)} learned answers run the same query (“{keep.question[:90]}” and "
+                           f"{_said([r.question[:60] for r in extra])}): the agent is given one, the others take "
+                           "its place among the similar questions",
+                    "fix": f"Remove the copies, keep “{keep.question[:90]}” ({keep.status}, used {keep.uses or 0} "
+                           "times)",
+                    "remove": [{"label": f"Remove the copy “{r.question[:60]}”", "recipe": r.id} for r in extra[:DUP_SAID]]})
+    return out
+
+
 # generic_name is not among them: measured on a lab's knowledge (7 October 2026, pre-registered) it was wrong on
 # most of its warnings there, all topics named by their own word ("monitoring", "jobs"): turned off until a version
 # measured on other material says otherwise
-CHECKS = (same_name, two_ways, loops, shared_pages, two_meanings)
+CHECKS = (same_name, two_ways, loops, shared_pages, two_meanings, duplicates)
 DISMISSED = "lint_dismissed"     # supagent_meta: the warnings an approver set aside (their keys)
 
 

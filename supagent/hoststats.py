@@ -22,8 +22,6 @@ HISTORY_S = 300.0
 HISTORY_KEPT = 288             # a day of points, one every five minutes
 GONE_S = 300.0
 PREFIX = "host:"
-REAL_FS = {"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "nfs", "nfs4", "cifs", "smbfs", "jfs", "reiserfs", "f2fs",
-           "vfat", "ntfs", "fuseblk", "overlay"}
 _STARTED: dict[str, Any] = {}
 
 
@@ -64,17 +62,42 @@ def _meminfo() -> dict[str, int]:
     return out
 
 
-def _disks() -> list[dict[str, Any]]:
-    out, seen = [], set()
+def superset_places() -> list[tuple[str, str]]:
+    """(0.11.0) (what, folder) of Superset on this host: its home (SUPERSET_HOME, else ~/.superset: the config, the
+    uploads, the backups by default) and its installation (this Python's prefix: the venv)."""
+    home = os.environ.get("SUPERSET_HOME") or os.path.join(os.path.expanduser("~"), ".superset")
+    return [("Superset's home", home), ("its installation", sys.prefix)]
+
+
+def _mounts() -> list[tuple[str, str, str]]:
     try:
         with open("/proc/mounts", encoding="ascii", errors="replace") as f:
-            mounts = [line.split()[:3] for line in f]
+            rows = [line.split()[:3] for line in f]
     except OSError:
-        mounts = [["-", "/", "-"]]
-    for dev, mount, fs in mounts:
-        if fs not in REAL_FS and mount != "/":
-            continue
-        if mount.startswith(("/proc", "/sys", "/dev", "/run", "/snap", "/var/lib/docker/overlay")) or dev in seen:
+        return [("-", "/", "-")]
+    return [(dev, mount.replace("\\040", " "), fs) for dev, mount, fs in rows if len(mount) and mount.startswith("/")]
+
+
+def _mount_of(path: str, mounts: list[tuple[str, str, str]]) -> str:
+    """The mount point holding `path` (the longest one that contains it)."""
+    p = os.path.realpath(path)
+    best = "/"
+    for _dev, mount, _fs in mounts:
+        if (p == mount or p.startswith(mount.rstrip("/") + "/")) and len(mount) > len(best):
+            best = mount
+    return best
+
+
+def _disks() -> list[dict[str, Any]]:
+    """(0.11.0, the owner's request: "show only the size of the disk where superset is, /data for example") The disks
+    holding Superset's home and its installation, each said with what it holds (one disk when both are on it)."""
+    mounts = _mounts()
+    out: list[dict[str, Any]] = []
+    for what, path in superset_places():
+        mount = _mount_of(path, mounts)
+        same = next((d for d in out if d["mount"] == mount), None)
+        if same is not None:
+            same["holds"].append(what)
             continue
         try:
             st = os.statvfs(mount)
@@ -84,9 +107,9 @@ def _disks() -> list[dict[str, Any]]:
         if total <= 0:
             continue
         used = (st.f_blocks - st.f_bfree) * st.f_frsize
-        seen.add(dev)
-        out.append({"mount": mount, "total": total, "used": used, "pct": round(100.0 * used / total, 1)})
-    return sorted(out, key=lambda d: d["mount"])[:12]
+        out.append({"mount": mount, "total": total, "used": used, "free": st.f_bavail * st.f_frsize,
+                    "pct": round(100.0 * used / total, 1), "holds": [what], "path": path})
+    return out
 
 
 def _superset_processes() -> dict[str, Any]:
@@ -188,6 +211,30 @@ def start(app: Any, role: str | None = None) -> None:
         return
     _STARTED[role] = os.getpid()
     threading.Thread(target=_loop, args=(app, role), name=f"supagent-host-{role}", daemon=True).start()
+
+
+GONE_DAYS = 7                   # (0.11.0) a host's row not written for this long (a server retired) is removed
+
+
+def purge_gone(days: int = GONE_DAYS) -> int:
+    """(0.11.0) The rows of hosts gone for `days` removed (the hourly tick): the Servers card lists the others."""
+    from superset.extensions import db
+
+    from supagent.models import Meta
+
+    limit = dt.datetime.utcnow() - dt.timedelta(days=days)
+    gone = []
+    for row in db.session.query(Meta).filter(Meta.key.like(f"{PREFIX}%")):
+        try:
+            at = dt.datetime.fromisoformat(str((json.loads(row.value or "{}").get("last") or {}).get("at") or ""))
+        except (ValueError, TypeError):
+            at = None
+        if at is None or at < limit:
+            gone.append(row.key)
+    if gone:
+        db.session.query(Meta).filter(Meta.key.in_(gone)).delete(synchronize_session=False)
+        db.session.commit()
+    return len(gone)
 
 
 def hosts() -> list[dict[str, Any]]:

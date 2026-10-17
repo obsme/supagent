@@ -761,7 +761,7 @@ def add_value(facet: str, value: str, inside: int | None, by: str, description: 
     """(0.9.6.9) A value added on the map: a person's, used at once; inside the value given (part of it)."""
     import datetime as dt
 
-    from supagent.knowledge.facets import editable
+    from supagent.knowledge.facets import editable, same_name
     from supagent.knowledge.freshness import touch
     from supagent.models import Facet
 
@@ -771,7 +771,7 @@ def add_value(facet: str, value: str, inside: int | None, by: str, description: 
         raise ValueError("choose the category: " + ", ".join(editable()))
     if not value:
         raise ValueError("write the value")
-    f = db.session.query(Facet).filter(Facet.facet == facet, Facet.value.ilike(value)).first()
+    f = db.session.query(Facet).filter(Facet.facet == facet, same_name(Facet.value, value)).first()
     if f is not None and f.status != "rejected":
         raise ValueError(f'"{f.value}" is a value of this category already')
     if f is None:

@@ -266,6 +266,14 @@ def base_ref(ref: str) -> str:
 # --------------------------------------------------------------------------------------------- #
 # the vocabulary
 # --------------------------------------------------------------------------------------------- #
+def same_name(column: Any, name: str) -> Any:
+    """(0.11.0) A value's name matched as written, whatever its case: a "_" or a "%" in it is no pattern (ILIKE took
+    "db_1" for "db01"); both sides lowered by the database (SQLite lowers no accented letter: "Équipe" is itself)."""
+    from sqlalchemy import func
+
+    return func.lower(column) == func.lower(str(name or ""))
+
+
 def _ensure(facet: str, value: str, status: str, source: str, description: str | None = None,
             origin: str | None = None) -> Any:
     from supagent.models import Facet
@@ -273,7 +281,7 @@ def _ensure(facet: str, value: str, status: str, source: str, description: str |
     value = " ".join(str(value or "").split())[:128]
     if not value:
         return None
-    f = (db.session.query(Facet).filter(Facet.facet == facet, Facet.value.ilike(value)).first())
+    f = (db.session.query(Facet).filter(Facet.facet == facet, same_name(Facet.value, value)).first())
     if f is None:
         f = Facet(facet=facet, value=value, status=status, source=source, description=description)
         db.session.add(f)
@@ -763,7 +771,7 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
         if not name:
             return None
         rows = db.session.query(Facet).filter(Facet.facet.in_(list(editable())), Facet.status != "rejected")
-        hit = rows.filter(Facet.value.ilike(name)).order_by(Facet.status).first()
+        hit = rows.filter(same_name(Facet.value, name)).order_by(Facet.status).first()
         if hit is None:
             low = name.lower()
             hit = next((x for x in rows if any(str(s).lower() == low for s in (x.synonyms or []))), None)
@@ -835,8 +843,8 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
             continue
         if nv.get("facet") in llm_cats and str(nv.get("value") or "").strip():
             desc = str(nv.get("description") or "")[:500] or None
-            f = db.session.query(Facet).filter(Facet.facet == nv["facet"], Facet.value.ilike(
-                " ".join(str(nv["value"]).split()))).first() or alike(nv["facet"], str(nv["value"]))
+            f = db.session.query(Facet).filter(Facet.facet == nv["facet"], same_name(
+                Facet.value, " ".join(str(nv["value"]).split()))).first() or alike(nv["facet"], str(nv["value"]))
             if f is None:
                 if elsewhere(nv["facet"], nv["value"]):
                     continue                          # known under another category: nothing new to propose
@@ -844,7 +852,7 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
                 if to is None:
                     continue
                 if (to, name.lower()) != (nv["facet"], " ".join(str(nv["value"]).split()).lower()) and (
-                        db.session.query(Facet.id).filter(Facet.facet == to, Facet.value.ilike(name)).first()
+                        db.session.query(Facet.id).filter(Facet.facet == to, same_name(Facet.value, name)).first()
                         is not None or elsewhere(to, name)):
                     continue                          # (0.10.6.2) known where it belongs: nothing new to propose
                 f = _ensure(to, name, "proposed", "llm", desc)
@@ -895,13 +903,13 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
             if isinstance(o, dict) and o.get("category") in own and str(o.get("value") or "").strip():
                 wanted.append((o["category"], str(o["value"])))
         for facet, value in wanted:
-            f = (db.session.query(Facet).filter(Facet.facet == facet, Facet.value.ilike(value.strip())).first()
+            f = (db.session.query(Facet).filter(Facet.facet == facet, same_name(Facet.value, value.strip())).first()
                  or alike(facet, value) or elsewhere(facet, value))
             if f is None:                             # (0.10.6.2) a new one: where it belongs, as a name
                 to, name, others = place(facet, value)
                 if to is None:
                     continue
-                f = ((db.session.query(Facet).filter(Facet.facet == to, Facet.value.ilike(name)).first()
+                f = ((db.session.query(Facet).filter(Facet.facet == to, same_name(Facet.value, name)).first()
                       if (to, name) != (facet, value.strip()) else None)
                      or elsewhere(to, name) or _ensure(to, name, "proposed", "llm"))
                 if f is not None and others and f.status == "proposed":

@@ -46,7 +46,7 @@ CONFIDENCE = 0.85
 TEST_DIR = re.compile(r"(^|/)(tests?|testing|testdata|__tests__|fixtures?|molecule|examples?|e2e|spec)/", re.I)
 INVENTORY_NAME = re.compile(r"(^|/)(hosts|inventory)([._-][\w.-]*)?$", re.I)
 INVENTORY_DIR = re.compile(r"(^|/)inventor(y|ies)/", re.I)
-HOST_TOKEN = re.compile(r"^[A-Za-z0-9_.-]*(?:\[[0-9a-zA-Z]+:[0-9a-zA-Z]+\])?[A-Za-z0-9_.-]*$")
+HOST_TOKEN = re.compile(r"^[A-Za-z0-9_.-]*(?:\[[0-9a-zA-Z]+:[0-9a-zA-Z]+(?::\d+)?\])?[A-Za-z0-9_.-]*(?::\d{1,5})?$")
 # roles that configure the system or install a language, by their name (a role of another repository: its tasks are
 # not there to tell)
 BASE_ROLES = {
@@ -258,15 +258,15 @@ def _line(text: str, pos: int) -> tuple[int, str]:
 
 def _expand(host: str) -> list[str]:
     """An inventory's host range (web[01:03], db-[a:c]) as its hosts."""
-    m = re.search(r"\[([0-9a-zA-Z]+):([0-9a-zA-Z]+)\]", host)
+    m = re.search(r"\[([0-9a-zA-Z]+):([0-9a-zA-Z]+)(?::(\d+))?\]", host)
     if not m:
         return [host]
-    a, b = m.group(1), m.group(2)
+    a, b, step = m.group(1), m.group(2), max(1, int(m.group(3) or 1))
     if a.isdigit() and b.isdigit():
         width = len(a) if a.startswith("0") else 0
-        items = [str(i).zfill(width) for i in range(int(a), int(b) + 1)][:256]
+        items = [str(i).zfill(width) for i in range(int(a), min(int(b), int(a) + 255 * step) + 1, step)]
     elif len(a) == 1 and len(b) == 1:
-        items = [chr(c) for c in range(ord(a), ord(b) + 1)]
+        items = [chr(c) for c in range(ord(a), ord(b) + 1, step)]
     else:
         return [host]
     return [host[:m.start()] + x + host[m.end():] for x in items]
@@ -330,7 +330,7 @@ def _ini_inventory(path: str, text: str) -> Inventory | None:
         rest = line[len(token):].split()
         if "=" in token or (rest and rest[0] in ("=", ":")) or not HOST_TOKEN.match(token):
             return None                                   # key = value lines: settings, not an inventory
-        for h in _expand(token):
+        for h in _expand(re.sub(r":\d{1,5}$", "", token)):   # (a host's SSH port: host:2222)
             inv.group(current, i)["hosts"].setdefault(h, i)
             hosts += 1
             for kv in rest:
@@ -355,10 +355,13 @@ def _yaml_inventory(path: str, text: str) -> Inventory | None:
         m = re.search(r"(?m)^\s*" + re.escape(name) + r"\s*:", text)
         return text.count("\n", 0, m.start()) + 1 if m else 1
 
+    above: set[int] = set()                               # (a YAML alias of a group inside itself: once)
+
     def walk(name: str, node: Any) -> None:
         g = inv.group(name, line_of(name))
-        if not isinstance(node, dict):
+        if not isinstance(node, dict) or id(node) in above:
             return
+        above.add(id(node))
         for h, hv in (node.get("hosts") or {}).items() if isinstance(node.get("hosts"), dict) else []:
             for x in _expand(str(h)):
                 g["hosts"].setdefault(x, line_of(str(h)))
@@ -369,6 +372,7 @@ def _yaml_inventory(path: str, text: str) -> Inventory | None:
         for c, cv in (node.get("children") or {}).items() if isinstance(node.get("children"), dict) else []:
             g["children"].append(str(c))
             walk(str(c), cv)
+        above.discard(id(node))
 
     if "all" in data:
         walk("all", top)
@@ -764,7 +768,8 @@ def _plays(u: dict[str, Any]) -> list[dict[str, Any]]:
                     where[name] = g
         out.append({"file": u["path"], "pos": pos, "pattern": pattern, "roles": list(dict.fromkeys(roles)),
                     "where": where, "as": as_user, "tasks": tasks, "vars": p.get("vars") if isinstance(p.get("vars"), dict) else {},
-                    "vars_files": [str(x) for x in (p.get("vars_files") or []) if isinstance(x, str)]})
+                    "vars_files": [str(x) for x in ([p["vars_files"]] if isinstance(p.get("vars_files"), str) else
+                                                    p.get("vars_files") or []) if isinstance(x, str)]})
     return out
 
 
@@ -875,7 +880,7 @@ def _places(pattern: str, inv: Inventory | None, named: frozenset[str] | set[str
     out: list[tuple[str, str]] = []
     if "{{" in pattern:
         return out
-    items = [re.sub(r"\[[\d:\-]*\]$", "", x.strip()) for x in re.split(r"[:,]", pattern) if x.strip()]
+    items = [re.sub(r"\[[\d:\-]*\]$", "", x.strip()) for x in re.split(r"[:,](?![^\[]*\])", pattern) if x.strip()]
     for x in items:                                       # (group[0], group[1:3]: the group's hosts, the group)
         if x.startswith(("!", "&", "_")) or x in ("localhost", "127.0.0.1"):
             continue                                       # (an exclusion, an intersection, a group made at run time)
@@ -1410,6 +1415,14 @@ def _host_of(value: str) -> tuple[str, int | None, str] | None:
     return host.split(".")[0], int(port) if port else None, scheme
 
 
+def _map(x: Any) -> dict[str, Any]:
+    return x if isinstance(x, dict) else {}
+
+
+def _list(x: Any) -> list[Any]:
+    return x if isinstance(x, list) else []
+
+
 def kubernetes(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], list[str], dict[str, str]]:
     """The links a repository's manifests state through the workloads' environment ({path: [fact]}, the workloads)."""
     by_path = {u["path"]: u for u in units if u.get("path")}
@@ -1424,12 +1437,11 @@ def kubernetes(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, An
         for start, d in _docs_with_lines(text):
             if not isinstance(d, dict) or not isinstance(d.get("metadata"), dict):
                 continue
-            kind, name = d.get("kind"), str(d["metadata"].get("name") or "")
+            kind, name = str(d.get("kind") or ""), str(d["metadata"].get("name") or "")
             if name == "tpl":
                 continue                                   # (a name only a variable gives)
             labels = {**((d["metadata"].get("labels") or {}) if isinstance(d["metadata"].get("labels"), dict) else {}),
-                      **(((((d.get("spec") or {}).get("template") or {}).get("metadata") or {}).get("labels") or {})
-                         if isinstance(d.get("spec"), dict) else {})}
+                      **_map(_map(_map(_map(d.get("spec")).get("template")).get("metadata")).get("labels"))}
             app = str(labels.get("app") or labels.get("app.kubernetes.io/name") or "") if isinstance(labels, dict) else ""
             if kind in WORKLOAD_KINDS and app and app != name and app != "tpl" and \
                     re.fullmatch(re.escape(app) + r"[-_]v?\d+(\.\d+)*|" + re.escape(app) + r"[-_]\w+", name):
@@ -1438,19 +1450,18 @@ def kubernetes(units: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, An
             if kind == "ConfigMap" and isinstance(d.get("data"), dict):
                 configmaps.setdefault(name, {"path": path, "start": start, "data": d["data"], "users": set()})
             elif kind in WORKLOAD_KINDS and name:
-                spec = d.get("spec") or {}
-                tpl = (spec.get("jobTemplate") or {}).get("spec", spec) if kind == "CronJob" else spec
-                pod = ((tpl.get("template") or {}).get("spec") or {}) if isinstance(tpl, dict) else {}
+                spec = _map(d.get("spec"))                # (a templated value: "tpl", no mapping)
+                tpl = _map(_map(spec.get("jobTemplate")).get("spec", spec)) if kind == "CronJob" else spec
+                pod = _map(_map(tpl.get("template")).get("spec"))
                 env, env_from = [], []
-                for c in (pod.get("containers") or []) + (pod.get("initContainers") or []):
+                for c in _list(pod.get("containers")) + _list(pod.get("initContainers")):
                     if not isinstance(c, dict):
                         continue
-                    for e in c.get("env") or []:
+                    for e in _list(c.get("env")):
                         if isinstance(e, dict) and e.get("name"):
-                            ref = ((e.get("valueFrom") or {}).get("configMapKeyRef") or {}) if isinstance(
-                                e.get("valueFrom"), dict) else {}
+                            ref = _map(_map(e.get("valueFrom")).get("configMapKeyRef"))
                             env.append((str(e["name"]), e.get("value"), ref.get("name"), ref.get("key")))
-                    for ef in c.get("envFrom") or []:
+                    for ef in _list(c.get("envFrom")):
                         if isinstance(ef, dict) and isinstance(ef.get("configMapRef"), dict):
                             env_from.append(str(ef["configMapRef"].get("name") or ""))
                 ns = str(d["metadata"].get("namespace") or "")

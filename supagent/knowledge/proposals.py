@@ -202,7 +202,7 @@ def _refile_inside() -> int:
     """(0.10.10) The person's nesting of categories says what a part of a value is: a learned application or
     component that is part of a value whose category holds exactly one category inside it (modules inside the
     platform services, streams inside the messaging clusters) goes to that one; a person's value never moves."""
-    from supagent.knowledge.facets import PART_OF, inside
+    from supagent.knowledge.facets import PART_OF, inside, same_name
     from supagent.models import Facet, Link
 
     kids: dict[str, list[str]] = {}
@@ -220,7 +220,7 @@ def _refile_inside() -> int:
         if part.status != "proposed" or part.reviewed_by is not None or part.source not in ("docs", "llm", "data"):
             continue
         ks = kids.get(whole.facet) or []
-        if len(ks) != 1 or db.session.query(Facet.id).filter(Facet.facet == ks[0], Facet.value.ilike(part.value)
+        if len(ks) != 1 or db.session.query(Facet.id).filter(Facet.facet == ks[0], same_name(Facet.value, part.value)
                                                             ).first() is not None:
             continue
         part.facet = ks[0]
@@ -236,7 +236,7 @@ def _refile_wholes() -> int:
     applications), goes to that one when most of its parts say so; a person's value never moves."""
     from collections import Counter
 
-    from supagent.knowledge.facets import PART_OF, inside
+    from supagent.knowledge.facets import PART_OF, inside, same_name
     from supagent.models import Facet, Link
 
     parent = inside()
@@ -261,7 +261,7 @@ def _refile_wholes() -> int:
             continue
         target = top[0][0]
         if whole.facet == target or db.session.query(Facet.id).filter(Facet.facet == target,
-                                                                       Facet.value.ilike(whole.value)).first():
+                                                                       same_name(Facet.value, whole.value)).first():
             continue
         whole.facet = target
         n += 1
@@ -301,7 +301,7 @@ def _refile_structure() -> int:
     goes to the person's one nesting of systems and their parts: the whole to the outer category, its parts to the
     inner one (a part its name's shape alone filed elsewhere too: "x-batch", one of x's parts); a person's value
     never moves."""
-    from supagent.knowledge.facets import PART_OF
+    from supagent.knowledge.facets import PART_OF, same_name
     from supagent.models import Facet, Link
 
     pair = _system_pair()
@@ -325,12 +325,12 @@ def _refile_structure() -> int:
                                                                             learned(whole))):
             continue
         if whole.facet != outer and not db.session.query(Facet.id).filter(Facet.facet == outer,
-                                                                         Facet.value.ilike(whole.value)).first():
+                                                                         same_name(Facet.value, whole.value)).first():
             whole.facet = outer
             n += 1
         for part in parts:
             if part.facet != inner and learned(part) and not db.session.query(Facet.id).filter(
-                    Facet.facet == inner, Facet.value.ilike(part.value)).first():
+                    Facet.facet == inner, same_name(Facet.value, part.value)).first():
                 part.facet = inner
                 n += 1
     _SHAPED.clear()                                       # (this run's shapes only)
@@ -873,6 +873,8 @@ def propose(dry_run: bool = False) -> dict[str, Any]:
                 x.seen_at = stamp                          # (0.10.5) when the documents stated it last
                 continue
             if x.status == "proposed":
+                if x.explained_by:                         # (0.11.0) a person corrected it in To review (its kind,
+                    continue                               # its direction, its words): theirs to decide, never withdrawn
                 db.session.delete(x)
                 out["withdrawn"] += 1
             elif x.status == "approved" and not x.proposed_drop:

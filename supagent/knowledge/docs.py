@@ -1252,27 +1252,41 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
     bases: set[str] = set()                          # (0.10.7) the site's own URL as its API says it (_links.base)
     title = ""
     skip = _skip_title()
+    listing = {"start": 0, "more": t["kind"] == "space", "listed": 0}
+    own: deque[tuple[str, ...]] = deque()             # (0.11.0) the space's own pages, read before what they link to
+
+    def list_more() -> None:
+        """(0.11.0) The space's next batch of pages listed (with their text) once the last one is read: a space of
+        50,000 pages is read batch by batch, never held whole (each page's text dropped once read)."""
+        while listing["more"] and not own and listing["listed"] < want:
+            data = get(f"/content?spaceKey={q(t['space'])}&type=page&{expand}&limit={CONFLUENCE_LIST}"
+                       f"&start={listing['start']}")
+            results = [r for r in data.get("results") or [] if isinstance(r, dict) and r.get("id")]
+            base = (data.get("_links") or {}).get("base")
+            for item in results:
+                items[str(item["id"])] = (item, base)
+                own.append(("id", str(item["id"])))
+            listing["listed"] += len(results)
+            if len(results) < CONFLUENCE_LIST or not (data.get("_links") or {}).get("next"):
+                listing["more"] = False
+            listing["start"] += len(results)
+
     try:
         if t["kind"] == "space":
-            title, start = f"Confluence space {t['space']}", 0
-            while len(queue) < want:
-                data = get(f"/content?spaceKey={q(t['space'])}&type=page&{expand}&limit={CONFLUENCE_LIST}&start={start}")
-                results = [r for r in data.get("results") or [] if isinstance(r, dict) and r.get("id")]
-                base = (data.get("_links") or {}).get("base")
-                for item in results:
-                    items[str(item["id"])] = (item, base)
-                    queue.append(("id", str(item["id"])))
-                if len(results) < CONFLUENCE_LIST or not (data.get("_links") or {}).get("next"):
-                    break
-                start += len(results)
+            title = f"Confluence space {t['space']}"
+            list_more()
         elif t["kind"] == "title":
             if fetch(("title", t["title"], t["space"])) is None:
                 raise DocError(f"no page titled {t['title']!r} in the Confluence space {t['space']}")
             queue.append(("title", t["title"], t["space"]))
         else:
             queue.append(("id", str(t["id"])))
-        while queue and len(pages) < want:
-            key = queue.popleft()
+        while (own or queue or listing["more"]) and len(pages) < want:
+            if not own:
+                list_more()
+            if not own and not queue:
+                break
+            key = own.popleft() if own else queue.popleft()
             try:
                 pid = fetch(key)
             except DocError as ex:                   # (0.10.6.1) a page under it or linked from it that this
@@ -1311,6 +1325,8 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
                     **({"diagram_edges": dedges[:200]} if dedges else {}),
                     **({"images": [{k: v for k, v in i.items() if v} for i in read["images"]][:50]} if read["images"]
                        else {})}
+            items[pid] = ({k: item.get(k) for k in ("id", "title", "space", "version", "_links")}, base)   # (0.11.0)
+            #                                            its text no longer held (the page's id kept: not fetched again)
             if len(text.encode()) > limit or not text.strip():
                 skipped += 1                           # too large, or no text (0.10.6.1: its pages and links followed)
                 _not_read(url, str(item.get("title") or ""), "no text (the pages under it and its links followed)"
@@ -1611,7 +1627,7 @@ def _one_file(t: dict[str, Any]) -> dict[str, Any]:
 
 FRONT_MATTER = re.compile(r"\A---[ \t]*\n(.*?)\n(?:---|\.\.\.)[ \t]*(?:\n|\Z)", re.S)
 FRONT_KEY = re.compile(r"^(title|description|summary)[ \t]*:[ \t]*(.+?)[ \t]*$", re.M | re.I)
-FIRST_HEADING = re.compile(r"^#[ \t]+(.+?)[ \t]*#*[ \t]*$", re.M)
+FIRST_HEADING = re.compile(r"^#[ \t]+(.+)$", re.M)    # (its closing #s taken off after: no backtracking)
 
 
 def repo_page(url: str, path: str, text: str) -> tuple[str, str, str]:
@@ -1629,7 +1645,7 @@ def repo_page(url: str, path: str, text: str) -> tuple[str, str, str]:
             if meta.get("description") or meta.get("summary"):
                 body = (meta.get("description") or meta.get("summary") or "") + "\n\n" + body.lstrip("\n")
         h = FIRST_HEADING.search(body)
-        title = meta.get("title") or (h.group(1).strip() if h else "")
+        title = meta.get("title") or (h.group(1).rstrip(" \t").rstrip("#").strip() if h else "")
     return url, (f"{title} ({path})" if title and title != path else path), body
 
 
@@ -1699,14 +1715,14 @@ def _read_bitbucket(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
                 text, n = _read_file(f, sign, limit, calls)
             except _OutOfCalls:
                 return _with_rest(pages, before, touched, meta), title, skipped   # the rest kept as it was
-            except DocError as ex:
-                if "asked to sign in" in str(ex):
+            except (DocError, requests.exceptions.RequestException) as ex:
+                if isinstance(ex, DocError) and "asked to sign in" in str(ex):
                     raise
-                if "HTTP 404" not in str(ex):          # 404: deleted (or moved away) at that commit
-                    skipped, last = skipped + 1, str(ex)
-                continue
-            except requests.exceptions.RequestException as ex:
-                skipped, last = skipped + 1, f"{path}: {type(ex).__name__}"
+                if isinstance(ex, DocError) and "HTTP 404" in str(ex):   # 404: deleted (or moved away) at that commit
+                    continue
+                skipped, last = skipped + 1, (str(ex) if isinstance(ex, DocError) else f"{path}: {type(ex).__name__}")
+                if _transient(ex) and path in before:   # (0.11.0) refused for now (429, 5xx, a timeout): the version
+                    pages.append(before[path])          # read before, with its own commit: read again next time
                 continue
             if not shebang_kept(path, text):           # (0.10.12) a file without an extension that is no script
                 continue
@@ -1746,13 +1762,14 @@ def _read_bitbucket(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
         except _OutOfCalls:
             partial = True                            # not all read: no commit kept, read in full next time
             break
-        except DocError as ex:
-            if "asked to sign in" in str(ex):
+        except (DocError, requests.exceptions.RequestException) as ex:
+            if isinstance(ex, DocError) and "asked to sign in" in str(ex):
                 raise
-            skipped, last = skipped + 1, str(ex)
-            continue
-        except requests.exceptions.RequestException as ex:
-            skipped, last = skipped + 1, f"{f['path']}: {type(ex).__name__}"
+            skipped, last = skipped + 1, (str(ex) if isinstance(ex, DocError) else f"{f['path']}: {type(ex).__name__}")
+            if _transient(ex):                        # (0.11.0) refused for now: no commit kept (read in full next
+                partial = True                        # time), the version read before kept meanwhile
+                if f["path"] in before:
+                    pages.append(before[f["path"]])
             continue
         if not shebang_kept(f["path"], text):         # (0.10.12) a file without an extension that is no script
             continue
@@ -1765,6 +1782,14 @@ def _read_bitbucket(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
     log.info("supagent: document %s: %s read in full at %s: %d file(s), %d secret(s) masked", doc.id, t["name"],
              (head or "the branch")[:12], len(pages), masked)
     return pages, title, skipped
+
+
+def _transient(ex: Exception) -> bool:
+    """(0.11.0) A file the server refused for now (too many requests, its own error, a timeout or a cut connection):
+    read again next time, not taken for gone."""
+    if isinstance(ex, requests.exceptions.RequestException):
+        return True
+    return bool(re.search(r"HTTP (429|5\d\d)\b", str(ex)))
 
 
 def _with_rest(pages: list, before: dict, touched: set[str], meta: Callable[[str], dict]) -> list:
@@ -1782,7 +1807,8 @@ def _join(found: list) -> tuple[str, list[dict[str, Any]]]:
     pages: list[dict[str, Any]] = []
     at = 0
     for url, title, text, *more in found:
-        block = (f"# {title}\n" if title else "") + (text or "")
+        title = (title or "").replace("\x00", "")        # (0.11.0) a NUL (a UTF-16 or binary file): PostgreSQL
+        block = (f"# {title}\n" if title else "") + (text or "").replace("\x00", "")   # refuses it in a text
         if texts:
             at += 2                                     # the blank line between two pages
         pages.append({"url": url, "title": title, "chars": len(block), "at": at,
@@ -1816,12 +1842,20 @@ def _read_by_another(doc: Doc, reader: str, found: list) -> tuple[list, int]:
     return kept, len(found) - len(kept)
 
 
+READING = "reading"          # (0.11.0) a document's status while one process reads it (the others leave it)
+READING_HOURS = 6           # a "reading" older than this: its process died; read again
+
+
 def refresh(doc: Doc) -> dict[str, Any]:
-    """Read a document's address again with its reader (and its sign-in, if it has one)."""
+    """Read a document's address again with its reader (and its sign-in, if it has one). (0.11.0) Claimed first
+    (status "reading", committed): the hourly tick and a person's Read again never read it twice at once."""
     reader = reader_of(doc)
     skipped, changed, shared = 0, False, 0
     token = None
     got: dict[str, Any] = {"skipped": [], "not_read": 0, "left": 0}
+    if doc.id is not None and doc in db.session:       # (a document of this session: claimed, saved now)
+        doc.status, doc.fetched_at = READING, dt.datetime.utcnow()
+        db.session.commit()
     log_token = _READ_LOG.set(got)                   # (0.10.7) what the reading leaves out, said on the page
     found: list = []
     try:
@@ -1830,6 +1864,8 @@ def refresh(doc: Doc) -> dict[str, Any]:
         read = {"web": _read_web, "confluence": _read_confluence, "bitbucket": _read_bitbucket}[reader]
         found, title, skipped = read(doc, sign)
         got["read"] = len(found)
+        if doc.id is not None and doc in db.session:   # (0.11.0) the pages a person removed while it was read
+            db.session.expire(doc, ["auth"])
         found, removed = _without_excluded(doc, found)   # (0.10.9.1) the pages a person removed: not kept
         skipped += removed
         found = [(u, ti, mask_secrets(tx)[0], *more) for u, ti, tx, *more in found]   # every page's secrets (0.10)
@@ -1841,6 +1877,10 @@ def refresh(doc: Doc) -> dict[str, Any]:
         doc.title = doc.title or title or doc.url
         doc.status, doc.error = "ok", None
     except Exception as ex:  # pylint: disable=broad-except   (any failure is the document's error, said safely)
+        if type(ex).__name__ in ("SoftTimeLimitExceeded", "TimeLimitExceeded"):   # (0.11.0) the worker's time ran
+            db.session.rollback()                      # out: not the document's fault; read again at the next tick
+            _unclaim(doc)
+            raise
         said = str(ex) if isinstance(ex, DocError) else f"{type(ex).__name__}: {ex}"
         doc.status, doc.error = "error", scrub(said, doc)[:500]
         log.info("supagent: document %s (%s) not read: %s", doc.id, reader, doc.error)
@@ -1850,9 +1890,31 @@ def refresh(doc: Doc) -> dict[str, Any]:
         _READ_LOG.reset(log_token)
     doc.fetched_at = dt.datetime.utcnow()
     _keep_read_log(doc, reader, got)
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception as ex:  # pylint: disable=broad-except   (0.11.0) what was read cannot be saved: said, not retried
+        db.session.rollback()                          # every hour (the tick goes on with the other documents)
+        log.warning("supagent: document %s read but not saved: %s", doc.id, ex)
+        d = db.session.get(Doc, doc.id) if doc.id is not None else None
+        if d is not None:
+            d.status, d.error, d.fetched_at = "error", f"read but not saved: {type(ex).__name__}: {str(ex)[:300]}", \
+                dt.datetime.utcnow()
+            db.session.commit()
+            doc = d
     return {"id": doc.id, "status": doc.status, "reader": reader, "pages": len(doc.pages or []), "skipped": skipped,
             "changed": changed, "error": doc.error, **({"read_by_another": shared} if shared else {})}
+
+
+def _unclaim(doc: Doc) -> None:
+    """(0.11.0) A read stopped by its worker's time: the document due again (its claim taken back)."""
+    try:
+        d = db.session.get(Doc, doc.id) if doc.id is not None else None
+        if d is not None and d.status == READING:
+            d.status, d.fetched_at = "error", None
+            d.error = "the reading took longer than the worker allows: read again at the next hourly tick"
+            db.session.commit()
+    except Exception:  # pylint: disable=broad-except
+        db.session.rollback()
 
 
 def _keep_read_log(doc: Doc, reader: str, got: dict[str, Any]) -> None:
@@ -1877,9 +1939,25 @@ def _keep_read_log(doc: Doc, reader: str, got: dict[str, Any]) -> None:
 
 def due_docs() -> list[Doc]:
     now = dt.datetime.utcnow()
-    return [d for d in db.session.query(Doc).filter(Doc.kind == "url", Doc.enabled.is_(True))
-            if d.fetched_at is None or now - d.fetched_at > dt.timedelta(days=max(1, d.refresh_days or 7))]
+    out = []
+    for d in db.session.query(Doc).filter(Doc.kind == "url", Doc.enabled.is_(True)):
+        if d.status == READING and d.fetched_at is not None and now - d.fetched_at < dt.timedelta(hours=READING_HOURS):
+            continue                                    # (0.11.0) another process reads it now
+        if d.fetched_at is None or d.status == READING or \
+                now - d.fetched_at > dt.timedelta(days=max(1, d.refresh_days or 7)):
+            out.append(d)
+    return out
 
 
 def refresh_due() -> list[dict[str, Any]]:
-    return [refresh(d) for d in due_docs()]
+    """The documents due, each read on its own: (0.11.0) one that fails never stops the others nor the tick."""
+    out = []
+    for d in due_docs():
+        try:
+            out.append(refresh(d))
+        except Exception as ex:  # pylint: disable=broad-except
+            if type(ex).__name__ in ("SoftTimeLimitExceeded", "TimeLimitExceeded"):
+                raise
+            db.session.rollback()
+            log.warning("supagent: document %s: its reading failed: %s", getattr(d, "id", "?"), ex)
+    return out

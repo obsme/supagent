@@ -1,5 +1,7 @@
 # supagent: the AI agent inside Apache Superset
 
+**How to use it** (every page, button, setting and command): [docs/USER-GUIDE.md](docs/USER-GUIDE.md). This README is the reference: install, upgrades, how each part works.
+
 supagent is a Python package that you install in Superset's virtualenv, like a database driver.
 It adds:
 
@@ -107,7 +109,7 @@ Content-Security-Policy (Talisman nonces).
 ```bash
 # the Python of Superset's virtualenv
 PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-$PY -m pip install supagent-0.10.12.1-py3-none-any.whl      # Superset 6.1: nothing else to install
+$PY -m pip install supagent-0.11.0-py3-none-any.whl         # Superset 6.1: nothing else to install
 ```
 
 One line in `superset_config.py` registers it. It holds no logic:
@@ -149,6 +151,17 @@ row level security filters and dashboards keep them), the AI roles' users moved 
 then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with the knowledge written) and Viewer
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
+## Upgrade from 0.10.12.1 to 0.11.0
+
+pip install the wheel on every host and restart (tables unchanged, v20). The agent's context in tiers (what the team
+keeps first, each said once; then the chat in the room left; then the documentation chosen for the question, the LLM
+context as its lines about the question), duplicates in To review, the learning's history kept 30 days, backups
+cleaned by number and age with Restore… in Settings (from a file too), the Context's pages rewritten with relations
+diagrams, the usage page's Servers card on the disk Superset is on. New settings: `agent.context_tiers`,
+`learn.history_days`, `backup.keep_days`, `backup.upload_max_mb`. The user guide: docs/USER-GUIDE.md. Measured: main
+open set 160/162 (2 wrong without a mark, one chain), observability open set on the big model's profile 29/29; every
+page in a browser 25/25; a Context built with the new writer; unit tests 2285.
 
 ## Upgrade from 0.10.12 to 0.10.12.1
 

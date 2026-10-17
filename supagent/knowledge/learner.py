@@ -174,6 +174,7 @@ class Steps:
             out = self.describer.out
             self.stats["during"] = {k: out.get(k, 0) for k in ("written", "copied", "requests", "tokens")}
         self.published = time.time()
+        self.stats["beat"] = dt.datetime.utcnow().isoformat(timespec="seconds")   # (0.11.0) alive: see last_alive
         _publish(self.run_id, self.stats)
 
 
@@ -211,7 +212,9 @@ def running_run() -> Run | None:
     now = dt.datetime.utcnow()
     limit = now - dt.timedelta(minutes=2 * int(settings.get("learn.max_minutes")) + 5)
     changed = False
-    for r in db.session.query(Run).filter(Run.kind.in_(KINDS), Run.status == "running", Run.started_at <= limit):
+    for r in db.session.query(Run).filter(Run.kind.in_(KINDS), Run.status == "running"):
+        if last_alive(r) > limit:
+            continue                                    # (0.11.0) it said it is alive lately (a long Context build)
         r.status, r.finished_at = "interrupted", now
         r.error = r.error or "the process stopped before the end of the run (a restart?)"
         changed = True
@@ -226,9 +229,20 @@ def running_run() -> Run | None:
         changed = True
     if changed:
         db.session.commit()
-    running = (db.session.query(Run).filter(Run.kind.in_(KINDS), Run.status == "running", Run.started_at > limit)
-               .order_by(Run.id.desc()).first())
+    running = next((r for r in db.session.query(Run).filter(Run.kind.in_(KINDS), Run.status == "running")
+                    .order_by(Run.id.desc()) if last_alive(r) > limit), None)
     return running or stopping
+
+
+def last_alive(r: Any) -> dt.datetime:
+    """(0.11.0) When a run last said it is alive: its last saved progress (stats "beat"), else its start."""
+    beat = (r.stats or {}).get("beat") if isinstance(r.stats, dict) else None
+    try:
+        at = dt.datetime.fromisoformat(str(beat)) if beat else None
+    except ValueError:
+        at = None
+    started = r.started_at or dt.datetime.utcnow()
+    return max(started, at) if at is not None else started
 
 
 def _start_run(reason: str, kind: str = "learn") -> int | None:
@@ -248,8 +262,9 @@ def _start_run(reason: str, kind: str = "learn") -> int | None:
             db.session.rollback()
     db.session.query(Meta).filter(Meta.key == START_LOCK).with_for_update().one()
     limit = dt.datetime.utcnow() - dt.timedelta(minutes=2 * int(settings.get("learn.max_minutes")) + 5)
-    busy = (db.session.query(Run.id).filter(Run.kind.in_(KINDS), Run.status.in_(("running", "stopping")),
-                                            Run.started_at > limit).first())
+    busy = next((r.id for r in db.session.query(Run).filter(Run.kind.in_(KINDS),
+                                                             Run.status.in_(("running", "stopping")))
+                 if last_alive(r) > limit), None)          # (0.11.0) alive by its last progress, not its start
     if busy is not None:
         db.session.rollback()                          # the lock ends
         return None

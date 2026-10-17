@@ -219,8 +219,9 @@ def _check_select(sql: str, max_rows: int) -> tuple[str, int]:
     if len(stmts) != 1 or not isinstance(stmts[0], (exp.Select, exp.Union)):
         raise ToolError("give exactly one SELECT statement")
     stmt = stmts[0]
+    # SELECT ... INTO creates a table (written again as CREATE TABLE ... AS SELECT)
     if any(isinstance(n, (exp.Insert, exp.Update, exp.Delete, exp.Drop, exp.Create, exp.Alter,
-                          exp.Merge, exp.Command)) for n in stmt.walk()):
+                          exp.Merge, exp.Command, exp.Into)) for n in stmt.walk()):
         raise ToolError("only SELECT is allowed")
     limit = stmt.args.get("limit")
     value = limit.expression if isinstance(limit, exp.Limit) else None
@@ -312,11 +313,41 @@ def unknown_tables(database: Any, sql: str) -> str:
             "names (describe_data lists them).")
 
 
+def _rls_refusal(database: Any, sql: str) -> None:
+    """ToolError when a table the SQL reads is a dataset of this database with row-level security filters for the
+    user: the SQL runs on the database's own connection, which applies none. Only the datasets whose table name (and
+    schema, when the SQL gives one) is the SQL's are looked at; none: the SQL runs as it is."""
+    import sqlglot
+    from sqlalchemy import func
+    from sqlglot import exp
+    from superset.connectors.sqla.models import SqlaTable
+    from superset.extensions import db, security_manager
+
+    tree = sqlglot.parse_one(sql, read="duckdb")
+    ctes = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
+    named = {((t.db or "").lower(), t.name.lower()) for t in tree.find_all(exp.Table)
+             if t.name and t.name.lower() not in ctes}
+    if not named:
+        return
+    found = (db.session.query(SqlaTable)
+             .filter(SqlaTable.database_id == database.id,
+                     func.lower(SqlaTable.table_name).in_(sorted({name for _schema, name in named}))).all())
+    for ds in found:
+        if not any(name == ds.table_name.lower() and schema in ("", (ds.schema or "").lower())
+                   for schema, name in named):
+            continue
+        if security_manager.get_rls_filters(ds):
+            raise ToolError(f'the dataset "{ds.table_name}" has row-level security filters for you, and this query '
+                            "would read around them: they apply on Superset's dataset path (a chart or Explore of "
+                            "the dataset), not here")
+
+
 def _run(database: Any, sql: str, max_rows: int, extract: bool) -> tuple[list[str], list[tuple], bool]:
     from superset.extensions import db, security_manager
 
     limited, _ = _check_select(sql, max_rows)
     security_manager.raise_for_access(database=database, sql=limited, schema="default")
+    _rls_refusal(database, limited)
     with _db_connection(database, extract, max_rows) as conn:
         db.session.commit()        # no connection of Superset's own pool is held while the query runs
         cur = conn.cursor()
@@ -1422,6 +1453,11 @@ def change_note(note_id: int, text: str | None = None, add_text: str | None = No
                 if personal is not None:
                     if n.user_id != me:
                         return {"error": "only its author makes a note personal or the team's"}
+                    from supagent.views import _can_share
+
+                    if not personal and n.scope != "team" and not _can_share():   # shared as when it is made
+                        return {"error": "your role (AI Viewer) writes notes for yourself only: ask an editor to "
+                                         "share it"}
                     values["scope"] = "user" if personal else "team"
                 if not values:
                     return {"error": "nothing to change: give text, add_text, title, tags, day, personal or undo"}
@@ -1446,6 +1482,11 @@ def delete_note(note_id: int, confirmed: bool = False) -> dict:
             n, me, _name, admin, names, why = _note_to_change(note_id)
             if why:
                 return {"error": why}
+            from supagent.views import _can_delete
+
+            if n.user_id != me and not _can_delete():           # another's note: a deletion (AI Admin), as on its page
+                return {"error": f"note {note_id} is {names.get(n.user_id, '?')}'s: only its author, or an admin who "
+                                 "may delete, deletes it"}
             shown = _note_view(n, me, admin, names, chars=600)
             if not confirmed:
                 return {"to_confirm": shown, "about": "not deleted: ask the user whether to delete this note"}
@@ -4838,6 +4879,10 @@ def create_report(request: ReportRequest) -> dict:
 
             if not security_manager.can_access("can_write", "ReportSchedule"):
                 return {"error": "you may not create reports (Superset permission can write on ReportSchedule)"}
+            try:                                       # the allowed domains, as for an e-mail sent now
+                recipients = _check_recipients(list(request.email_recipients or []))
+            except ToolError as ex:
+                return {"error": str(ex)}
             dash, chart = request.dashboard_id, request.chart_id
             if dash is None and request.dashboard_title:
                 dash = _find_id("dashboard", request.dashboard_title)
@@ -4860,7 +4905,7 @@ def create_report(request: ReportRequest) -> dict:
                 "report_format": request.report_format, "owners": [user.id],
                 "description": request.description_html or "", "log_retention": 90, "working_timeout": 600,
                 "recipients": [{"type": "Email", "recipient_config_json": {
-                    "target": ", ".join(request.email_recipients)}}],
+                    "target": ", ".join(recipients)}}],
             }
             if request.email_subject:
                 body["email_subject"] = request.email_subject

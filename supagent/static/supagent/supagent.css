@@ -621,7 +621,7 @@ button.info:hover, button.info:focus-visible, button.info[aria-expanded="true"] 
 .sec-head > h1, .sec-head > h2, .sec-head > h3 { margin: 0; }
 .sec-head .grow { flex: 1; }
 .explain { display: none !important; }
-.pop { position: fixed; z-index: 60; max-width: min(480px, calc(100vw - 16px)); max-height: min(65vh, 560px);
+.pop { position: fixed; z-index: 1100; /* (0.11.0) above the System map in full screen (1000) */max-width: min(480px, calc(100vw - 16px)); max-height: min(65vh, 560px);
   overflow: auto; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: var(--radius);
   box-shadow: 0 10px 30px rgba(0, 0, 0, .18); padding: 12px 14px; font-size: 13.5px; line-height: 1.55; }
 .pop-text > :first-child { margin-top: 0; }
@@ -962,3 +962,20 @@ svg.spark { vertical-align: middle; color: var(--accent); }
 .reopen-note p { margin: 0; }
 .reopen-note div { display: flex; gap: 8px; flex-wrap: wrap; }
 .results-later { margin: 6px 0; }
+/* (0.11.0) Settings, backups: the Restore panel (a backup of this server or a file brought from elsewhere) */
+.restore-panel { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.restore-panel h3 { margin: 0 0 6px; font-size: 14px; }
+.restore-from { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 8px 0; font-size: 13px; }
+.restore-from select { max-width: 100%; min-width: 0; }
+.restore-file input { max-width: 260px; }
+/* (0.11.0) the Context pages' relations diagrams (common.js: diagrams) */
+.relations-box { overflow-x: auto; margin: 8px 0; padding: 8px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel); }
+.relations-diagram { display: block; max-width: none; font-size: 12px; }
+.relations-diagram .rel-node rect { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
+.relations-diagram .rel-node text { fill: var(--ink); }
+.relations-diagram .rel-edge path { fill: none; stroke: var(--muted); stroke-width: 1.3; }
+.relations-diagram .rel-edge text { fill: var(--muted); font-size: 10.5px; }
+.relations-diagram .rel-edge:hover path { stroke: var(--accent); stroke-width: 2; }
+.relations-diagram .rel-head { fill: var(--muted); }
+.relations-text summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }

@@ -61,6 +61,7 @@ RELATION_VERBS = {"calls": "calls", "sends_to": "sends data to", "reads_from": "
                   "monitors": "monitors", "powered_by": "is powered by", "part_of": "is part of",
                   "routes_to": "routes to", "writes": "writes", "logs_to": "logs to", "emits": "emits",
                   "watched_by": "is watched by", "in_group": "is in the server group"}
+INFRA_VERBS = {"runs_on", "connects_to", "powered_by", "part_of", "routes_to", "in_group", "depends_on"}   # (0.11.0)
 DESC_CHARS = 1200          # of a main index's or metric's description on its page (cut after a whole sentence)
 FIELDS_OF = 3              # the main indices and metrics whose fields or labels a data source's page lists
 FIELD_CHARS = 240          # of a field's description on that list
@@ -86,11 +87,42 @@ def clip(text: str, limit: int) -> str:
 
 
 PROMPT = """You write one page of the internal documentation of an information system, in Markdown, from the
-evidence given as JSON (documents, catalog entries, team memory, data dictionary, questions people asked).
+evidence given as JSON (documents, catalog entries, team memory, data dictionary, questions people asked, the
+relations the documents state). Write for a new member of the team who must understand the system quickly.
 Rules: use only this evidence, never invent a name, a number, a link or a dependency; when the evidence does
-not say, write "not known yet". Cite the evidence you use as [E1], [E2]... Use ## headings, short paragraphs
-and bullet lists, no HTML, no code fences unless quoting a query. Write in the language of most of the
-evidence. The page: {title}. {brief}"""
+not say, write "not known yet". Start with a short paragraph "In short" (two or three sentences: what it is and
+why it matters), then the sections asked, each opening with its main point. Explain how things work and why,
+in sentences; group what belongs together; define a term the first time it is used and keep one name for one
+thing. Say the chains between parts in words (A sends to B, which stores in C): the relations diagram is added
+to the page by the system, so draw none yourself. Leave out what does not help understanding: counts of
+objects, documents or pages, sizes, identifiers, long lists of metric, field or index names (name the few that
+matter and say that the Data dictionary has the others), and repetitions. Cite the evidence you use as [E1],
+[E2]... once per paragraph, not after every sentence. Use ## headings, short paragraphs, bullet lists, and a
+Markdown table where it compares things; no HTML, no code fences unless quoting a query. Write in the language
+of most of the evidence. The page: {title}. {brief}"""
+DIAGRAM_EDGES = 30         # (0.11.0) relations drawn on a summary page's diagram at most (the most stated first)
+DIAGRAM_HEAD = "diagram: relations"     # the first line of the block the pages draw (dictionary.js: S.diagrams)
+
+
+QUALIFIED = re.compile(r"\s*\([^()]*\)$")     # a name's qualifier in parentheses ("payment_vms (infra prod)")
+
+
+def diagram_block(rels: list[dict[str, Any]], limit: int = DIAGRAM_EDGES) -> str:
+    """(0.11.0) The relations the documents and the code state, as a block the Context page draws as a diagram (and
+    any other reader reads as lines: "A -> B : calls"), the most stated first; "" when there are fewer than two."""
+    lines, seen = [], set()
+    for r in rels:
+        a, b = " ".join(str(r["a"]).split())[:60], " ".join(str(r["b"]).split())[:60]
+        key = (QUALIFIED.sub("", a).lower(), QUALIFIED.sub("", b).lower(), r["verb"])   # "x (prod)" is x: once
+        if not a or not b or key in seen or "->" in a or "->" in b:
+            continue
+        seen.add(key)
+        lines.append(f"{a} -> {b} : {RELATION_VERBS.get(r['verb'], r['verb'])}")
+        if len(lines) >= limit:
+            break
+    if len(lines) < 2:
+        return ""
+    return "```text\n" + DIAGRAM_HEAD + "\n" + "\n".join(lines) + "\n```"
 
 
 def slugify(text: str) -> str:
@@ -480,18 +512,22 @@ def _apps(ev: dict[str, Any]) -> list[str]:
     found: set[str] = set()
     for slot in (ev["inventory"].get("Applications") or {}).values():
         found.update(v for v in slot["values"] if v and 2 <= len(v) <= 60 and not v.isdigit())   # not "A", not "7"
-    # (0.10.12) every page of every document counts (was: each document's first 20,000 characters)
-    text = " ".join([d["content"][:20_000_000] for d in ev["docs"]] + [a["question"] or "" for a in ev["answers"]] +
-                    [e["content"] for e in ev["entries"]])
-    words = Counter(re.findall(r"[\w][\w.-]*", text.lower()))
-
-    def mentions(app: str) -> int:
-        if re.fullmatch(r"[\w][\w.-]*", app):                 # one word: counted once for all
-            return words.get(app.lower(), 0)
-        return len(re.findall(r"(?<![\w-])" + re.escape(app) + r"(?![\w-])", text, re.I))
-
-    ranked = sorted(found, key=lambda a: (-mentions(a), a))
-    return [a for a in ranked if mentions(a)][:MAX_APPS]
+    # (0.10.12) every page of every document counts (was: each document's first 20,000 characters); (0.11.0) counted
+    # text by text, only the names looked for (the words of every page were held at once: GBs for a dozen wikis)
+    texts = [d["content"] for d in ev["docs"]] + [a["question"] or "" for a in ev["answers"]] + \
+        [e["content"] for e in ev["entries"]]
+    single = {a.lower(): a for a in found if re.fullmatch(r"[\w][\w.-]*", a)}
+    several = [a for a in found if a.lower() not in single]
+    counts: Counter = Counter()
+    for text in texts:
+        for m in re.finditer(r"[\w][\w.-]*", text or ""):
+            w = m.group(0).lower()
+            if w in single:
+                counts[single[w]] += 1
+        for a in several:
+            counts[a] += len(re.findall(r"(?<![\w-])" + re.escape(a) + r"(?![\w-])", text or "", re.I))
+    ranked = sorted(found, key=lambda a: (-counts[a], a))
+    return [a for a in ranked if counts[a]][:MAX_APPS]
 
 
 def _excerpts(text: str, name: str, limit: int = 20) -> list[str]:
@@ -503,11 +539,10 @@ def _excerpts(text: str, name: str, limit: int = 20) -> list[str]:
 def summary_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
     """The summary pages to write, each with its evidence (the hash of which decides whether to write it)."""
     all_dbs = sorted(ev["databases"])
-    databases = [{"ref": f"database:{i}", "name": d["name"], "engine": d["backend"], "objects": d["counts"],
-                  "domains": list(d["categories"])[:12]} for i, d in ev["databases"].items()]
+    databases = [{"ref": f"database:{i}", "name": d["name"], "engine": d["backend"],      # (0.11.0) no counts of
+                  "domains": list(d["categories"])[:12]} for i, d in ev["databases"].items()]   # objects: noise
     inventory = [{"ref": f"inventory:{dim}", "title": dim, "what": dim,
-                  "examples": sorted({v for slot in per_db.values() for v in slot["values"]})[:25],
-                  "count": len({v for slot in per_db.values() for v in slot["values"]})}
+                  "examples": sorted({v for slot in per_db.values() for v in slot["values"]})[:25]}
                  for dim, per_db in ev["inventory"].items()]
     chosen = sorted(ev["docs"], key=lambda d: (-len(d.get("pages") or []), d["id"]))[:DIGEST_DOCS]
     shares = _shares(chosen)
@@ -527,13 +562,14 @@ def summary_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
                   "and chains between applications (who calls, uses, depends on and runs on what: the relations the "
                   "documents state, with how many pages state each), and where the data of each one is (## What it "
                   "does, ## Applications, ## Processes and chains, ## Where the data is).",
-         "evidence": docs + stated + entries + questions + databases + inventory},
+         "evidence": docs + stated + entries + questions + databases + inventory, "diagram": pool},
         {"section": "technical", "slug": "architecture", "title": "Technical overview", "database_ids": all_dbs,
          "brief": "Describe the data sources, the infrastructure (servers, services, clusters, environments, regions), "
                   "how the data sources and the parts relate (the relations the documents state: what calls, runs on, "
                   "connects to what) and what is not known (## Data sources, ## Infrastructure, ## Links, "
                   "## Not known yet).",
-         "evidence": databases + inventory + relations + stated + docs},
+         "evidence": databases + inventory + relations + stated + docs,
+         "diagram": [r for r in pool if r["verb"] in INFRA_VERBS]},
     ]
     for app in _apps(ev):
         ev_app = []
@@ -559,7 +595,7 @@ def summary_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
                       "brief": f"Explain what the application {app} is and does, what it depends on and what depends "
                                "on it (the chain), where its data is, and what people ask about it (## What it is, "
                                "## Chain, ## Its data, ## Questions people ask).",
-                      "evidence": ev_app[:30] + holders})
+                      "evidence": ev_app[:30] + holders, "diagram": mine})
     return specs
 
 
@@ -601,6 +637,10 @@ def write_summary(spec: dict[str, Any], llm: Any) -> dict[str, Any]:
     if cut and text:
         whole = text.rsplit("\n", 1)[0].rstrip() if "\n" in text else text
         text = whole + "\n\n" + CUT_NOTE
+    block = diagram_block(spec.get("diagram") or [])
+    if text and block:                            # (0.11.0) the relations the documents state, drawn by the page
+        text += ("\n\n## Relations diagram\n\nWhat the documents and the code state about the parts (the most stated "
+                 "first; read each line as the part on the left, what it does, the part on the right).\n\n" + block)
     return {"content": text, "sources": sources, "tokens": tokens, "cut": cut}
 
 

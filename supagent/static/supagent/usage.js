@@ -8,6 +8,9 @@
   var last = null, measure = "tokens";
 
   function iso(d) { return d.toISOString().slice(0, 19); }
+  function zoneName() {   /* (0.11.0) the viewer's time zone by name: buckets right across a change of summer time */
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { return ""; }
+  }
   function localInput(d) {
     var z = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
     return z.toISOString().slice(0, 16);
@@ -89,12 +92,22 @@
       { label: "s", key: "seconds", num: true }, { label: "LLM calls", key: "llm_calls", num: true },
       { label: "Tool calls", key: "tool_calls", num: true }, { label: "Context", key: "prompt_tokens", num: true }], d.slowest_answers);
   }
+  var loadSeq = 0;
   function load() {
-    var p = period(), g = $("grain").value;
+    var p = period(), g = $("grain").value, seq = ++loadSeq;
     var q = "usage?start=" + encodeURIComponent(iso(p.start)) + "&end=" + encodeURIComponent(iso(p.end)) +
-      "&tz=" + encodeURIComponent(-new Date().getTimezoneOffset()) + (g === "auto" ? "" : "&grain=" + g);
+      "&tz=" + encodeURIComponent(-new Date().getTimezoneOffset()) + "&tzname=" + encodeURIComponent(zoneName()) +
+      (g === "auto" ? "" : "&grain=" + g);
     $("usage-note").textContent = "Loading...";
-    S.admin("GET", q).then(render, function (e) { $("usage-note").textContent = "Could not load the usage: " + (e && e.message || e); });
+    S.admin("GET", q).then(function (d) {
+      if (seq !== loadSeq) return;                 // (0.11.0) a later choice answers: an older, slower period never draws
+      if (d.error) {                               // (0.11.0) said, and the page stays as it was
+        $("usage-note").textContent = "Could not load the usage: " + (/^\s*</.test(d.error) ? "HTTP " + d._status : d.error) +
+          (last ?" (the figures below are still those of the period shown before)" : "");
+        return;
+      }
+      render(d);
+    });
   }
   $("preset").addEventListener("change", function () {
     var custom = this.value === "custom";
@@ -136,15 +149,19 @@
   function renderHosts(d) {
     var t = $("hosts");
     t.innerHTML = "";
-    var heads = ["Server", "Components", "CPU", "Load 1 · 5 · 15", "Memory", "Swap", "Disks", "Superset processes",
+    var heads = ["Server", "Components", "CPU", "Load 1 · 5 · 15", "Memory", "Swap", "Superset's disk", "Superset processes",
                  "CPU, 24 h", "Memory, 24 h", "Seen"];
     t.appendChild(el("thead", {}, [el("tr", {}, heads.map(function (h) { return el("th", { text: h }); }))]));
     var body = el("tbody", {});
     (d.hosts || []).forEach(function (h) {
       var l = h.last || {}, roles = h.roles || {};
       var comps = Object.keys(roles).sort().map(function (r) { return r + (roles[r].alive ? "" : " (gone)"); }).join(", ");
-      var disks = el("div", {}, (l.disks || []).map(function (k) {
-        return el("div", {}, [warn(k.mount + " " + S.num(k.pct) + " % of " + S.bytes(k.total), k.pct >= 90)]); }));
+      var disks = el("div", {}, (l.disks || []).map(function (k) {   /* (0.11.0) the disk Superset is on */
+        var holds = (k.holds || []).join(", ");
+        var free = typeof k.free === "number" ? ", " + S.bytes(k.free) + " free" : "";
+        return el("div", { title: holds ? k.mount + " holds " + holds + (k.path ? " (" + k.path + ")" : "") : k.mount }, [
+          warn(k.mount + ": " + S.bytes(k.used) + " of " + S.bytes(k.total) + " (" + S.num(k.pct) + " %" + free + ")", k.pct >= 90),
+          holds ? el("div", { class: "muted small", text: holds }) : ""]); }));
       var mem = l.mem_total ? warn(S.bytes(l.mem_used) + " of " + S.bytes(l.mem_total) + " (" + pct(l.mem_pct) + ")", l.mem_pct >= 90) : "";
       var swap = l.swap_total ? warn(S.bytes(l.swap_used) + " of " + S.bytes(l.swap_total), l.swap_used > l.swap_total / 2) : el("span", { class: "muted", text: "none" });
       var load = (l.load || []).map(function (x) { return S.num(x); }).join(" · ") + (l.cpus ? " (" + l.cpus + " cores)" : "");

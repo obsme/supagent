@@ -86,6 +86,8 @@
 
   // ------------------------------------------------------------------ To review (admins)
   var counts = {};
+  var WAITING = ["memory", "recipes", "values", "relations", "tags", "links", "removals", "retire", "context", "warnings",
+                 "fields", "grafana"];                  // (0.11.0) the groups in the server's "waiting" (views._review)
   function setWaiting(n) {
     var c = $("review-count");
     c.textContent = n > 999 ? "999+" : String(n);
@@ -138,7 +140,8 @@
     counts[group] = Math.max(0, (counts[group] || 0) - (n === undefined ? 1 : n));
     var c = $("rg-count-" + group);
     if (c) c.textContent = S.num(counts[group]);
-    var waiting = ["memory", "recipes", "values", "removals", "tags", "links"].reduce(function (s, k) { return s + (counts[k] || 0); }, 0);
+    // (0.11.0) every group the server counts as waiting (its "waiting"), not six of them: the badge never drops too low
+    var waiting = WAITING.reduce(function (s, k) { return s + (counts[k] || 0); }, 0);
     setWaiting(waiting);
     summaryLine(waiting);
     saved();
@@ -263,11 +266,12 @@
     ["retire", "Parts that look retired", "A value read in the data that its category's fields and labels have not shown for two weeks, or one a text says was retired or decommissioned. Nothing is retired by itself. Retire keeps the value, marked retired: it is no longer used nor drawn, and adding it again by hand brings it back. Keep: the same reason is not proposed again."],
     ["tags", "Categories given to items", "The LLM was not sure enough to give these alone."],
     ["links", "Relations and interactions", "What the LLM found related (explains, about, depends on), and the interactions between parts of the system that your documents state (each with its sentence): approved, they are drawn on the System map and followed by the agent's investigations."],
-    ["routes", "Kinds of work learned from the chats", "Already used as examples by the router; set the right kind, or remove a wrong one."],
     ["fields", "Where the categories are in the data", "Labels and fields that hold several values of a category and are not read for it yet (0.10.2). Read it: the agent knows where the category is in the data, and the next learning proposes the label's other values as values of the category (here, to approve). Set aside: not proposed again."],
-    ["warnings", "What could confuse the agent or the search", "Found in the knowledge each time this page is read (0.10.2): one name for two things (or a proposal naming a value of another category), one thing written two ways, the System map in a circle, documents holding the same pages, a term defined twice. Each says why and what to do; Set aside: not said again."],
+    ["warnings", "What could confuse the agent or the search", "Found in the knowledge each time this page is read (0.10.2): one name for two things (or a proposal naming a value of another category), one thing written two ways, the System map in a circle, documents holding the same pages, a term defined twice, (0.11.0) a memory, a catalog entry or a learned answer said twice or two alike ones. Each says why and what to do; Set aside: not said again."],
     ["grafana", "Alert rules and dashboards drafted for Grafana", "Drafted by the agent from a rule the team wrote (team memory, catalog) or asked in a chat (0.10.10). Grafana has nothing until you approve (with grafana.writes on): an alert rule is created in the folder of the settings (grafana.alert_folder), a dashboard in the folder of Browse its draft names (the folders whose dashboards are about the same things are shown), then read back. An existing rule or dashboard is never changed. Reject keeps it rejected."],
-    ["context", "Context pages written by the agent", "The nightly Context build proposes each change of a page (and the removal of a page whose subject is gone): the page shown stays as it is until you approve. A newer change of the same page replaces the one you did not review yet; what that one said and this one no longer does is listed, so nothing is lost silently. A new page is shown at once and listed here until someone has read it."]
+    ["context", "Context pages written by the agent", "The nightly Context build proposes each change of a page (and the removal of a page whose subject is gone): the page shown stays as it is until you approve. A newer change of the same page replaces the one you did not review yet; what that one said and this one no longer does is listed, so nothing is lost silently. A new page is shown at once and listed here until someone has read it."],
+    // (0.11.0) last, as on the page: the only group the agent already uses
+    ["routes", "Kinds of work learned from the chats", "Already used as examples by the router; set the right kind, or remove a wrong one."]
   ];
   var TITLES = {};
   GROUPS.forEach(function (g) { TITLES[g[0]] = g[1]; });
@@ -313,7 +317,11 @@
     var head = el("div", { class: "rgroup-head" }, [el("h2", { text: g[1] }), S.info(g[2], g[1]),
       el("span", { class: "count", id: "rg-count-" + key, text: S.num(counts[key]) })]);
     if (extra && extra.bulk) head.appendChild(extra.bulk);
-    var list = el("div", { class: "rlist" }, items.map(render));
+    var list = el("div", { class: "rlist" }, items.map(function (it) {   // (0.11.0) each card knows its item (bulk)
+      var c = render(it);
+      if (c) c._item = it;
+      return c;
+    }));
     var sec = el("section", { class: "rgroup", id: "rg-" + key }, [head, list]);
     if (extra && extra.fold && items.length > extra.fold) {          // a long optional group: the first ones
       var hidden = Array.prototype.slice.call(list.children, extra.fold);
@@ -415,24 +423,34 @@
 
   function bulk(label, key, items, fn, reject, opts) {   // "Approve all shown" (or reject): a second click confirms;
     opts = opts || {};                                     // opts.pick: only those items (0.10.10), opts.detail: what it does
-    var chosen = opts.pick ? items.filter(opts.pick) : items;
+    /* (0.11.0) the cards still waiting, each with its own item: a card decided alone leaves the list, and the next
+       cards were then paired with the items before theirs (a value rejected was approved again, the last one skipped) */
+    var waiting = function () {
+      var sec = $("rg-" + key);
+      return sec ? Array.prototype.filter.call(sec.querySelectorAll(".rcard"), function (c) {
+        return c._item && items.indexOf(c._item) >= 0 && !c.classList.contains("done") && (!opts.pick || opts.pick(c._item));
+      }) : [];
+    };
     var box = el("span", { class: "rbulk" });
     var go = el("button", { type: "button", class: "btn small", text: label, onclick: function () {
-      S.confirm(go, label + ": the " + chosen.length + " shown?", { yes: (reject ? "Reject " : "Approve ") + chosen.length, no: "Cancel",
+      var n = waiting().length;                            // (0.11.0) counted now: the ones decided alone are not in it
+      if (!n) return;
+      S.confirm(go, label + ": the " + n + " shown?", { yes: (reject ? "Reject " : "Approve ") + n, no: "Cancel",
         detail: opts.detail || (reject ? "Each one is set aside and never proposed again; you can still add it by hand." :
           "Each one is used by the agent at once; you can still change or retire them in Categories.") }).then(function (ok) {
         if (ok) all();
       });
     } });
     var all = function () {
-      go.disabled = true;
-      var cards = $("rg-" + key).querySelectorAll(".rcard");
+      var sec = $("rg-" + key);                            // (0.11.0) one bulk at a time: Approve all and Reject all both wait
+      if (sec) sec.querySelectorAll(".rbulk button").forEach(function (b) { b.disabled = true; });
       var chain = Promise.resolve(), n = 0;
-      items.forEach(function (it, i) {
-        var c = cards[i];
-        if (!c || c.classList.contains("done") || (opts.pick && !opts.pick(it))) return;   // decided one by one, or not picked
-        chain = chain.then(function () { return fn(it); }).then(function (r) {
-          if (r && r.error) return;
+      waiting().forEach(function (c) {
+        var it = c._item;
+        chain = chain.then(function () {
+          return c.classList.contains("done") ? { skip: true } : fn(it);     // decided alone meanwhile: left as decided
+        }).then(function (r) {
+          if (!r || r.skip || r.error) return;
           c.classList.add("done", "leaving"); c._acts.innerHTML = ""; c._acts.appendChild(el("span", { class: "rdone", text: reject ? "rejected" : "approved" }));
           n++;
         });
@@ -595,7 +613,7 @@
                 el("label", { class: "field" }, [el("span", { text: "Also called" }), sy]),
                 el("div", { class: "actions" }, [saveApprove, saveOnly])]);
             }),
-            toggleButton("Merge into…", "p-merge", function () {
+            !canDelete ? null : toggleButton("Merge into…", "p-merge", function () {   // (0.11.0) a merge: an AI Admin's
               var sel = el("select", { class: "merge", "aria-label": "Merge into" }, [el("option", { value: "", text: "Loading…" })]);
               var line = el("div", { class: "actions" }, [sel]);
               S.admin("GET", "facets?facet=" + encodeURIComponent(v.facet) + "&status=approved").then(function (f) {
@@ -774,20 +792,18 @@
             })).concat((w.disable || []).map(function (k) {     // (0.10.6) a document holding only pages read before
               return act(k.label, "", "warnings", function () {
                 return S.admin("POST", "docs/" + k.doc, { enabled: false }).then(function (r) { return r.error ? r : { done: "disabled", reload: true }; }); });
+            })).concat((canDelete ? (w.remove || []) : []).map(function (k) {   // (0.11.0) a copy: removed or disabled
+              return act(k.label, "", "warnings", function () {
+                // (0.11.0) a memory or an entry is disabled (kept, not used); a learned answer is deleted: removed
+                var done = function (r) { return r.error ? r : { done: k.recipe ? "removed" : "disabled", reload: true }; };
+                if (k.memory) return S.admin("POST", "memory/" + k.memory, { status: "disabled" }).then(done);
+                if (k.recipe) return S.dict("DELETE", "recipes/" + k.recipe).then(done);
+                return S.admin("PUT", "entries/" + k.entry, k.values || { enabled: false }).then(done);
+              });
             })).concat([
               act("Set aside", "", "warnings", function () { return S.admin("POST", "lint/dismiss", { key: w.key }).then(function (r) { return r.error ? r : { done: "set aside: not said again" }; }); })
             ]));
         }),
-        counts.routes ? el("h2", { class: "section-title later", text: "When you have time (already used by the agent)" }) : null,
-        group("routes", d.routes || [], function (r) {
-          var sel = el("select", { "aria-label": "Kind of work" }, ROUTES.map(function (k) { return el("option", { value: k, text: k, selected: k === r.route ? "selected" : null }); }));
-          return card([el("div", { class: "rtext", text: r.question }), el("div", {}, [el("span", { class: "facet-chip", text: r.route })])],
-            "routed by " + (r.by || "?") + " · marked " + (r.signal || "") + " · " + S.when(r.at), [
-              sel,
-              act("Set", "primary", "routes", function () { return S.admin("POST", "routes/" + r.id, { route: sel.value }).then(function (x) { return x.error ? x : { done: sel.value === r.route ? "kept: " + r.route : "set to " + sel.value }; }); }),
-              act("Not an example", "", "routes", function () { return S.admin("POST", "routes/" + r.id, { remove: true }).then(function (x) { return x.error ? x : { done: "removed" }; }); })
-            ]);
-        }, { fold: 10 }),
         group("context", d.context || [], function (pg) {
           // a Context page: its change as statements added and dropped, what an earlier proposal said that this one does not
           var main = [el("div", { class: "rtext" }, [document.createTextNode(pg.title + " "),
@@ -854,7 +870,18 @@
             (pg.replaced ? " \u00b7 replaces " + pg.replaced + " earlier proposal" + (pg.replaced > 1 ? "s" : "") : ""), acts);
         }, (d.context || []).filter(newPage).length > 1 ? { bulk: bulk("Read: fine, all new pages shown", "context",   // (0.10.10)
           d.context || [], function (pg) { return S.admin("POST", "context/" + pg.id + "/review", { action: "approve" }); }, false,
-          { pick: newPage, detail: "Each new page stays as it is (the agent reads it already); you can still edit or reject it later in the Context." }) } : null)
+          { pick: newPage, detail: "Each new page stays as it is (the agent reads it already); you can still edit or reject it later in the Context." }) } : null),
+        // (0.11.0) the Context pages wait for a decision: drawn above; what the agent already uses comes last
+        counts.routes ? el("h2", { class: "section-title later", text: "When you have time (already used by the agent)" }) : null,
+        group("routes", d.routes || [], function (r) {
+          var sel = el("select", { "aria-label": "Kind of work" }, ROUTES.map(function (k) { return el("option", { value: k, text: k, selected: k === r.route ? "selected" : null }); }));
+          return card([el("div", { class: "rtext", text: r.question }), el("div", {}, [el("span", { class: "facet-chip", text: r.route })])],
+            "routed by " + (r.by || "?") + " · marked " + (r.signal || "") + " · " + S.when(r.at), [
+              sel,
+              act("Set", "primary", "routes", function () { return S.admin("POST", "routes/" + r.id, { route: sel.value }).then(function (x) { return x.error ? x : { done: sel.value === r.route ? "kept: " + r.route : "set to " + sel.value }; }); }),
+              act("Not an example", "", "routes", function () { return S.admin("POST", "routes/" + r.id, { remove: true }).then(function (x) { return x.error ? x : { done: "removed" }; }); })
+            ]);
+        }, { fold: 10 })
       ];
       parts.forEach(function (p) { if (p) box.appendChild(p); });
     });
@@ -1197,6 +1224,7 @@
   }
   /* (0.10.7) the pages of a document, under its row: each page read (its title, address, size, links), the pages
      not read and why, and the limit reached with pages left unread */
+  var PAGE_ROWS = 500;                              /* (0.11.0) rows drawn at a time: 50,000 at once froze the page */
   function docPages(x, row, btn) {
     var open = row.nextSibling && row.nextSibling.className === "doc-pages" ? row.nextSibling : null;
     if (open) { open.remove(); btn.textContent = "Pages"; return; }
@@ -1204,6 +1232,7 @@
     var box = el("tr", { class: "doc-pages" }, [cell]);
     row.after(box); btn.textContent = "Hide pages";
     var shown = null;                               /* (0.10.9.2) the list as last shown */
+    var view = null;                                /* (0.11.0) the rows drawn: a removal takes only its rows away */
     var read = function () { return S.admin("GET", "docs/" + x.id + "/pages").then(render); };
     /* (0.10.9.1) a page removed by an admin: not read again, its text, its search pieces and what was learned from
        it deleted at once; given back from the list of the removed pages */
@@ -1220,42 +1249,38 @@
           yes.disabled = no.disabled = true;
           S.admin("POST", "docs/" + x.id + "/pages/remove", { page_id: p.page_id || "", path: p.path || "", url: p.url || "" }).then(function (r) {
             if (!r || r.error) { res.textContent = (r && r.error) || "not removed"; res.className = "result bad"; yes.disabled = no.disabled = false; return; }
-            /* (0.10.9.2) the list changed in place (never read again from the server, the place kept) */
-            if (shown) {
-              shown.pages = (shown.pages || []).filter(function (q) { return q !== p; });
-              (shown.excluded = shown.excluded || []).push({ key: r.removed, title: r.title || p.title || "", url: p.url || "",
-                                                             by: "you", at: new Date().toISOString() });
-              var wrap = cell.querySelector(".table-wrap"), top = wrap ? wrap.scrollTop : 0;
-              render(shown);
-              wrap = cell.querySelector(".table-wrap");
-              if (wrap) wrap.scrollTop = top;
-            } else { read(); }
+            /* (0.10.9.2) the list changed in place (never read again from the server, the place kept); (0.11.0) its row
+               only: the list is not drawn again (50,000 pages took seconds at each removal) */
+            if (view) view.drop([p], [{ key: r.removed, title: r.title || p.title || "", url: p.url || "" }]);
+            else read();
           });
         });
       });
       return b;
     };
-    /* (0.10.11.1) several pages removed at once: a filter (title, address, space), "all shown", Remove picked */
-    var bulkBar = function (rows) {
+    /* (0.10.11.1) several pages removed at once: a filter (title, address, space), "all shown", Remove picked;
+       (0.11.0) "all shown" picks the rows drawn: the first ones that match (Show more draws the next ones) */
+    var bulkBar = function (v) {
       var filter = el("input", { type: "search", placeholder: "Filter the pages (title, address, space)", "aria-label": "Filter the pages" });
       var all = el("input", { type: "checkbox", "aria-label": "Pick every page shown" });
       var go = el("button", { type: "button", class: "btn small danger", text: "Remove picked pages" });
       var res = el("span", { class: "result", role: "status" });
       var bar = el("div", { class: "doc-pages-bulk" }, [el("label", {}, [all, document.createTextNode(" all shown ")]), filter, go, res]);
-      var picked = function () { return rows.filter(function (r) { return r.box.checked; }); };
+      var picked = function () { return v.rows.filter(function (r) { return r.box && r.box.checked; }); };
       var count = function () {
         var n = picked().length;
         go.disabled = !n;
         go.textContent = n ? "Remove " + S.num(n) + " picked page" + (n === 1 ? "" : "s") : "Remove picked pages";
       };
-      rows.forEach(function (r) { r.box.addEventListener("change", count); });
+      v.count = count;                              // a row's box, made when the row is first drawn, calls it
       filter.addEventListener("input", function () {
-        var t = filter.value.trim().toLowerCase();
-        rows.forEach(function (r) { r.tr.hidden = !!t && r.text.indexOf(t) < 0; });
+        v.filter = filter.value.trim().toLowerCase();
+        v.limit = PAGE_ROWS;
         all.checked = false;
+        v.paint();
       });
       all.addEventListener("change", function () {
-        rows.forEach(function (r) { if (!r.tr.hidden) r.box.checked = all.checked; });
+        v.drawn().forEach(function (r) { r.box.checked = all.checked; });
         count();
       });
       go.addEventListener("click", function () {
@@ -1272,16 +1297,15 @@
           res.textContent = "Removing…"; res.className = "result";
           S.admin("POST", "docs/" + x.id + "/pages/remove", { pages: chosen.map(function (r) {
             return { page_id: r.p.page_id || "", path: r.p.path || "", url: r.p.url || "" }; }) }).then(function (r) {
+            ask.replaceWith(go);
             if (!r || r.error || !(r.removed || []).length) {
-              res.textContent = (r && r.error) || "not removed"; res.className = "result bad"; ask.replaceWith(go); return;
+              res.textContent = (r && r.error) || "not removed"; res.className = "result bad"; return;
             }
-            if (shown) {
-              var gone = chosen.map(function (c) { return c.p; });
-              shown.pages = (shown.pages || []).filter(function (q) { return gone.indexOf(q) < 0; });
-              shown.excluded = (shown.excluded || []).concat(r.removed.map(function (k) {
-                return { key: k.key, title: k.title || "", url: k.url || "", by: "you", at: new Date().toISOString() }; }));
-              render(shown);
-            } else { read(); }
+            res.textContent = S.num(r.removed.length) + " removed"; res.className = "result good";
+            all.checked = false;
+            if (view) view.drop(chosen.map(function (c) { return c.p; }), r.removed.map(function (k) {
+              return { key: k.key, title: k.title || "", url: k.url || "" }; }));
+            else read();
           });
         });
       });
@@ -1290,14 +1314,23 @@
     };
     function render(d) {
       cell.innerHTML = "";
+      view = null;
       if (d.error) { cell.appendChild(el("div", { class: "result bad", text: d.error })); return; }
       shown = d;
-      var last = d.last_reading || {}, pages = d.pages || [], gone = d.excluded || [], can = !!d.can_remove;
-      var said = S.num(pages.length) + " page" + (pages.length === 1 ? "" : "s") + " read";
-      if (last.not_read) said += " · " + S.num(last.not_read) + " not read (listed below)";
-      if (gone.length) said += " · " + S.num(gone.length) + " removed";
-      if (last.at) said += " · last read " + S.when(last.at);
-      cell.appendChild(el("div", { class: "doc-pages-head", text: said }));
+      shown.pages = d.pages || [];
+      shown.excluded = d.excluded || [];
+      var last = d.last_reading || {}, can = !!d.can_remove;
+      var head = el("div", { class: "doc-pages-head" });
+      var sayHead = function () {
+        var pages = shown.pages, gone = shown.excluded;
+        var said = S.num(pages.length) + " page" + (pages.length === 1 ? "" : "s") + " read";
+        if (last.not_read) said += " · " + S.num(last.not_read) + " not read (listed below)";
+        if (gone.length) said += " · " + S.num(gone.length) + " removed";
+        if (last.at) said += " · last read " + S.when(last.at);
+        head.textContent = said;
+      };
+      sayHead();
+      cell.appendChild(head);
       if (last.limit_reached) {
         cell.appendChild(el("div", { class: "result warn", text: "The limit of " + S.num(d.max_pages) + " pages was reached" +
           (last.left ? ": at least " + S.num(last.left) + " more linked page" + (last.left === 1 ? " was" : "s were") + " not read" : "") +
@@ -1307,29 +1340,75 @@
       var table = el("table", { class: "grid compact" }, [el("thead", {}, [el("tr", {}, heads.map(function (h) {
         return el("th", { text: h }); }))])]);
       var tb = el("tbody", {});
-      var rows = [];                                /* (0.10.11.1) pages picked for a removal at once */
-      pages.forEach(function (p) {
+      /* (0.11.0) every page has its line in `rows` (what it is searched by); its row in the table is made when it is
+         first drawn: the first PAGE_ROWS that match the filter, Show more for the next ones */
+      var v = view = { filter: "", limit: PAGE_ROWS, count: function () {}, rows: shown.pages.map(function (p) {
+        return { p: p, text: [p.title, p.path, p.url, p.space].filter(Boolean).join(" ").toLowerCase() };   // (0.10.11.1)
+      }) };
+      var make = function (r) {
+        if (r.tr) return r.tr;
+        var p = r.p;
         var name = p.url ? el("a", { href: p.url, target: "_blank", rel: "noopener", text: p.title || p.path || p.url }) :
           el("span", { text: p.title || p.path || "" });
         var tr = el("tr", {}, [el("td", {}, [name, p.url ? el("div", { class: "muted nm", text: p.url }) : null]),
           el("td", { text: p.space || "" }), el("td", { class: "num", text: S.bytes(p.chars || 0) }),
           el("td", { class: "num", text: p.links ? S.num(p.links) : "" }), el("td", { class: "num", text: p.images ? S.num(p.images) : "" })]);
         if (can) {
-          var box = el("input", { type: "checkbox", "aria-label": "Pick this page" });
-          tr.insertBefore(el("td", {}, [box]), tr.firstChild);
+          var pick = el("input", { type: "checkbox", "aria-label": "Pick this page" });
+          pick.addEventListener("change", function () { v.count(); });
+          tr.insertBefore(el("td", {}, [pick]), tr.firstChild);
           tr.appendChild(el("td", { class: "row-actions" }, [removeBtn(p, tr)]));
-          rows.push({ p: p, tr: tr, box: box,
-                      text: [p.title, p.path, p.url, p.space].filter(Boolean).join(" ").toLowerCase() });
+          r.box = pick;
         }
-        tb.appendChild(tr);
-      });
-      if (can && rows.length) cell.appendChild(bulkBar(rows));
-      if (!pages.length) tb.appendChild(D.emptyRow(heads.length, "No page read yet."));
+        r.tr = tr;
+        return tr;
+      };
+      var matching = function () {
+        return v.filter ? v.rows.filter(function (r) { return r.text.indexOf(v.filter) >= 0; }) : v.rows;
+      };
+      var more = el("button", { type: "button", class: "btn small", hidden: "hidden",
+        onclick: function () { v.limit += PAGE_ROWS; v.fill(); } });
+      var none = null;
+      /* the rows drawn are always the first ones that match, in order: a removal takes rows away, fill() adds the next */
+      v.fill = function () {
+        var list = matching(), want = Math.min(list.length, v.limit), k = 0;
+        if (none) { none.remove(); none = null; }
+        while (k < list.length && list[k].tr && list[k].tr.parentNode === tb) k++;
+        for (var i = k; i < want; i++) tb.appendChild(make(list[i]));
+        if (!list.length) tb.appendChild(none = D.emptyRow(heads.length, v.rows.length ? "No page matches." : "No page read yet."));
+        more.hidden = list.length <= v.limit;
+        more.textContent = "Show " + S.num(Math.min(PAGE_ROWS, list.length - v.limit)) + " more (" + S.num(Math.max(0, list.length - v.limit)) + " not shown)";
+      };
+      v.paint = function () { tb.innerHTML = ""; none = null; v.fill(); };     // the filter changed: drawn again
+      v.drawn = function () { return v.rows.filter(function (r) { return r.tr && r.tr.parentNode === tb; }); };
+      /* pages removed (one, or picked ones): their rows go, the next pages take their places, the counts follow */
+      v.drop = function (ps, entries) {
+        ps.forEach(function (p) { p._gone = true; });
+        shown.pages = shown.pages.filter(function (q) { return !q._gone; });
+        v.rows = v.rows.filter(function (r) {
+          if (!r.p._gone) return true;
+          if (r.tr) r.tr.remove();
+          return false;
+        });
+        var at = new Date().toISOString();
+        entries.forEach(function (k) { shown.excluded.push({ key: k.key, title: k.title, url: k.url, by: "you", at: at }); });
+        v.fill();
+        sayHead();
+        sayGone();
+        v.count();
+      };
+      if (can && v.rows.length) cell.appendChild(bulkBar(v));
       table.appendChild(tb);
       cell.appendChild(el("div", { class: "table-wrap" }, [table]));
-      if (gone.length) {
-        cell.appendChild(el("div", { class: "doc-pages-head", text: "Removed (not read again)" }));
-        cell.appendChild(el("p", { class: "muted small-note", text: "Their text, their search pieces and what was learned from them " +
+      cell.appendChild(more);
+      v.fill();
+      var goneBox = el("div", { class: "doc-pages-gone" });
+      var sayGone = function () {
+        var gone = shown.excluded;
+        goneBox.innerHTML = "";
+        if (!gone.length) return;
+        goneBox.appendChild(el("div", { class: "doc-pages-head", text: "Removed (not read again)" }));
+        goneBox.appendChild(el("p", { class: "muted small-note", text: "Their text, their search pieces and what was learned from them " +
           "were deleted; what the System map was proposed from them is withdrawn at the next learning (a link already approved " +
           "is only proposed for removal)." }));
         var rt = el("tbody", {});
@@ -1347,9 +1426,11 @@
             el("td", { class: "muted", text: [k.by, k.at ? S.when(k.at) : ""].filter(Boolean).join(" · ") }),
             el("td", { class: "row-actions" }, [back])]));
         });
-        cell.appendChild(el("div", { class: "table-wrap" }, [el("table", { class: "grid compact" }, [el("thead", {}, [el("tr", {}, [
+        goneBox.appendChild(el("div", { class: "table-wrap" }, [el("table", { class: "grid compact" }, [el("thead", {}, [el("tr", {}, [
           el("th", { text: "Page" }), el("th", { text: "Removed" }), el("th", { text: "" })])]), rt])]));
-      }
+      };
+      sayGone();
+      cell.appendChild(goneBox);
       if ((last.skipped || []).length) {
         cell.appendChild(el("div", { class: "doc-pages-head", text: "Not read" }));
         var nt = el("tbody", {});
@@ -1423,7 +1504,7 @@
      agent reads: each one switched on or off (an admin's), all off then the needed ones on, the last modified date to
      choose from. A switch saves at once; the pages of a dashboard switched off leave the Context and the search. */
   var DASH = { source: null, q: "", kind: "dashboard", state: "", sort: "updated", rows: [], total: 0, sources: [],
-               can: false, poll: null, qTimer: null };
+               can: false, poll: null, qTimer: null, seq: 0 };
   var DASH_PAGE = 200;
   var KID_NAMES = { grafana: ["panel", "panels"], osd: ["visualization", "visualizations"] };
   function dashSource() { return DASH.sources.filter(function (x) { return x.source === DASH.source; })[0]; }
@@ -1548,11 +1629,19 @@
   function dashRows(more) {
     var s = dashSource(), tb = document.querySelector("#dash-table tbody"), th = document.querySelector("#dash-table thead tr");
     if (!s || !tb) return;
-    var offset = more ? DASH.rows.length : 0;
+    var offset = more ? DASH.rows.length : 0, seq = ++DASH.seq;
     var path = "dashlist/" + s.source + "?kind=" + encodeURIComponent(DASH.kind) + "&q=" + encodeURIComponent(DASH.q) +
       "&state=" + encodeURIComponent(DASH.state) + "&sort=" + encodeURIComponent(DASH.sort) + "&offset=" + offset + "&limit=" + DASH_PAGE;
     S.admin("GET", path).then(function (d) {
-      if (!d || d.error) { tb.innerHTML = ""; tb.appendChild(D.emptyRow(6, (d && d.error) || "not read")); return; }
+      if (seq !== DASH.seq) return;                 // (0.11.0) a later search or Show more answers: an older one never draws
+      if (!d || d.error) {
+        var again = more ? document.querySelector("#dash-more button") : null;
+        if (again) {                                // (0.11.0) the rows shown stay; Show more can be clicked again
+          again.disabled = false; again.textContent = again.dataset.label || again.textContent; again.title = (d && d.error) || "not read";
+          return;
+        }
+        tb.innerHTML = ""; tb.appendChild(D.emptyRow(6, (d && d.error) || "not read")); return;
+      }
       var boards = DASH.kind === "dashboard";
       th.innerHTML = "";
       (boards ? ["Read", "Dashboard", s.source === "grafana" ? "Folder" : "Index patterns", s.kid.charAt(0).toUpperCase() + s.kid.slice(1), "Last modified"]
@@ -1566,7 +1655,11 @@
       var moreBox = $("dash-more");
       moreBox.innerHTML = "";
       if (left > 0) moreBox.appendChild(el("button", { type: "button", class: "btn small", text: "Show " + S.num(Math.min(left, DASH_PAGE)) + " more (" + S.num(left) + " left)",
-        onclick: function () { dashRows(true); } }));
+        onclick: function (ev) {                    // (0.11.0) one click reads one page: a double click appended it twice
+          var b = ev.currentTarget;
+          b.disabled = true; b.dataset.label = b.textContent; b.textContent = "Reading…";
+          dashRows(true);
+        } }));
       dashBulk();
     });
   }
@@ -1771,14 +1864,24 @@
             ev.target.setAttribute("aria-expanded", "true");
             valueCell.appendChild(S.linksBox({ id: f.id, value: f.value }, { onchange: function () { saved(); } }));
           } }));
-        var same = all.filter(function (x) { return x.facet === f.facet && x.id !== f.id && x.status === "approved"; });
+        // (0.11.0) a merge is an AI Admin's (as the server): the button only for one, and asked first (it is not undone)
+        var same = canDelete ? all.filter(function (x) { return x.facet === f.facet && x.id !== f.id && x.status === "approved"; }) : [];
         if (same.length) {
           acts.appendChild(el("button", { type: "button", class: "linkish", text: "Merge…", onclick: function () {
             if (acts.querySelector("select")) return;
             var sel = el("select", { "aria-label": "Merge into" }, [el("option", { value: "", text: "into…" })].concat(
               same.map(function (x) { return el("option", { value: x.id, text: x.value }); })));
-            if (canDelete) acts.appendChild(sel);
-            sel.addEventListener("change", function () { if (sel.value) post({ merge_into: +sel.value }); });
+            acts.appendChild(sel);
+            sel.addEventListener("change", function () {
+              var into = sel.value, name = into ? sel.options[sel.selectedIndex].text : "";
+              if (!into) return;
+              S.confirm(sel, "Merge “" + f.value + "” into “" + name + "”?", { yes: "Merge", no: "Cancel",
+                detail: "Its items and links go to “" + name + "”, its name becomes one of its other names, and “" +
+                  f.value + "” goes. It cannot be undone." }).then(function (ok) {
+                if (ok) post({ merge_into: +into });
+                else if (sel.value === into) sel.value = "";      // (another value chosen meanwhile: kept)
+              });
+            });
           } }));
         }
         // (0.10.6.1) every value but the fixed aspects, the ones seeded at the start too (they had no way out): a value
@@ -1970,7 +2073,7 @@
         };
         var acts = el("td", { class: "row-actions" });
         if (admin && n.scope === "team") {
-          acts.appendChild(el("button", { type: "button", class: "linkish", text: n.pinned ? "Unpin" : "Pin",
+          acts.appendChild(el("button", { type: "button", class: "linkish", text: n.pinned ? "Unpin" : "Pin for everyone",   // (0.11.0) as in the chat
             onclick: function () { post("", { pinned: !n.pinned }); } }));
           if (!n.entry_id) acts.appendChild(el("button", { type: "button", class: "linkish", text: "Make a catalog entry",
             onclick: function () { post("/promote", {}); } }));

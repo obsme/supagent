@@ -6,6 +6,7 @@ back those it took. A query naming a deactivated object is sent back before it r
 from __future__ import annotations
 
 import datetime as dt
+import json
 import re
 from typing import Any
 
@@ -15,6 +16,7 @@ from supagent.models import KObject
 
 DEACTIVATED = dt.datetime(1970, 1, 1)      # the gone_at of a deactivated object (a real gone time is never this)
 CHILD_KIND = {"index": "field", "family": "field", "metric": "label"}
+TAKEN_KEY = "deactivated_with"             # (0.11.0) the fields or labels each deactivated object took with it
 
 
 def is_deactivated(o: Any) -> bool:
@@ -27,18 +29,46 @@ def alive(o: Any) -> None:
         o.gone_at = None
 
 
+def _taken() -> tuple[Any, dict[str, list[int]]]:
+    """(0.11.0) The row and the fields or labels each deactivated index or metric took with it, by its id."""
+    from supagent.models import Meta
+
+    row = db.session.get(Meta, TAKEN_KEY)
+    try:
+        taken = json.loads(row.value) if row is not None and row.value else {}
+    except ValueError:
+        taken = {}
+    return row, taken if isinstance(taken, dict) else {}
+
+
 def set_active(o: KObject, active: bool) -> int:
-    """Deactivate (active False) or activate an object, with its fields or labels; how many objects changed."""
+    """Deactivate (active False) or activate an object, with its fields or labels; how many objects changed.
+    (0.11.0) Activated again, it brings back only the fields or labels it took: one the team deactivated on its own
+    stays deactivated (all of them when it was deactivated before what it took was written down)."""
     kids = []
     if o.kind in CHILD_KIND:
         kids = db.session.query(KObject).filter(KObject.source_id == o.source_id, KObject.parent == o.name,
                                                 KObject.kind == CHILD_KIND[o.kind]).all()
-    n = 0
+    row, taken = _taken() if kids else (None, {})
+    was = is_deactivated(o)
+    back = taken.pop(str(o.id), None) if active else None
+    n, took = 0, []
     for x in [o] + kids:
         if not active and x.gone_at is None:
             x.gone_at, n = DEACTIVATED, n + 1
-        elif active and is_deactivated(x):
+            if x is not o:
+                took.append(x.id)
+        elif active and is_deactivated(x) and (x is o or back is None or x.id in back):
             x.gone_at, n = None, n + 1
+    if kids and ((not active and not was) or back is not None):
+        if not active:
+            taken[str(o.id)] = took
+        from supagent.models import Meta
+
+        if row is None:
+            db.session.add(Meta(key=TAKEN_KEY, value=json.dumps(taken)))
+        else:
+            row.value = json.dumps(taken)
     return n
 
 

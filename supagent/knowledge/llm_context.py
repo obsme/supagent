@@ -37,6 +37,12 @@ def _mark(ids: Any) -> str:
     return f" <!-- db:{','.join(map(str, ids))} -->" if ids else ""
 
 
+def _emark(e: dict[str, Any]) -> str:
+    """(0.11.0) The catalog entry a line says (an HTML comment, before the database's): a question given that entry
+    already (the knowledge found) is not given the line again."""
+    return f" <!-- e:{int(e['id'])} -->" if e.get("id") is not None else ""
+
+
 def _page(ev: dict[str, Any], full: bool) -> dict[str, Any]:
     from supagent.knowledge.context import clip
 
@@ -54,8 +60,8 @@ def _page(ev: dict[str, Any], full: bool) -> dict[str, Any]:
         chosen = [e for e in entries if (e["classification"] in kinds if kinds else e["classification"] not in OWN_KINDS)]
         if chosen:
             sections.append(["", f"## {heading}", ""] + [
-                f"- {e['title']}: {clip(' '.join(str(e.get('content') or '').split()), chars)}" + _mark(e.get("database_id"))
-                for e in sorted(chosen, key=lambda x: str(x["title"]).lower())])
+                f"- {e['title']}: {clip(' '.join(str(e.get('content') or '').split()), chars)}" + _emark(e) +
+                _mark(e.get("database_id")) for e in sorted(chosen, key=lambda x: str(x["title"]).lower())])
 
     for dbid, d in sorted(ev["databases"].items(), key=lambda x: str(x[1]["name"]).lower()):
         lines = ["", f"## Data: {d['name']} ({d['backend']}){_mark(dbid)}", ""]
@@ -124,9 +130,13 @@ def build() -> int:
 RULES_HEADING = "## Rules of the team"     # given apart with the agent's instructions: not twice
 
 
-def filtered(markdown: str, allowed: set[int], leave_out: tuple[str, ...] = ()) -> str:
+E_MARK = re.compile(r"\s*<!-- e:\d+ -->")
+
+
+def filtered(markdown: str, allowed: set[int], leave_out: tuple[str, ...] = (), entries: bool = False) -> str:
     """The text a user may be given: the sections and lines of the databases they may not query left out (and the
-    sections whose headings `leave_out` names), the markers removed."""
+    sections whose headings `leave_out` names), the markers removed ((0.11.0) the entries' kept with `entries`: the
+    agent leaves out the lines of the entries the knowledge found gave)."""
     out: list[str] = []
     skip = False
     for line in (markdown or "").splitlines():
@@ -140,7 +150,7 @@ def filtered(markdown: str, allowed: set[int], leave_out: tuple[str, ...] = ()) 
             continue
         if skip or (ids and not ids <= allowed):
             continue
-        out.append(text)
+        out.append(text if entries else E_MARK.sub("", text))
     return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
 
 
@@ -152,7 +162,13 @@ def _cut(text: str, limit: int) -> str:
     return text[: at if at > 0 else limit].rstrip() + "\n- ... (more in the data dictionary and the knowledge search)"
 
 
-def for_prompt() -> str:
+def page_text() -> str:
+    """(0.11.0) The LLM context this user may be given, whole (the agent takes the lines about the question from it:
+    knowledge.contextplan.excerpt): as for_prompt, uncut."""
+    return for_prompt(cut=False, entries=True)
+
+
+def for_prompt(cut: bool = True, entries: bool = False) -> str:
     """The LLM context for this user's question: the full page for a model of the long context profile, the light one
     for a short profile's when agent.llm_context is set on (else none), only what the databases they may query hold,
     within size("llm_context_chars"). Written now when the learning has not written it yet; a page a person refused
@@ -191,4 +207,5 @@ def for_prompt() -> str:
         p = page()
     if p is None or not p.content or p.kind == "rejected":
         return ""
-    return _cut(filtered(p.content, set(visible_databases()), (RULES_HEADING,)), size("llm_context_chars"))
+    text = filtered(p.content, set(visible_databases()), (RULES_HEADING,), entries=entries)
+    return _cut(text, size("llm_context_chars")) if cut else text

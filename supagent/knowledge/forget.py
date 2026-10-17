@@ -7,7 +7,8 @@ relations and the history of changes; the next run learns them all as new.
 
 Kept unless `everything`: what people did in the Data dictionary page, on the objects that carry
 it (a description written or approved by an admin, synonyms; not what the catalog gives, which
-the next run applies again) and the relations an admin marked Wrong. Those objects stay with
+the next run applies again), the items people gave a value or refused on the System map (0.11.0)
+and the relations an admin marked Wrong. Those objects stay with
 their learned facts cleared, and are profiled again as new ones.
 
 Never touched: the catalog entries (the next run applies them again), the learned answers, query
@@ -41,6 +42,21 @@ def _people(o: KObject, catalog: dict[tuple[str, str, str], dict[str, Any]]) -> 
     return bool(o.synonyms) and o.synonyms != syn
 
 
+def _on_the_map(mine: set[int]) -> set[int]:
+    """(0.11.0) The objects of `mine` a person decided about on the System map: an item they gave a value, approved or
+    refused there, a link of theirs. Forgotten, the next run would learn the object again under another id, and the
+    person's item would point at nothing (a refused one proposed again)."""
+    from supagent.models import Link, Tag
+
+    refs = {r for (r,) in db.session.query(Tag.ref).filter(
+        Tag.ref.like("object:%"), or_(Tag.source == "admin", Tag.reviewed_by.isnot(None)))}
+    for a, b in db.session.query(Link.a_ref, Link.b_ref).filter(
+            or_(Link.a_ref.like("object:%"), Link.b_ref.like("object:%")),
+            or_(Link.source == "admin", Link.reviewed_by.isnot(None))):
+        refs.update((a, b))
+    return {int(r[7:]) for r in refs if r.startswith("object:") and r[7:].isdigit()} & mine
+
+
 def forget(databases: list[str] | None = None, everything: bool = False, apply: bool = False) -> list[dict[str, Any]]:
     """What would be (or, with `apply`, is) forgotten, per database."""
     from supagent.knowledge.curated import catalog_texts
@@ -56,7 +72,7 @@ def forget(databases: list[str] | None = None, everything: bool = False, apply: 
         mine = {o.id for o in objs}
         keep: set[int] = set()
         if not everything:
-            keep = {o.id for o in objs if _people(o, catalog)}
+            keep = {o.id for o in objs if _people(o, catalog)} | _on_the_map(mine)
             for r in db.session.query(Relation).filter(Relation.rejected_at.isnot(None),
                                                        or_(Relation.a_id.in_(ids_q), Relation.b_id.in_(ids_q))):
                 keep |= {r.a_id, r.b_id} & mine

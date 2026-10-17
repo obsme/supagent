@@ -167,7 +167,7 @@ def _route_rows() -> Iterator[dict[str, Any]]:
 
 def _write_lines(z: zipfile.ZipFile, name: str, rows: Iterator[dict[str, Any]]) -> int:
     n = 0
-    with z.open(name, "w") as fh:
+    with z.open(name, "w", force_zip64=True) as fh:     # (0.11.0) a part over 2 GiB (big wikis, the vectors)
         for row in rows:
             fh.write((json.dumps(row, default=str, ensure_ascii=False) + "\n").encode())
             n += 1
@@ -178,9 +178,6 @@ def make(reason: str = "manual", by: str = "", vectors: bool | None = None, tag:
          progress: Any = None) -> dict[str, Any]:
     """Write a backup now; what it holds: {"name", "path", "bytes", "parts": {part: {table: rows}}, "seconds"}.
     `progress(part, counts)` is called after each part."""
-    from supagent import __version__
-    from supagent.models import SCHEMA_VERSION, Meta, Source
-
     t0 = time.time()
     folder = directory()
     os.makedirs(folder, mode=0o700, exist_ok=True)
@@ -190,6 +187,25 @@ def make(reason: str = "manual", by: str = "", vectors: bool | None = None, tag:
     tmp = path + ".part"
     vectors = bool(settings.get("backup.vectors")) if vectors is None else vectors
     parts: dict[str, dict[str, int]] = {}
+    try:
+        _make_into(tmp, parts, vectors, progress, reason, by)
+    except BaseException:                             # (0.11.0) a backup that failed leaves no half-written file
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    removed = prune()
+    return {"name": name, "path": path, "bytes": os.path.getsize(path), "parts": parts, "removed": removed,
+            "seconds": round(time.time() - t0, 1)}
+
+
+def _make_into(tmp: str, parts: dict[str, dict[str, int]], vectors: bool, progress: Any, reason: str,
+               by: str) -> None:
+    """The backup's file written (see make)."""
+    from supagent import __version__
+    from supagent.models import SCHEMA_VERSION, Meta, Source
+
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for part, models in _models().items():
             counts = {m.__tablename__: _write_lines(z, f"{part}/{m.__tablename__}.jsonl", _rows(m)) for m in models}
@@ -217,26 +233,93 @@ def make(reason: str = "manual", by: str = "", vectors: bool | None = None, tag:
                     "created_at": dt.datetime.utcnow().isoformat(timespec="seconds"), "by": by, "reason": reason,
                     "parts": parts, "databases": {str(i): n for i, n in db.session.query(Source.database_id, Source.database_name)}}
         z.writestr("manifest.json", json.dumps(manifest, indent=1))
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
-    removed = prune()
-    return {"name": name, "path": path, "bytes": os.path.getsize(path), "parts": parts, "removed": removed,
-            "seconds": round(time.time() - t0, 1)}
 
 
-def prune() -> list[str]:
-    """The oldest backups beyond backup.keep are removed (those made before a restore: beyond BEFORE_RESTORE)."""
+PART_LEFT_S = 24 * 3600     # a file a backup stopped half-way left (.part): removed once this old
+UPLOADED = "uploaded"       # the tag of a backup brought from elsewhere (Settings, Restore from a file)
+
+
+def _stamp(name: str) -> dt.datetime | None:
+    m = re.match(r"^supagent-knowledge-(\d{8}-\d{6})", name)
+    try:
+        return dt.datetime.strptime(m.group(1), "%Y%m%d-%H%M%S") if m else None
+    except ValueError:
+        return None
+
+
+def prune(now: dt.datetime | None = None) -> list[str]:
+    """(0.11.0) The backups cleaned up: beyond the backup.keep newest, and older than backup.keep_days (the newest
+    one is always kept); those made before a restore beyond BEFORE_RESTORE; the files a backup stopped half-way left
+    (.part) once a day old. Made after each backup and every hour by the workers' tick."""
+    folder = directory()
+    if not os.path.isdir(folder):
+        return []
     keep = max(1, int(settings.get("backup.keep") or 14))
-    files = sorted((f for f in os.listdir(directory()) if NAME.match(f)), reverse=True)
+    days = int(settings.get("backup.keep_days") or 0)
+    now = now or dt.datetime.utcnow()
+    names = os.listdir(folder)
+    files = sorted((f for f in names if NAME.match(f)), reverse=True)
     usual = [f for f in files if "-before-restore" not in f]
     safety = [f for f in files if "-before-restore" in f]
     gone = usual[keep:] + safety[BEFORE_RESTORE:]
+    if days > 0:
+        limit = now - dt.timedelta(days=days)
+        gone += [f for f in usual[1:keep] + safety[:BEFORE_RESTORE] if (_stamp(f) or now) < limit]
+    left = [f for f in names if f.endswith(".zip.part") and f.startswith("supagent-knowledge-")]
+    for f in left:
+        try:
+            if time.time() - os.path.getmtime(os.path.join(folder, f)) > PART_LEFT_S:
+                gone.append(f)
+        except OSError:
+            continue
     for f in gone:
         try:
-            os.remove(os.path.join(directory(), f))
+            os.remove(os.path.join(folder, f))
         except OSError:
             log.warning("supagent backup: %s was not removed", f, exc_info=True)
     return gone
+
+
+def save_upload(stream: Any, filename: str = "", limit: int | None = None) -> dict[str, Any]:
+    """(0.11.0) A backup brought from elsewhere (a file downloaded before, another Superset's) written to the directory
+    as supagent-knowledge-<now>-uploaded.zip, once read as a backup this version can restore: a zip holding its
+    manifest, of a format and a schema not later than this version's. Raises ValueError otherwise (nothing kept)."""
+    from supagent.models import SCHEMA_VERSION
+
+    limit = limit or int(settings.get("backup.upload_max_mb") or 2048) * 1024 * 1024
+    folder = directory()
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    stamp = dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    name = f"supagent-knowledge-{stamp}-{UPLOADED}.zip"
+    path = os.path.join(folder, name)
+    tmp = path + ".part"
+    size = 0
+    try:
+        with open(tmp, "wb") as out:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > limit:
+                    raise ValueError(f"the file is larger than {limit // (1024 * 1024):,} MB (backup.upload_max_mb)")
+                out.write(chunk)
+        try:
+            manifest = manifest_of(tmp)
+        except (zipfile.BadZipFile, KeyError, ValueError, OSError) as ex:
+            raise ValueError(f"{filename or 'the file'} is not a backup of the knowledge ({type(ex).__name__})") from ex
+        if int(manifest.get("format") or 0) > FORMAT or int(manifest.get("schema") or 0) > SCHEMA_VERSION:
+            raise ValueError(f"this backup was made by a later version (supagent {manifest.get('supagent')}): "
+                             "upgrade first")
+        if not manifest.get("parts"):
+            raise ValueError("this backup holds no part")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return {"name": name, "bytes": size, "of": manifest.get("created_at"), "supagent": manifest.get("supagent"),
+            "parts": {p: sum(c.values()) for p, c in (manifest.get("parts") or {}).items()}}
 
 
 def manifest_of(path: str) -> dict[str, Any]:
@@ -328,6 +411,40 @@ def _put_back(model: Any, rows: Iterator[dict[str, Any]], kept: dict[Any, dict[s
     return n
 
 
+BY_ROW = {"supagent_doc"}   # (0.11.0) restored row by row: emptying it took what was understood of each document
+#                             (supagent_kunit, supagent_kfact: deleted with it), every piece embedded again
+
+
+def _by_row(model: Any, rows: Iterator[dict[str, Any]]) -> int:
+    """The rows of the file put back by id (changed, added), the ones it does not hold removed; the others' rows
+    that refer to them (their understanding) kept. Secrets are never in a file: the present ones stay."""
+    table = model.__table__
+    cols = {c.name: c for c in table.columns if not _secret(c)}
+    have = {i for (i,) in db.session.execute(sa.select(table.c.id))}
+    seen: set[int] = set()
+    n = 0
+    for row in rows:
+        vals = {k: _in(cols[k], v) for k, v in row.items() if k in cols}
+        i = vals.get("id")
+        if i is None:
+            continue
+        seen.add(int(i))
+        if int(i) in have:
+            db.session.execute(table.update().where(table.c.id == i).values(
+                {k: v for k, v in vals.items() if k != "id"}))
+        else:
+            db.session.execute(table.insert(), [vals])
+        n += 1
+    gone = sorted(have - seen)
+    for k in range(0, len(gone), BATCH):
+        db.session.execute(table.delete().where(table.c.id.in_(gone[k:k + BATCH])))
+    db.session.flush()
+    if db.engine.dialect.name == "postgresql":
+        db.session.execute(sa.text(
+            f"SELECT setval(pg_get_serial_sequence('{table.name}', 'id'), COALESCE((SELECT MAX(id) FROM {table.name}), 1))"))
+    return n
+
+
 def _restore_part(z: zipfile.ZipFile, part: str) -> dict[str, int]:
     from supagent.models import Chunk, KObject, Meta, Route, Source
 
@@ -336,9 +453,11 @@ def _restore_part(z: zipfile.ZipFile, part: str) -> dict[str, int]:
     if models:
         kept = {m: _secrets(m) for m in models}
         for m in reversed(models):                    # what refers to another table goes first
-            db.session.execute(m.__table__.delete())
+            if m.__tablename__ not in BY_ROW:
+                db.session.execute(m.__table__.delete())
         for m in models:
-            out[m.__tablename__] = _put_back(m, _lines(z, f"{part}/{m.__tablename__}.jsonl"), kept[m])
+            lines = _lines(z, f"{part}/{m.__tablename__}.jsonl")
+            out[m.__tablename__] = _by_row(m, lines) if m.__tablename__ in BY_ROW else _put_back(m, lines, kept[m])
     if part == "categories":
         try:
             meta = json.loads(z.read("categories/meta.json"))
@@ -510,11 +629,13 @@ def due(now: dt.datetime | None = None) -> bool:
         return False
     if now.hour < int(settings.get("backup.hour") or 0):
         return False
-    today = now.strftime("%Y%m%d")
-    utc_today = dt.datetime.utcnow().strftime("%Y%m%d")
     try:
-        names = [f for f in os.listdir(directory()) if NAME.match(f) and "-before-restore" not in f]
+        names = [f for f in os.listdir(directory()) if NAME.match(f) and "-before-restore" not in f
+                 and f"-{UPLOADED}" not in f]          # (0.11.0) a file brought from elsewhere is no backup of today
     except OSError:
         names = []
-    return not any(f.startswith(f"supagent-knowledge-{today}") or f.startswith(f"supagent-knowledge-{utc_today}")
-                   for f in names)
+    for f in names:                                   # (0.11.0) a name's time is UTC: today in the server's time
+        made = _stamp(f)
+        if made is not None and made.replace(tzinfo=dt.timezone.utc).astimezone().date() == now.date():
+            return False
+    return True

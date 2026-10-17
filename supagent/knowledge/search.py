@@ -483,13 +483,21 @@ def live_values_note(piece: dict[str, Any], shown: str) -> str:
         return ""
 
 
+TEAM_KINDS = ("entry", "glossary", "rule", "formula", "definition", "guide", "memory", "recipe", "note")
+TEAM_SHARE = 0.5        # (0.11.0) of the block's room, kept first for what the team and the agent wrote
+
+
 def knowledge_block(question: str, shown: set[str] | None = None, with_charts: bool = False,
-                    prefer: dict[str, int] | None = None, memory_over: int = 0) -> str:
+                    prefer: dict[str, int] | None = None, memory_over: int = 0,
+                    team_texts: list[str] | None = None, titles: set[str] | None = None) -> str:
     """The knowledge relevant to a question, for the agent's prompt (short). `shown`: what the
     other blocks give already (refs, titles of the metrics and indices): not given twice, nor a
     metric or an index of the same name in another database, so that the room goes to the
     catalog, the documents and the Context. Superset's charts and dashboards only `with_charts` (a
-    question about them, or about what is happening now)."""
+    question about them, or about what is happening now). (0.11.0) With `team_texts` (what the team keeps, given
+    before it: rules, memories, learned answers), a piece that says nothing more is left out, and the
+    catalog's and the agent's entries, the glossary, memories and learned answers found take the room first
+    (up to TEAM_SHARE of it), the documents and the Context after; `titles` gets the titles given."""
     shown = set() if shown is None else shown        # the caller's set: it learns what was given (ranking)
     top_k = int(settings.get("search.top_k"))
     try:
@@ -567,6 +575,12 @@ def knowledge_block(question: str, shown: set[str] | None = None, with_charts: b
         lines[0] += "\n(The question was also searched as the AI wrote it again: a word of it matched nothing.)"
     live_left = LIVE_METRICS
     shown_as = as_shown(found)               # (0.10.7) the map's links the AI explained, said so
+    if team_texts is not None:               # (0.11.0) what the team keeps, said before: not again
+        from supagent.knowledge.contextplan import says
+
+        before = [t for t in team_texts if t]
+        found = [f for f in found if not any(says(t, f["text"] or "") for t in before)]
+    built: list[tuple[dict[str, Any], str]] = []
     for f in found:
         body, usage = shown_as.get(f["ref"], f["text"] or ""), ""
         if f["kind"] in OBJECT_KINDS:                 # (0.10.6) how to compute it, kept whole: a window around
@@ -586,8 +600,33 @@ def knowledge_block(question: str, shown: set[str] | None = None, with_charts: b
         if f["kind"] == "metric" and live_left > 0:   # (0.10.7) its labels' values in all its data that the
             live_left -= 1                            # learning's hour had not ("result: error"): as the tools say
             line += live_values_note(f, text[:size])
-        if sum(len(x) for x in lines) + len(line) > budget:
-            break
-        lines.append(line)
-        shown.add(f["ref"])
+        if team_texts is None:
+            if sum(len(x) for x in lines) + len(line) > budget:
+                break
+            lines.append(line)
+            shown.add(f["ref"])
+            continue
+        built.append((f, line))
+    if team_texts is not None:               # (0.11.0) the team's and the agent's first, up to their share; then all
+        left = budget - sum(len(x) for x in lines)   # in the search's order, in what is left (stopped at the first
+        taken: set[int] = set()                       # that does not fit, as before)
+        team_room = int(left * TEAM_SHARE)
+        for i, (f, line) in enumerate(built):
+            if f["kind"] in TEAM_KINDS and len(line) <= team_room:
+                taken.add(i)
+                team_room -= len(line)
+                left -= len(line)
+        for i, (f, line) in enumerate(built):
+            if i in taken:
+                continue
+            if len(line) > left:
+                break
+            taken.add(i)
+            left -= len(line)
+        for i, (f, line) in enumerate(built):
+            if i in taken:
+                lines.append(line)
+                shown.add(f["ref"])
+                if titles is not None:
+                    titles.add(f["title"])
     return "\n".join(lines) if len(lines) > 1 else ""

@@ -1,5 +1,155 @@
 # Changes
 
+## 0.11.0 — 2026-10-17
+
+The final release of this series: the owner's nine requests of 17 October 2026, a review of the code (the agent and
+its tools, the API, the pages, the integrations, the System map's learning and the readers of repositories), tests of
+every route and of every page, and a user guide (docs/USER-GUIDE.md).
+
+The agent's context, in tiers (`agent.context_tiers`, on)
+* **What the team keeps comes first, each said once**: the catalog's rules (in the instructions), the memories, the
+  team's words, where the data is and the learned answers are given whole, before anything else. A copy is left out: a
+  memory that says what another memory or a rule of the team says (the same words in the same order, once case,
+  punctuation, plurals and small words are set aside), a learned answer that runs the same query with the same tool on
+  the same database as another. Two texts that differ in what they say are never one: another word, number, unit,
+  negation ("don't" is "do not"), operator or sign ("> 500" and "< 500", "UTC -2" and "UTC +2"), modal verb ("must",
+  "may"), condition, or a quoted value as written ('FAILED' and 'failed') keeps both, and To review lists the two when
+  they are alike, for a person to decide.
+* **Then the chat**: the last complete exchange always (the last question answered and all after it), then the older
+  messages, the newest first, in the room the first tier and the tools leave (half of the model's window, about four
+  characters a token; a server that states no window counts as 64k), never starting with an answer. A long chat no
+  longer fills a small model's window.
+* **Then the documentation, chosen**: the knowledge found for the question (the catalog's and the agent's entries take
+  the room first, up to half of it, the documents and the Context after), and the LLM context's lines about the
+  question, in the room that is left, never the whole page: a line is given when its head names a word of the
+  question, or it names much of it, or a name the question writes, or it is the main data of a database the question
+  is about; a line of an entry the search gave already is left out. A question the LLM context says nothing about gets
+  none of it. On a lab's 24,000-character LLM context: 1,200 to 6,500 characters a question, nothing for a question
+  about a runbook. The page's formulas still count as said when the queries' conditions are checked, as when it was
+  given whole.
+* Off (`agent.context_tiers` = false): as 0.10.12.
+
+To review
+* **Duplicates**: a memory (a person's own, a group's, or a person's copy of the team's), a catalog entry or a learned
+  answer (the same query) said more than once: one warning per set, the oldest kept, the copies removed or disabled in
+  one click; two alike that may repeat or contradict each other (70 % of their words in common or more): said with
+  both, for a person to decide. Found in 0.01 s on a lab (a rule saved four times).
+
+The learning's history
+* **Kept 30 days** (`learn.history_days`): the runs (learning, classification, Context, backups, restores, documents)
+  finished before are removed every hour with the changes they found; the last run of each kind is kept whatever its
+  age, a run still going never. 0: kept for ever.
+
+The Context's documents
+* **Written for a new member of the team**: "In short" first, how things work and why, one name for one thing, a table
+  where it compares, citations once per paragraph; nothing that does not help understanding (no counts of objects,
+  documents or pages, no long lists of metric or field names: the evidence the writer reads carries no counts either).
+* **A relations diagram** at the end of the overview, the technical overview (how the parts run on and connect to each
+  other) and each application's page, built from what the documents and the code state (the most stated first, 30 at
+  most; never written by the LLM), drawn by the page with no library; its lines ("A -> B : calls") stay readable in
+  the PDF and Word exports and in the search. The pages are written again at the next Context build and wait in To
+  review (`context.review`).
+
+Backups
+* **Cleaned by number and by age**: the last `backup.keep` (14) and none older than `backup.keep_days` (30; the newest
+  always kept); what a stopped backup left is removed after a day; cleaned every hour, not only after a backup.
+* **Restore… in Settings**: a backup of the server, or a file brought from elsewhere (one downloaded before, another
+  Superset's), checked as a backup this version can restore (`backup.upload_max_mb`, 2048), then the parts to put
+  back; the present state is saved first, as before.
+
+The usage page
+* Every figure checked against the database (calls, tokens sent and written, prompt cache share, errors, largest
+  context, time per call, answers, LLM and tool calls per answer, sent back by the checks): equal. Corrected: the
+  hours and days by the viewer's time zone name (a period over a change of summer time counted an hour off); the
+  answers' figures over every answer of the period (they were over the 50,000 slowest); the context size of the calls
+  that have one (a failed call's 0 no longer lowers it).
+* **The Servers card shows the disk Superset is on** (its home and its installation: the disk of /data when Superset
+  lives there), with what it holds and its free space; no longer every mount of the host.
+
+The review of the code
+* **The agent**: an answer's worker closes its database session before the answer runs (no transaction left open for
+  the length of an answer); the LLM client blames a field the server refuses only when the server names it, and its
+  retries stay within the call's time.
+* **Rights**: a person's own memory changed only by them and an admin; a note's sharing checked as when it is made;
+  replacing the catalog from a file takes the right to delete; an approved link removed only with the right to delete;
+  a viewer gets the part links of the parts their map shows only; a learned answer's check run as the person; an
+  answer's files checked by id.
+* **Requests**: a number a request sends that is not one: its default taken or a 400, never a server error; one
+  question at a time per chat (its row locked: two tabs no longer answer it twice); a value's name matched exactly (a
+  "_" or "%" in it is no pattern); the group memories listed.
+* **Speed and memory**: the Knowledge tab and the documents list never load a wiki's text or pages (the database
+  counts them); the search's hourly sync reads only the pieces' hashes; a wiki space read batch by batch, its pages'
+  text dropped once read.
+* **Documents**: a document holding a NUL character read and saved; one that cannot be saved said, not retried every
+  hour; a reading claimed (two workers never read one document at once); a worker's time limit is no document error; a
+  repository file refused for now kept as it was.
+* **Runs**: a run says it is alive with each progress it saves and is taken for dead from its last word, not from its
+  start (a Context build of hours is no longer marked interrupted and started a second time); Stop says a backup or a
+  restore cannot be stopped; the Servers card forgets a host gone for a week.
+* **Backups**: zip64 (beyond 4 GB), no half-written file left by a failed backup, the daily one due by the server's
+  date (a file brought from elsewhere counts for none); a documents restore keeps what was understood of them.
+* **The Context**: an application's name counted once per text it is in.
+* **The pages**: Approve or Reject all shown decides only the cards still shown (it approved again a value rejected
+  alone, and never sent the last); a link line of the System map opens its panel, an edit on the map is drawn at once,
+  and a description being typed survives the map's refresh; "Keep the LLM calls (days)" is saved; a refused Settings
+  save says why, in red, and keeps the other cards' unsaved edits; a double click or Enter twice asks once, and Ask
+  again never stops the answer being written; the docked chat takes the keyboard only when its page has it; the usage
+  page keeps its figures and says the error when a request fails, and draws only the latest choice; confirmations and
+  explanations show above the full-screen map; a document's pages drawn 500 at a time (50,000 pages: the panel opens
+  in 0.1 s, a removal takes 0.01 s); Merge asks first and is an Admin's; the labels say who can act.
+* **The learning**: an Ansible inventory whose host is written with its SSH port is read (the whole inventory was
+  lost), so are a range with a step, a huge range, a play whose hosts are a range, vars_files given as one string and
+  templated Kubernetes manifests; a long run of spaces in a heading no longer stalls the reading (minutes before);
+  forget-learned keeps the indices a person gave a value on the System map; an index activated again brings back only
+  the fields it took with it; a value's name is never matched as a pattern ("db_1" was taken for "db01"); a relations
+  diagram says a part once ("x" and "x (prod)"); a link a person corrected in To review (turned round, another kind)
+  is never withdrawn by the next learning.
+* **Integrations and the command line**: a PDF export of a page whose table header is taller than a page ends (it
+  added pages for ever); a yes/no setting refuses a word that is neither (a typo turned a TLS check off) and a JSON
+  setting a value of another shape than its default; the secret of OpenSearch Dashboards is never said in an error (it
+  reached the dashboards list, the Settings test and the LLM); a saved object whose aggregation reads itself no longer
+  breaks the reading; a dashboards list item of a long ref no longer blocks every later listing; settings --unset of
+  an unknown key and restore of a file that is no backup say so instead of a traceback; a drafted alert rule keeps the
+  team grafana.rule_labels fixes.
+* **After the gate** (security and crash fixes of the agent's tools, each with its unit test, not measured with the
+  LLM): the SQL tools refuse SELECT … INTO (it ran as CREATE TABLE) and a query that reads a dataset with row-level
+  security filters for the user (they apply to a chart or Explore of the dataset); a scheduled report goes only to the
+  allowed e-mail domains, as an e-mail sent now; the agent makes a note the team's only for a user who may share, and
+  deletes another person's note only for one who may delete; a catalog entry of the wrong shape is refused and no
+  longer breaks the catalog for everyone; a day at the end of the calendar (9999-12-31 and the day after) no longer
+  breaks its chat.
+
+Tests
+* Every route: each read answered for an admin without a server error, the four pages drawn, each write refused to a
+  person without the AI role, each write given an empty or wrong body answered with an error, never a 500.
+* Every page in a browser (tests/ui, Playwright, against a running Superset: SUPAGENT_UI_URL, SUPAGENT_UI_PASSWORD):
+  the chat and its panels, every tab and sub-tab of the Data dictionary, the entry and import panels, a Context page
+  and its diagram, the search, the System map, every section of the Settings, the Restore panel, the backups and runs
+  lists, the usage page and its Servers card, the chat panel on Superset's pages, every "i" explanation; a write cycle
+  with SUPAGENT_UI_WRITE=1, a question with SUPAGENT_UI_ASK=1; skipped without them (on a lab: 25 passed).
+
+Measured before the release under a rule written before any result (gate G-0.11 and its amendments, the context in
+tiers on), on the frozen build 5def04c with Qwen3.6-35B-A3B (llama.cpp, its server restarted first), one round of each
+open set: the main open set on the small model's profile (the lab's server states a 64k window) 160 of 162 right (the
+rule: at most 3 misses), 2 wrong without a mark (the rule: 2), both in one chain that left a sales channel out of a
+revenue, a miss also seen before the tiers; the observability open set on the big model's profile forced (the LLM
+context given as its lines about the question) 29 of 29, none wrong (the rule: 27 and 1). 0.11.0's prompt files (the
+agent, its budget, the context's tiers, the search, the memories, the LLM context) are those measured; its tools
+changed only by the security and crash fixes listed above. Every page in a browser (tests/ui against the lab, with the
+write cycle and a question): 25 passed. A Context built with the new writer on the lab: three summary pages written
+again in 125 s (3 LLM calls), each ending with its relations diagram, no counts. The unit tests: 2285 passed. Not
+measured: gpt-oss-120b.
+
+Known limits: the agent's tools that need access to a whole database (comparisons, the records about a part, a table's
+profile) read it as SQL Lab does for a user with that access, without row-level security filters: give such access
+only to people the filters do not separate. Not measured: gpt-oss-120b (the gate ran Qwen3.6-35B-A3B).
+
+Upgrade from 0.10.12.1: pip install the wheel on every host, restart the web servers, the workers and beat; nothing to
+run (tables unchanged, v20). New settings: `agent.context_tiers` (on), `learn.history_days` (30),
+`backup.keep_days` (30), `backup.upload_max_mb` (2048). The learning's runs older than 30 days and the backups older
+than 30 days (beyond the newest) are removed at the first hourly tick: set them first if you keep more. The Context's
+pages are written again at the next build and wait in To review. INSTALL.txt, *From 0.10.12.1 to 0.11.0*.
+
 ## 0.10.12.1 — 2026-10-16
 
 A correction of 0.10.12's summaries, found by reading its change again the same evening: each document's room in a

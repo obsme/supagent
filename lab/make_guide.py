@@ -1,5 +1,5 @@
-"""The guide to store or send: README.md as one standalone HTML file (opens offline) and a
-PDF printed by Chromium.
+"""The guides to store or send: README.md, and (0.11.0) docs/USER-GUIDE.md, each as one standalone HTML file (opens
+offline) and a PDF printed by Chromium.
 
     python lab/make_guide.py [--out dist/docs]
 """
@@ -51,14 +51,14 @@ def version() -> str:
     return m.group(1) if m else "?"
 
 
-def build() -> str:
-    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as fh:
+def build(name: str = "README.md", what: str = "installation and operation guide") -> str:
+    with open(os.path.join(ROOT, name), encoding="utf-8") as fh:
         text = fh.read()
     body = markdown.markdown(text, extensions=["tables", "fenced_code", "sane_lists"])
     return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
             f"<title>supagent guide</title><style>{CSS}</style></head><body><main>"
-            f"<p class=\"meta\">supagent {version()} · installation and operation guide</p>{body}</main></body></html>")
+            f"<p class=\"meta\">supagent {version()} · {what}</p>{body}</main></body></html>")
 
 
 def main() -> None:
@@ -66,18 +66,22 @@ def main() -> None:
     ap.add_argument("--out", default=os.path.join(ROOT, "dist", "docs"))
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
-    page = build()
-    out_html = os.path.join(args.out, "supagent-guide.html")
-    with open(out_html, "w", encoding="utf-8") as fh:
-        fh.write(page)
+    docs = [("README.md", "installation and operation guide", "supagent-guide")]
+    if os.path.exists(os.path.join(ROOT, "docs", "USER-GUIDE.md")):     # (0.11.0) how to use it
+        docs.append((os.path.join("docs", "USER-GUIDE.md"), "user guide", "supagent-user-guide"))
     with sync_playwright() as p:
         b = p.chromium.launch()
-        pg = b.new_page()
-        pg.goto("file://" + os.path.abspath(out_html))
-        pg.pdf(path=os.path.join(args.out, "supagent-guide.pdf"), format="A4", print_background=True,
-               margin={"top": "16mm", "bottom": "16mm", "left": "14mm", "right": "14mm"})
+        for name, what, out in docs:
+            out_html = os.path.join(args.out, out + ".html")
+            with open(out_html, "w", encoding="utf-8") as fh:
+                fh.write(build(name, what))
+            pg = b.new_page()
+            pg.goto("file://" + os.path.abspath(out_html))
+            pg.pdf(path=os.path.join(args.out, out + ".pdf"), format="A4", print_background=True,
+                   margin={"top": "16mm", "bottom": "16mm", "left": "14mm", "right": "14mm"})
+            pg.close()
+            print(out_html, os.path.getsize(out_html), "bytes; pdf written")
         b.close()
-    print(out_html, os.path.getsize(out_html), "bytes; pdf written")
 
 
 if __name__ == "__main__":

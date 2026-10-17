@@ -176,7 +176,7 @@ def _grounded_labels(labels: dict[str, str], text: str) -> tuple[dict[str, str],
     said = " ".join(re.sub(r"[-_]", " ", str(text or "").lower()).split())
     out, changed = dict(labels), []
     spans = _team_spans(text)
-    if spans and "team" in keys:
+    if spans and "team" in keys and "team" not in fixed:     # (0.11.0) a team the settings fix stays theirs
         team = " ".join(spans[0][2].lower().split())
         try:
             known = {str((r.get("labels") or {}).get("team") or "").strip() for r in G.alert_rules(limit=200)}

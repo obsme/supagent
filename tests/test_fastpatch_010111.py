@@ -143,7 +143,7 @@ def test_host_sample_and_roles():
     first, cpu = H.sample()
     second, _ = H.sample(cpu)
     assert first["mem_total"] > 0 and 0 <= first["mem_pct"] <= 100 and first["cpus"] >= 1
-    assert any(d["mount"] == "/" for d in first["disks"])
+    assert first["disks"] and all(d["holds"] and d["mount"].startswith("/") for d in first["disks"])   # (0.11.0)
     assert second["cpu_pct"] is None or 0 <= second["cpu_pct"] <= 100
     assert json.loads(json.dumps(second))["superset"]["count"] >= 0
 

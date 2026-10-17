@@ -551,6 +551,12 @@ class LLM:
 
     def _request(self, method: str, path: str, **kw: Any) -> requests.Response:
         renewed = False
+        t0 = time.time()
+
+        def in_time(delay: float) -> bool:              # (0.11.0) a retry only within the call's time (llm.timeout,
+            limit = float(self.cfg.timeout or 0)        # or the shorter one of bounded()); no timeout: as before
+            return not limit or time.time() - t0 + delay < limit
+
         for attempt in range(len(RETRY_DELAYS) + 1):
             headers = {"Content-Type": "application/json", **(self.cfg.extra_headers or {}),
                        **auth_headers(self.cfg, force=renewed)}
@@ -562,14 +568,14 @@ class LLM:
             except requests.exceptions.ReadTimeout as ex:    # it has the question and did not answer in time: asking
                 raise LLMError(f"LLM {self.base}: no answer within {self.cfg.timeout} s") from ex   # again doubles it
             except requests.exceptions.RequestException as ex:
-                if attempt < len(RETRY_DELAYS):
+                if attempt < len(RETRY_DELAYS) and in_time(RETRY_DELAYS[attempt]):
                     time.sleep(RETRY_DELAYS[attempt])
                     continue
                 raise LLMError(f"LLM {self.base} not reachable: {ex}") from ex
             if r.status_code == 401 and self.cfg.auth == "middleware" and not renewed:
                 renewed = True                   # the token expired early or was revoked: once more
                 continue
-            if r.status_code in RETRY_STATUS and attempt < len(RETRY_DELAYS) and \
+            if r.status_code in RETRY_STATUS and attempt < len(RETRY_DELAYS) and in_time(RETRY_DELAYS[attempt]) and \
                     not (r.status_code == 500 and MODEL_OUTPUT_UNREAD.search(r.text[:1000])):
                 time.sleep(RETRY_DELAYS[attempt])
                 continue
@@ -647,8 +653,10 @@ class LLM:
                         _EFFORT[self.base] = False               # a server or gateway without it
                         _learned(self.base, self.model, "reasoning_effort", False)
                         body.pop("reasoning_effort")
-                    elif "chat_template_kwargs" in body:
-                        _TEMPLATE_KWARGS[self.base] = False      # a gateway that refuses unknown fields
+                    elif "chat_template_kwargs" in body and re.search(
+                            r"chat.?template|template.?kwargs|unknown|unrecogni[sz]ed|extra.?(?:field|input|argument|param)"
+                            r"|additional.?propert|not (?:permitted|allowed)", said, re.I):   # (0.11.0) only when the
+                        _TEMPLATE_KWARGS[self.base] = False      # error says so: a gateway that refuses unknown fields
                         _learned(self.base, self.model, "template_kwargs", False)
                         body.pop("chat_template_kwargs")
                     else:

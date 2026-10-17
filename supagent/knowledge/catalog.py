@@ -164,6 +164,19 @@ def parse_entry(classification: str, fmt: str, content: str) -> Any:
     if classification == "metrics" and "tables" not in data and data and \
             all(isinstance(v, dict) for v in data.values()):
         data = {"tables": data}                        # a bare {metric: spec} mapping
+    if classification in ("index", "metrics"):         # the parts read as mappings: never another shape
+        specs = data if classification == "index" else data.get("tables")
+        rels = data.get("label_relationships") if classification == "metrics" else None
+        if specs is not None and not isinstance(specs, dict):
+            raise CatalogError("metrics: tables is a YAML mapping of {metric: spec}")
+        if rels is not None and not (isinstance(rels, list) and all(isinstance(x, dict) for x in rels)):
+            raise CatalogError("metrics: label_relationships is a YAML list of {label, index, field, description}")
+        for name, spec in (specs or {}).items():
+            if spec is not None and not isinstance(spec, dict):
+                raise CatalogError(f"{classification}: {name}: a YAML mapping is expected (description, ...)")
+            for part in ("fields", "labels"):
+                if (spec or {}).get(part) is not None and not isinstance(spec[part], dict):
+                    raise CatalogError(f"{classification}: {name}: {part} is a YAML mapping")
     return data
 
 

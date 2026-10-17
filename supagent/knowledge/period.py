@@ -157,7 +157,7 @@ def _days_in(text: str, today: dt.date, anchor: dt.date | None = None) -> list[t
             continue
         try:
             day = base.replace(day=v[1]) if v[0] == "day" else base + dt.timedelta(days=v[1])
-        except ValueError:
+        except (ValueError, OverflowError):            # no such day, or past the calendar (9999-12-31 + 1)
             continue
         out.append((start, end, day, False))
         last = day
@@ -291,7 +291,11 @@ def day_ranges(question: str, today: dt.date) -> list[tuple[dt.datetime, dt.date
     for m in DAY_RANGE.finditer(question or ""):
         a, b = _day(int(m.group(1)), m.group(3), m.group(4), today), _day(int(m.group(2)), m.group(3), m.group(4), today)
         if a and b and a < b:
-            out.append((dt.datetime(a.year, a.month, a.day), dt.datetime(b.year, b.month, b.day) + dt.timedelta(days=1)))
+            try:
+                out.append((dt.datetime(a.year, a.month, a.day),
+                            dt.datetime(b.year, b.month, b.day) + dt.timedelta(days=1)))
+            except OverflowError:                      # the calendar's last day: no day after it
+                continue
     return out
 
 
@@ -306,6 +310,7 @@ def period_window(text: str, today: dt.date) -> tuple[dt.datetime, dt.datetime] 
     days = days_named(text, today)
     if not days and TODAY_PART.search(text or ""):
         days = [today]
+    days = [d for d in days if d < dt.date.max]        # the calendar's last day: no day after it (OverflowError)
     starts = [a for a, _b in spans] + [dt.datetime(d.year, d.month, d.day) for d in days]
     ends = [b for _a, b in spans] + [dt.datetime(d.year, d.month, d.day) + dt.timedelta(days=1) for d in days]
     return (min(starts), max(ends)) if starts else None

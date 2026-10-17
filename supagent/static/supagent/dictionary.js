@@ -270,7 +270,8 @@
     var save = el("button", { type: "button", class: "btn primary small", text: "Save as curated", onclick: function () {
       S.dict("POST", "objects/" + o.id, { description: ta.value, category: cat.value, unit: unit.value, synonyms: syn.value }).then(done);
     } });
-    var kids = [el("h3", { text: "Edit (admins)" }), ta, el("div", { class: "actions" }, [cat, unit]), syn, el("div", { class: "actions" }, [save])];
+    // (0.11.0) "Edit": editors and admins edit it ("Edit (admins)" said less than the truth)
+    var kids = [el("h3", { text: "Edit" }), ta, el("div", { class: "actions" }, [cat, unit]), syn, el("div", { class: "actions" }, [save])];
     if (o.description_source === "llm" && !o.verified) {
       kids[kids.length - 1].appendChild(el("button", { type: "button", class: "btn small", text: "Approve the AI text", onclick: function () {
         S.dict("POST", "objects/" + o.id, { approve: true }).then(done);
@@ -616,7 +617,7 @@
         var parts = [el("summary", { text: q.length > 160 ? q.slice(0, 160) + "…" : q }), el("pre", { text: q }),
                      copyLink("Copy", function () { return q; })];
         if (t.last_error) parts.push(el("div", { class: "muted", text: "Last error:" }), el("pre", { class: "err", text: t.last_error }));
-        if (t.last_query) parts.push(el("div", { class: "muted", text: "Last one as it ran (admins only):" }), el("pre", { text: t.last_query }),
+        if (t.last_query) parts.push(el("div", { class: "muted", text: "Last one as it ran (editors and admins only):" }), el("pre", { text: t.last_query }),
                                      copyLink("Copy", function () { return t.last_query; }));
         tb.appendChild(el("tr", {}, [el("td", { class: "nm", text: t.target || "" }),
           el("td", { class: "nm" }, [el("details", { class: "query" }, parts)]), el("td", { class: "num", text: S.num(t.calls) }),
@@ -652,7 +653,9 @@
         box.appendChild(document.createTextNode(" "));
         box.appendChild(el("button", { type: "button", class: "btn small", text: "Build now", onclick: function () {
           S.dict("POST", "context/build", {}).then(function (r) {
-            res.textContent = r.error || "started: it shows in Settings → Chat settings, runs list";
+            // (0.11.0) the runs list is in Settings, an AI Admin's page: an editor is told where the pages come
+            res.textContent = r.error || (S.isAdmin ? "started: it shows in Settings → Chat settings, runs list" :
+              "started: the pages are written in the background and show here when done (a changed page waits in To review)");
           });
         } }));
         box.appendChild(res);
@@ -729,6 +732,7 @@
         el("a", { class: "btn small", href: ctxExport("docx", p.id), text: "Word" }),
         el("a", { class: "btn small", href: ctxExport("pdf", p.id), text: "PDF" })])]));
     var body = el("div", { class: "answer context-page", html: p.html || "" });   // Markdown made safe on the server
+    if (S.diagrams) S.diagrams(body);                // (0.11.0) its relations drawn
     S.fitTables(body);
     var first = body.firstElementChild;                  // its first heading only repeats the page's title: left out
     if (first && /^H[1-3]$/.test(first.tagName) && first.textContent.trim().toLowerCase() === (p.title || "").trim().toLowerCase()) {

@@ -216,7 +216,8 @@
   function pager(box, st, reload) {
     box.innerHTML = "";
     var pages = Math.max(1, Math.ceil((st.total || 0) / st.size));
-    if (st.page > pages - 1) st.page = pages - 1;
+    // (0.11.0) fewer pages than the one shown (its last row removed): the last page is read, never an empty one
+    if (st.page > pages - 1) { st.page = pages - 1; box.hidden = true; reload(); return; }
     box.hidden = pages <= 1;
     if (box.hidden) return;
     box.appendChild(el("button", { type: "button", class: "btn", text: "Previous", disabled: st.page <= 0 ? "disabled" : null,
@@ -249,7 +250,8 @@
     if (again && !opts.force) return null;          // the same button again: closed (a toggle)
     var node = el("div", { class: "pop " + (opts.cls || ""), role: opts.role || "dialog",
                            "aria-label": opts.label || null }, [content]);
-    document.body.appendChild(node);
+    // (0.11.0) in the element shown in full screen (the System map): elsewhere in the page it would not be seen
+    (document.fullscreenElement || document.body).appendChild(node);
     var place = function () {
       if (!anchor.isConnected) { unpop(false); return; }
       var r = anchor.getBoundingClientRect(), w = node.offsetWidth, h = node.offsetHeight;
@@ -498,6 +500,113 @@
     });
   }
 
+  /* (0.11.0) The relations diagrams of the Context pages: a code block whose first line is "diagram: relations"
+     and whose lines read "A -> B : what A does to B" (written by the Context's writer from what the documents state)
+     drawn as a left-to-right diagram, no library (Superset's CSP); the lines stay readable as text elsewhere. */
+  var DIAGRAM_HEAD = "diagram: relations", DIAGRAM_NODES = 40;
+  function diagramEdges(text) {
+    var lines = String(text || "").split("\n"), out = [];
+    if ((lines[0] || "").trim() !== DIAGRAM_HEAD) return null;
+    lines.slice(1).forEach(function (ln) {
+      var m = /^\s*(.+?)\s+->\s+(.+?)(?:\s+:\s+(.+?))?\s*$/.exec(ln);
+      if (m) out.push({ a: m[1], b: m[2], verb: m[3] || "" });
+    });
+    return out;
+  }
+  function layers(nodes, edges) {         /* each part's column: the longest chain into it, a cycle broken where it closes */
+    var rank = {}, into = {}, done = {}, stack = {};
+    nodes.forEach(function (n) { into[n] = []; });
+    edges.forEach(function (e) { if (e.a !== e.b) into[e.b].push(e.a); });
+    function place(n) {
+      if (done[n]) return rank[n];
+      if (stack[n]) return 0;
+      stack[n] = true;
+      var r = 0;
+      into[n].forEach(function (m) { if (!stack[m]) r = Math.max(r, place(m) + 1); });
+      stack[n] = false; done[n] = true; rank[n] = r;
+      return r;
+    }
+    nodes.forEach(place);
+    return rank;
+  }
+  function drawDiagram(edges) {
+    var NS = "http://www.w3.org/2000/svg", names = [], seen = {}, degree = {};
+    edges.forEach(function (e) { [e.a, e.b].forEach(function (n) {
+      if (!seen[n]) { seen[n] = true; names.push(n); degree[n] = 0; } degree[n] += 1; }); });
+    if (names.length > DIAGRAM_NODES) {    // the most connected parts, the others said under the diagram
+      var keep = names.slice().sort(function (x, y) { return degree[y] - degree[x]; }).slice(0, DIAGRAM_NODES), k = {};
+      keep.forEach(function (n) { k[n] = true; });
+      edges = edges.filter(function (e) { return k[e.a] && k[e.b]; });
+      names = names.filter(function (n) { return k[n]; });
+    }
+    var rank = layers(names, edges), cols = {};
+    names.forEach(function (n) { (cols[rank[n]] = cols[rank[n]] || []).push(n); });
+    var ranks = Object.keys(cols).map(Number).sort(function (a, b) { return a - b; });
+    var pos = {}, BOX_W = 170, BOX_H = 30, GAP_X = 90, GAP_Y = 22, PAD = 12;
+    ranks.forEach(function (r, ci) {       // each column ordered by where its parts' callers are
+      var col = cols[r];
+      if (ci) col.sort(function (x, y) {
+        function bary(n) { var ys = edges.filter(function (e) { return e.b === n && pos[e.a]; }).map(function (e) { return pos[e.a].y; });
+          return ys.length ? ys.reduce(function (s, v) { return s + v; }, 0) / ys.length : 1e9; }
+        return bary(x) - bary(y);
+      });
+      col.forEach(function (n, i) { pos[n] = { x: PAD + ci * (BOX_W + GAP_X), y: PAD + i * (BOX_H + GAP_Y) }; });
+    });
+    var height = PAD * 2 + Math.max.apply(null, ranks.map(function (r) { return cols[r].length; })) * (BOX_H + GAP_Y) - GAP_Y;
+    var width = PAD * 2 + ranks.length * (BOX_W + GAP_X) - GAP_X;
+    var svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+    svg.setAttribute("width", String(width)); svg.setAttribute("height", String(height));
+    svg.setAttribute("class", "relations-diagram"); svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "Relations between " + names.length + " parts");
+    function node(tag, attrs, text) {
+      var e = document.createElementNS(NS, tag);
+      Object.keys(attrs).forEach(function (k) { e.setAttribute(k, attrs[k]); });
+      if (text !== undefined) e.textContent = text;
+      return e;
+    }
+    var defs = node("defs", {}), marker = node("marker", { id: "rel-arrow", viewBox: "0 0 10 10", refX: "9", refY: "5",
+      markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" });
+    marker.appendChild(node("path", { d: "M0,0 L10,5 L0,10 z", class: "rel-head" }));
+    defs.appendChild(marker); svg.appendChild(defs);
+    edges.forEach(function (e) {
+      var a = pos[e.a], b = pos[e.b];
+      if (!a || !b) return;
+      var x1 = a.x + BOX_W, y1 = a.y + BOX_H / 2, x2 = b.x, y2 = b.y + BOX_H / 2, d;
+      if (b.x > a.x) d = "M" + x1 + "," + y1 + " C" + (x1 + GAP_X / 2) + "," + y1 + " " + (x2 - GAP_X / 2) + "," + y2 + " " + x2 + "," + y2;
+      else {                               // back or same column: around, below
+        var low = Math.max(a.y, b.y) + BOX_H + GAP_Y / 2;
+        d = "M" + (a.x + BOX_W / 2) + "," + (a.y + BOX_H) + " C" + (a.x + BOX_W / 2) + "," + low + " " + (b.x + BOX_W / 2) + "," + low + " " + (b.x + BOX_W / 2) + "," + (b.y + BOX_H);
+      }
+      var g = node("g", { class: "rel-edge" });
+      g.appendChild(node("title", {}, e.a + " " + (e.verb || "\u2192") + " " + e.b));
+      g.appendChild(node("path", { d: d, "marker-end": "url(#rel-arrow)" }));
+      if (e.verb && b.x > a.x) g.appendChild(node("text", { x: String((x1 + x2) / 2), y: String((y1 + y2) / 2 - 4), "text-anchor": "middle" }, e.verb));
+      svg.appendChild(g);
+    });
+    names.forEach(function (n) {
+      var p = pos[n], g = node("g", { class: "rel-node" });
+      g.appendChild(node("title", {}, n));
+      g.appendChild(node("rect", { x: String(p.x), y: String(p.y), width: String(BOX_W), height: String(BOX_H), rx: "6" }));
+      g.appendChild(node("text", { x: String(p.x + BOX_W / 2), y: String(p.y + BOX_H / 2 + 4), "text-anchor": "middle" },
+        n.length > 24 ? n.slice(0, 23) + "\u2026" : n));
+      svg.appendChild(g);
+    });
+    return svg;
+  }
+  function diagrams(root) {                /* every relations block of `root` drawn, its text kept under a fold */
+    (root || document).querySelectorAll("pre > code").forEach(function (code) {
+      var edges = diagramEdges(code.textContent);
+      if (!edges || edges.length < 2) return;
+      var pre = code.parentNode, box = el("div", { class: "relations-box" });
+      box.appendChild(drawDiagram(edges));
+      var det = el("details", { class: "relations-text" }, [el("summary", { text: "The relations as text" })]);
+      pre.parentNode.replaceChild(box, pre);
+      det.appendChild(pre);
+      box.parentNode.insertBefore(det, box.nextSibling);
+    });
+  }
+
   var body = document.body.dataset;
   window.supagent = {
     chat: function (m, p, b) { return api(body.chatApi, m, p, b); },
@@ -509,7 +618,7 @@
     canShare: body.share === "yes",                // notes and memories for everyone or a group (not AI Viewer)
     esc: esc, el: el, when: when, whenFull: whenFull, num: num, bytes: bytes, sourceBadge: sourceBadge, pager: pager,
     pop: pop, unpop: unpop, info: info, wireInfos: wireInfos, confirm: confirm, sureButton: sureButton, picker: picker,
-    fitTables: fitTables, readAs: readAs, linksBox: linksBox
+    fitTables: fitTables, readAs: readAs, linksBox: linksBox, diagrams: diagrams
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", function () { wireInfos(); });
   else wireInfos();

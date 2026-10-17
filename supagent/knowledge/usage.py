@@ -27,9 +27,22 @@ def _pct(values: list[float], p: float) -> float:
     return round(v[min(len(v) - 1, int(math.ceil(p * len(v))) - 1)], 2)
 
 
-def _bucket(at: dt.datetime, grain: str, offset: dt.timedelta) -> str:
-    local = at + offset
+def _bucket(at: dt.datetime, grain: str, offset: dt.timedelta, zone: Any = None) -> str:
+    """The hour or the day of a call (UTC) in the viewer's time zone: (0.11.0) by its name when the browser gives it
+    (a period over a change of summer time counts each call in its own hour), else by its offset now."""
+    local = at.replace(tzinfo=dt.timezone.utc).astimezone(zone) if zone is not None else at + offset
     return local.strftime("%Y-%m-%d %H:00") if grain == "hour" else local.strftime("%Y-%m-%d")
+
+
+def _zone(name: str | None) -> Any:
+    if not name:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo(str(name)[:64])
+    except Exception:  # pylint: disable=broad-except   (an unknown name: the offset)
+        return None
 
 
 def purge(keep_days: int) -> int:
@@ -44,13 +57,16 @@ def purge(keep_days: int) -> int:
     return n
 
 
-def report(start: dt.datetime, end: dt.datetime, grain: str = "hour", tz_offset_minutes: int = 0) -> dict[str, Any]:
-    """The usage between start and end (UTC), bucketed by hour or day in the viewer's time zone."""
+def report(start: dt.datetime, end: dt.datetime, grain: str = "hour", tz_offset_minutes: int = 0,
+           tz_name: str | None = None) -> dict[str, Any]:
+    """The usage between start and end (UTC), bucketed by hour or day in the viewer's time zone (`tz_name`, else
+    their offset now)."""
     from superset.extensions import security_manager
 
     from supagent.models import LLMCall, Message, Usage
 
     offset = dt.timedelta(minutes=tz_offset_minutes)
+    zone = _zone(tz_name)
     grain = "day" if grain == "day" else "hour"
     rows = (db.session.query(LLMCall.at, LLMCall.task, LLMCall.user_id, LLMCall.model, LLMCall.prompt_tokens,
                              LLMCall.completion_tokens, LLMCall.cached_tokens, LLMCall.seconds, LLMCall.ok,
@@ -79,17 +95,19 @@ def report(start: dt.datetime, end: dt.datetime, grain: str = "hour", tz_offset_
         task = r.task or "other"
         for d in (total, by_task[task], by_user[who(r.user_id)], by_model[r.model or "?"]):
             d["calls"] += 1
+            d["sized"] += 1 if prompt else 0           # (0.11.0) a failed call has no size: not in the average
             d["prompt_tokens"] += prompt
             d["completion_tokens"] += completion
             d["cached_tokens"] += cached
             d["seconds"] += r.seconds or 0
             d["errors"] += 0 if r.ok else 1
             d["max_prompt"] = max(d["max_prompt"], prompt)
-        s = series[(_bucket(r.at, grain, offset), TASKS.get(task, task))]
+        s = series[(_bucket(r.at, grain, offset, zone), TASKS.get(task, task))]
         s["tokens"] += prompt + completion
         s["calls"] += 1
         seconds.append(r.seconds or 0)
-        prompts.append(prompt)
+        if prompt:
+            prompts.append(prompt)
         if r.message_id and task == "answer":
             answers_of[who(r.user_id)].add(r.message_id)
         biggest.append((prompt, r))
@@ -99,7 +117,9 @@ def report(start: dt.datetime, end: dt.datetime, grain: str = "hour", tz_offset_
         calls = d.get("calls") or 0
         out = {k: (round(v, 1) if isinstance(v, float) else v) for k, v in d.items()}
         out["tokens"] = int(d.get("prompt_tokens", 0) + d.get("completion_tokens", 0))
-        out["avg_prompt"] = round(d.get("prompt_tokens", 0) / calls) if calls else 0
+        sized = d.get("sized") or 0
+        out["avg_prompt"] = round(d.get("prompt_tokens", 0) / sized) if sized else 0
+        out.pop("sized", None)
         out["avg_seconds"] = round(d.get("seconds", 0) / calls, 2) if calls else 0
         out["cache_share"] = round(100 * d.get("cached_tokens", 0) / d["prompt_tokens"], 1) if d.get("prompt_tokens") else 0
         for k in ("calls", "errors", "prompt_tokens", "completion_tokens", "cached_tokens", "max_prompt"):
@@ -109,17 +129,21 @@ def report(start: dt.datetime, end: dt.datetime, grain: str = "hour", tz_offset_
     totals = finish(total)
     totals.update(p95_seconds=_pct(seconds, 0.95), p95_prompt=int(_pct(prompts, 0.95)),
                   people=len([u for u in by_user if not u.startswith("(")]))
-    usages = (db.session.query(Usage).filter(Usage.created_at >= start, Usage.created_at < end)
-              .order_by(Usage.seconds.desc()).limit(50_000).all())
-    answer_seconds = [u.seconds or 0 for u in usages]
+    import sqlalchemy as sa
+
+    inside = (Usage.created_at >= start, Usage.created_at < end)
+    agg = db.session.query(sa.func.count(), sa.func.avg(Usage.seconds), sa.func.avg(Usage.llm_calls),
+                           sa.func.avg(Usage.tool_calls), sa.func.sum(Usage.failed_calls),
+                           sa.func.sum(Usage.nudges)).filter(*inside).one()
+    n_answers = int(agg[0] or 0)                      # (0.11.0) over every answer of the period (no cap)
+    usages = db.session.query(Usage).filter(*inside).order_by(Usage.seconds.desc()).limit(50_000).all()
+    top = max(0, n_answers - math.ceil(0.95 * n_answers))     # the 95th percentile, counted from the slowest
     marked = (db.session.query(Message.id).filter(Message.role == "assistant", Message.created_at >= start,
                                                   Message.created_at < end, Message.content.like("%(Check:%")).count())
-    answers = {"count": len(usages), "avg_seconds": round(sum(answer_seconds) / len(usages), 1) if usages else 0,
-               "p95_seconds": _pct(answer_seconds, 0.95),
-               "avg_llm_calls": round(sum(u.llm_calls or 0 for u in usages) / len(usages), 1) if usages else 0,
-               "avg_tool_calls": round(sum(u.tool_calls or 0 for u in usages) / len(usages), 1) if usages else 0,
-               "failed_tool_calls": sum(u.failed_calls or 0 for u in usages),
-               "sent_back": sum(u.nudges or 0 for u in usages), "marked": marked}
+    answers = {"count": n_answers, "avg_seconds": round(float(agg[1] or 0), 1),
+               "p95_seconds": round(usages[top].seconds or 0, 2) if n_answers and top < len(usages) else 0,
+               "avg_llm_calls": round(float(agg[2] or 0), 1), "avg_tool_calls": round(float(agg[3] or 0), 1),
+               "failed_tool_calls": int(agg[4] or 0), "sent_back": int(agg[5] or 0), "marked": marked}
     questions = {}
     slow_ids = [u.message_id for u in usages[:10]]
     for m in db.session.query(Message).filter(Message.id.in_(slow_ids or [-1])):

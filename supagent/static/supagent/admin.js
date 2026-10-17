@@ -42,6 +42,8 @@
     "learn.metrics": "Only these metrics", "learn.metrics_exclude": "Never these metrics",
     "learn.max_minutes": "Time limit (minutes)", "learn.max_objects": "Metrics or indices per database at most",
     "learn.profile_hours": "Statistics window (hours)", "learn.llm_descriptions": "LLM descriptions",
+    "learn.history_days": "Keep the learning's history (days)",
+    "backup.keep_days": "Remove backups older than (days)", "backup.upload_max_mb": "Largest backup file brought (MB)",
     "mcp.user": "User of the MCP server mode",
     "tools.export_dir": "Export directory", "tools.export_max_rows": "Excel rows at most",
     "tools.email_allowed_domains": "Allowed e-mail domains", "tools.keep_days": "Keep answer files (days)",
@@ -137,11 +139,13 @@
     return el("div", { class: "field", "data-key": spec.key }, [head, inp]);
   }
 
-  function renderSettings(list, budget) {
+  /* only: the groups of the card just saved (0.11.0): the other cards keep what is typed in them and not saved yet */
+  function renderSettings(list, budget, only) {
     specs = {};
     list.forEach(function (s) { specs[s.key] = s; });
     document.querySelectorAll(".fields[data-group]").forEach(function (box) {
       var groups = box.dataset.group.split(" "), pre = box.dataset.prefix || "";
+      if (only && !groups.some(function (g) { return only.indexOf(g) >= 0; })) return;
       box.innerHTML = "";
       list.forEach(function (s) {
         if (groups.indexOf(s.key.split(".")[0]) >= 0 && s.key.indexOf(pre) === 0) box.appendChild(fieldRow(s));
@@ -172,7 +176,8 @@
         var row = document.querySelector('.field[data-key="' + key + '"]');
         if (!node || !row) return;
         node.placeholder = S.num(b.defaults[p][n]);
-        var from = b.set[p][n];
+        var from = b.set[p][n], said = row.querySelector(".in-use");
+        if (said) said.remove();                         // (0.11.0) a card not drawn again: said once
         if (from && from !== key) row.appendChild(el("span", { class: "in-use", text: "in use: " + S.num(b.sizes[p][n]) + " (set in " + from + ")" }));
       });
     });
@@ -321,9 +326,11 @@
       if (!(d.runs || []).length) tb.appendChild(el("tr", {}, [el("td", { colspan: "7", class: "muted", text: "No learning run yet." })]));
       running = running || !!d.running;                    // on another page too
       $("learn-stop").hidden = !running;                   // Stop while a run is running
-      if (running) setTimeout(runs, 5000);
+      clearTimeout(runsTimer);                             // (0.11.0) one reading every 5 s, however many clicks asked
+      runsTimer = running ? setTimeout(runs, 5000) : null;
     });
   }
+  var runsTimer = null;
 
   document.addEventListener("change", function (ev) { if (ev.target && ev.target.id === "s-llm-auth") authVisibility(); });
   document.querySelectorAll("[data-save]").forEach(function (btn) {
@@ -335,10 +342,12 @@
       btn.disabled = true;
       S.admin("POST", "settings", { settings: payload }).then(function (r) {
         btn.disabled = false;
+        // (0.11.0) refused or not answered (signed out, the CSRF token, the server, the network): nothing was saved
+        if (r.error && !r.errors) { res.textContent = "not saved: " + r.error; res.className = "result bad"; return; }
         var errs = Object.keys(r.errors || {}).map(function (k) { return k + ": " + r.errors[k]; });
         res.textContent = errs.length ? errs.join("; ") : "saved " + (r.saved || []).length + " setting(s)";
         res.className = "result " + (errs.length ? "bad" : "good");
-        if (r.settings) renderSettings(r.settings, r.budget);
+        if (r.settings) renderSettings(r.settings, r.budget, groups);   // (0.11.0) this card only
       });
     });
   });
@@ -403,10 +412,13 @@
   var PART_WORDS = { categories: "categories and System map", catalog: "catalog", memory: "memory", documents: "documents",
     notes: "notes", context: "Context", learned: "learned answers and paths", dictionary: "descriptions of the data",
     settings: "settings", vectors: "vectors" };
+  var listed = [];        /* (0.11.0) the backups listed: the Restore panel's choices */
   function backups() {
     return S.admin("GET", "backups").then(function (d) {
       var tb = $("backups").querySelector("tbody");
       tb.innerHTML = "";
+      listed = (d.backups || []).filter(function (b) { return !b.error; });
+      fillRestore();
       $("backup-dir").textContent = d.error ? "The directory " + d.directory + " cannot be read: " + d.error :
         "Written on this server in " + d.directory;
       (d.backups || []).forEach(function (b) {
@@ -454,6 +466,73 @@
         text: "No backup on this server yet: the daily one is made at the hour above (by the workers' beat), or Back up now." })]));
     });
   }
+  /* (0.11.0) Restore…: a backup of this server, or a file brought from elsewhere, then the parts to put back */
+  function fillRestore(chosen) {
+    var sel = $("restore-name");
+    if (!sel) return;
+    var keep = chosen || sel.value;
+    sel.innerHTML = "";
+    listed.forEach(function (b) {
+      sel.appendChild(el("option", { value: b.name, text: S.when(b.created_at) + " · " + b.name + (b.reason ? " (" + b.reason + ")" : "") }));
+    });
+    if (!listed.length) sel.appendChild(el("option", { value: "", text: "no backup on this server yet" }));
+    if (keep && listed.some(function (b) { return b.name === keep; })) sel.value = keep;
+    restoreParts();
+  }
+  function restoreParts() {
+    var box = $("restore-parts"), b = listed.filter(function (x) { return x.name === $("restore-name").value; })[0];
+    box.innerHTML = "";
+    if (!b) return;
+    Object.keys(b.parts || {}).forEach(function (p) {
+      box.appendChild(el("label", { class: "backup-part" }, [el("input", { type: "checkbox", value: p }),
+        document.createTextNode(" " + (PART_WORDS[p] || p) + " (" + S.num(b.parts[p]) + ")")]));
+    });
+  }
+  $("restore-open").addEventListener("click", function () {
+    var panel = $("restore-panel");
+    panel.hidden = !panel.hidden;
+    this.setAttribute("aria-expanded", String(!panel.hidden));
+    if (!panel.hidden) fillRestore();
+  });
+  $("restore-name").addEventListener("change", restoreParts);
+  $("restore-upload").addEventListener("click", function () {
+    var input = $("restore-file"), res = $("restore-result"), btn = this;
+    if (!input.files || !input.files.length) { res.textContent = "choose a backup file first"; res.className = "result bad"; return; }
+    var form = new FormData();
+    form.append("file", input.files[0]);
+    btn.disabled = true;
+    res.textContent = "sending " + input.files[0].name + "…"; res.className = "result";
+    fetch(document.body.dataset.adminApi + "backups/upload", { method: "POST", credentials: "same-origin", body: form,
+      headers: { "Accept": "application/json", "X-CSRFToken": (document.querySelector('meta[name="csrf-token"]') || {}).content || "" } })
+      .then(function (r) { return r.json().catch(function () { return { error: "HTTP " + r.status }; }); },
+            function (e) { return { error: "network error: " + e }; })
+      .then(function (r) {
+        btn.disabled = false;
+        if (r.error) { res.textContent = r.error; res.className = "result bad"; return; }
+        input.value = "";
+        res.textContent = "kept as " + r.saved.name + ": choose the parts to put back"; res.className = "result good";
+        backups().then(function () { fillRestore(r.saved.name); });
+      });
+  });
+  $("restore-go").addEventListener("click", function () {
+    var go = this, res = $("restore-result"), name = $("restore-name").value;
+    var b = listed.filter(function (x) { return x.name === name; })[0];
+    var chosen = Array.prototype.slice.call(document.querySelectorAll("#restore-parts input:checked")).map(function (c) { return c.value; });
+    if (!b) { res.textContent = "choose a backup"; res.className = "result bad"; return; }
+    if (!chosen.length) { res.textContent = "choose the parts to put back"; res.className = "result bad"; return; }
+    S.confirm(go, "Put back " + chosen.map(function (p) { return PART_WORDS[p] || p; }).join(", ") + " as of " + S.when(b.created_at) + "?",
+      { yes: "Restore", no: "Cancel", detail: "The present " + (chosen.length > 1 ? "parts are" : "part is") +
+        " replaced by the backup's. The present state is saved first in a backup of its own: a restore can be undone." }).then(function (ok) {
+      if (!ok) return;
+      go.disabled = true;
+      S.admin("POST", "backups/" + encodeURIComponent(name) + "/restore", { parts: chosen }).then(function (r) {
+        go.disabled = false;
+        res.textContent = r.error || "restore started: it is listed with the runs (Daily learning)";
+        res.className = "result " + (r.error ? "bad" : "good");
+        setTimeout(function () { runs(); backups(); }, 2500);
+      });
+    });
+  });
   $("backup-now").addEventListener("click", function () {
     var res = $("backup-result");
     S.admin("POST", "backups", {}).then(function (r) {

@@ -182,7 +182,8 @@
     st.freshAt = (st.freshAt + 1) % nodes.length;
     inView(nodes[st.freshAt]);
   }
-  function load(quiet) {
+  /* force (0.11.0): read after an edit of one's own (in Edit too, or with a field of the panel in use): always drawn */
+  function load(quiet, force) {
     quiet = quiet === true;
     var seq = ++st.seq, t0 = Date.now();
     if (!quiet) {
@@ -202,7 +203,7 @@
         return;
       }
       var sig = signature(d), before = st.data;
-      if (quiet && (sig === st.sig || editing())) {           // nothing new, or an admin is editing: later
+      if (quiet && (sig === st.sig || (!force && editing()))) {   // nothing new, or an admin is editing: later
         if ($("map-state").classList.contains("warn")) setState(st.note || "", st.note ? "changed" : "");
         return;
       }
@@ -241,7 +242,9 @@
       st.cats = st.cats.filter(function (c) { return allCats().indexOf(c) >= 0; });   // a category removed since
       st.parts = st.parts.filter(function (i) { return !!st.byId[i]; });
       syncPick();
+      st.sideForce = !quiet || !!force;                       // (0.11.0) read after an edit: the open panel follows
       draw();
+      st.sideForce = false;
       if (!st.fitted) { fit(true); st.fitted = true; }
       if (d.is_admin) loadMissing();
       st.freshAt = -1;
@@ -914,7 +917,8 @@
     st.vp = vp;
     apply();
     legend(C);
-    if (st.sel && L.nodes[st.sel]) select(st.sel, true);
+    // (0.11.0) the panel of a part being written in stays as it is (a view drawn again: a box opened, the 20 s reading)
+    if (st.sel && L.nodes[st.sel]) select(st.sel, true, !st.sideForce && sideBusy(st.sel));
   }
   /* The name of a category on the map: a click folds its parts into one box or opens them again; its cross hides
      the category for this viewer (the legend shows it again); in Edit an admin drags it to move the category. */
@@ -1159,7 +1163,7 @@
       res.className = "result good";
       if (D.saved) D.saved();
       if (done) done(r);
-      load(true);
+      load(true, true);                                      // (0.11.0) drawn in Edit too: the change is seen at once
       return r;
     });
   }
@@ -1490,7 +1494,7 @@
                                 placeholder: "What this category is, in a sentence (a pool: a group of servers that share the same queue of slots)" });
       ta.value = c.about || "";
       var res = el("span", { class: "result" + (note ? " good" : ""), text: note || "" });
-      box.appendChild(el("div", { class: "map-edit" }, [el("strong", { text: "What it is (admins)" }), ta,
+      box.appendChild(el("div", { class: "map-edit" }, [el("strong", { text: "What it is" }), ta,   // (0.11.0) editors too
         el("div", { class: "actions" }, [el("button", { type: "button", class: "btn small primary", text: "Save", onclick: function () {
           S.dict("POST", "map", { describe_category: { name: c.name, about: ta.value } }).then(function (r) {
             if (r.error) { res.textContent = r.error; res.className = "result bad"; return; }
@@ -1571,7 +1575,8 @@
   }
 
   // ------------------------------------------------------------------ the side panel: a part, what it does, its edits
-  function select(id, quiet) {
+  /* keep (0.11.0): the part's panel is left as it is (sideBusy), only the map marks the part */
+  function select(id, quiet, keep) {
     st.sel = id;
     var n = st.layout.nodes[id];
     st.svg.querySelectorAll(".map-node, .map-edge, .map-link").forEach(function (x) { x.classList.remove("dim", "on"); });
@@ -1589,8 +1594,16 @@
     st.svg.querySelectorAll(".map-node").forEach(function (x) { x.classList.toggle("dim", !near[x.dataset.id]); });
     var g = st.svg.querySelector('.map-node[data-id="' + id + '"]');
     if (g) g.classList.add("on");
-    side(n.v, quiet);
+    if (!keep) side(n.v, quiet);
     if (!quiet) inView(n);
+  }
+  /* (0.11.0) a part's panel being written in: a field of it has the focus, or was typed in and not saved (the panel
+     is made again after a save, the fields then new). Drawn again for a view, it lost what was typed. */
+  function sideBusy(id) {
+    var box = $("map-side"), a = document.activeElement;
+    if (box.hidden || box._part === undefined || String(box._part) !== String(id)) return false;
+    if (a && box.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return true;
+    return Array.prototype.some.call(box.querySelectorAll("input, textarea, select"), function (f) { return !!f._typed; });
   }
   /* the part a panel is about stays in sight (the panel narrows the map) */
   function inView(n) {
@@ -1612,6 +1625,7 @@
     var box = $("map-side"), admin = st.data.is_admin;
     box.innerHTML = "";
     box.hidden = false;
+    box._part = v.id;                                         // (0.11.0) the part it is about (sideBusy)
     box.appendChild(el("button", { type: "button", class: "close", "aria-label": "Close", text: "×", onclick: unselect }));
     box.appendChild(el("div", { class: "muted", text: catLabel(v.facet, 1) }));
     box.appendChild(el("h3", { text: v.value }));
@@ -1629,7 +1643,7 @@
       v.items ? S.num(v.items) + " item" + (v.items > 1 ? "s" : "") + " about it: " + kinds.join(", ") : "No item about it yet." }));
     if ((v.origins || []).length) box.appendChild(el("div", { class: "muted small-note", text: "From: " + v.origins.join("; ") }));
     box.appendChild(el("div", { class: "map-rel" }, [el("strong", { text: "Links" }),
-      S.linksBox({ id: v.id, value: v.value }, { onchange: function () { load(true); } })]));
+      S.linksBox({ id: v.id, value: v.value }, { onchange: function () { load(true, true); } })]));   // (0.11.0) force
     if (admin) box.appendChild(insideBlock(v));
     box.appendChild(el("div", { class: "actions" }, [
       el("button", { type: "button", class: "btn small", text: "Filter the map on it",
@@ -1828,7 +1842,8 @@
       apply();
     }, { passive: false });
     c.addEventListener("pointerdown", function (ev) {
-      if (ev.target.closest && ev.target.closest(".map-node, .map-none, .map-head")) return;   // a box, a category's name: its own click
+      // a box, a category's name: its own click; (0.11.0) a link too (the pan's pointer capture took its click away)
+      if (ev.target.closest && ev.target.closest(".map-node, .map-none, .map-head, .map-link")) return;
       drag = { x: ev.clientX, y: ev.clientY, vx: st.view.x, vy: st.view.y, moved: false };
       c.setPointerCapture(ev.pointerId);
     });
@@ -2006,7 +2021,7 @@
       var nested = (st.byId[n.id].parents || []).some(function (p) { return st.byId[p] && colOf(st.byId[p].facet) === n.cat; });
       setState(n.v.value + " is in " + catLabel(facet, 2).toLowerCase() + " now" +
                (nested ? " (drawn inside the part it belongs to)" : ""), "changed");
-      load(true);
+      load(true, true);                                       // (0.11.0) read in Edit too
     }, function () { setState("not moved", "warn"); draw(); });
   }
   /* In Edit, the name of a category is dragged: its boxes follow (the ones an admin placed too), the lines are
@@ -2153,6 +2168,7 @@
     else if (st.svg) setTimeout(function () { fit(true); }, 80);
   });
   if (!S.canEdit) $("map-edit").hidden = true;
+  $("map-side").addEventListener("input", function (ev) { if (ev.target) ev.target._typed = true; });   // (0.11.0) sideBusy
   wire();
   D.register("map", load);
   setInterval(auto, AUTO_MS);

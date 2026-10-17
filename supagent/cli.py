@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import zipfile
 from typing import Any
 
 import click
@@ -350,7 +351,10 @@ def settings_cmd(pairs: tuple[str, ...], unset: tuple[str, ...]) -> None:
         except (KeyError, ValueError) as ex:
             raise click.ClickException(str(ex)) from ex
     for key in unset:
-        settings.set_value(key.strip(), None, by="cli")
+        try:
+            settings.set_value(key.strip(), None, by="cli")
+        except KeyError as ex:
+            raise click.ClickException(str(ex)) from ex
     _print_settings()
 
 
@@ -879,6 +883,8 @@ def restore(name: str, parts: str, yes: bool) -> None:
         manifest = B.manifest_of(B.path_of(name))
     except (ValueError, OSError) as ex:
         raise click.ClickException(str(ex)) from ex
+    except (KeyError, zipfile.BadZipFile) as ex:                      # not a zip, or one without its manifest
+        raise click.ClickException(f"{name} is not a backup of the knowledge ({type(ex).__name__})") from ex
     wanted = [p.strip() for p in parts.split(",") if p.strip()]
     have = manifest.get("parts") or {}
     unknown = [p for p in wanted if p not in have]

@@ -419,6 +419,8 @@ def run_answer(message_id: int, taking_over: bool = False) -> bool:
         remembered = remember_now(user_id, question)    # (0.10.9.1) "remember that X": kept as written before the
     except Exception:  # pylint: disable=broad-except   # answer, which is given it already
         db.session.rollback()
+    db.session.close()           # (0.11.0) the rows read above stay readable; no transaction of this session left open
+    #                              while the answer runs in its own context (Flask-SQLAlchemy 3: a session per context)
     try:
         with acting_as(username):
             agent = make_agent(username, on_step=on_step, rich_results=True, should_stop=should_stop)

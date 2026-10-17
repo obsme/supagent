@@ -50,3 +50,12 @@ def test_no_team_named_keeps_the_team(conf):
     out, changed = R._grounded_labels({"team": "zqxshop", "severity": "warning"},
                                       "Alert when the zqx checkout errors exceed 5 per minute.")
     assert out == {"team": "zqxshop", "severity": "warning"} and changed == []
+
+
+def test_a_team_fixed_by_the_settings_stays(conf):
+    """(0.11.0) grafana.rule_labels fixing the team: a team named in the rule's text does not replace it (the alerts
+    went to the wrong team)."""
+    conf["grafana.rule_labels"] = {"managed_by": "supagent", "team": "zqxoncall"}
+    text = "Alert the zqxdata team when the zqx orders database deadlocks exceed 3 per minute."
+    out, _changed = R._grounded_labels({"team": "zqxoncall", "managed_by": "supagent"}, text)
+    assert out["team"] == "zqxoncall"

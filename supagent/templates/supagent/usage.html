@@ -32,7 +32,9 @@
     <div class="sec-head">
       <h2>Servers</h2><button type="button" class="info" aria-controls="x-servers" aria-label="About the servers">i</button>
       <div class="explain" id="x-servers">Every server a Superset component runs on (web server, Celery worker, Celery
-        beat): its CPU over the last minute, load, memory, swap and disks, and what the Superset processes there take,
+        beat): its CPU over the last minute, load, memory, swap, the disk Superset is on (its home and its installation:
+        the disk of /data when Superset lives there; free space as the system lets Superset use it), and what the
+        Superset processes there take,
         with the last 24 hours of CPU and memory. Written by those processes every minute; a component not heard from
         for 5 minutes is shown as gone. Refreshed every minute.</div>
     </div>

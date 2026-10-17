@@ -22,6 +22,7 @@ import threading
 from typing import Any, Iterator
 
 from sqlalchemy import or_
+from sqlalchemy.orm import load_only
 from superset import db
 
 from supagent import settings
@@ -58,13 +59,21 @@ def split_text(text: str, size: int = PART_CHARS, overlap: int = OVERLAP) -> lis
     return [p for p in parts if p]
 
 
-HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
-HEADING_ATTRS = re.compile(r"\s*\{[:#][^}]*\}\s*$")     # {: .label} {#an-id} after a heading (kramdown, Pandoc)
+HEADING = re.compile(r"^(#{1,6})[ \t]+(.+)$")   # (0.11.0) its closing #s taken off by _heading_text: as a
+#                                                 pattern, a heading with a long run of spaces took minutes
+HEADING_ATTRS = re.compile(r"\{[:#][^}]*\}\s*$")     # {: .label} {#an-id} after a heading (kramdown, Pandoc;
+#                                                 the spaces before it stripped after: a long run took minutes)
 FENCE = re.compile(r"^[ \t]*(```|~~~)")
 SHORT_SECTION = 300      # a section shorter than this (a heading and a line) goes with the next one
 PACK_SIBLINGS = True     # the sections that follow (siblings too) go together while they fit
 SECTION_CHARS = 2000     # a section and the ones after it together, up to this (2,000 rather than 1,500: 26%
 #                          fewer pieces, words scattered over a section found better, topics the same)
+
+
+def _heading_text(rest: str) -> str:
+    """A heading's text without its closing #s and the spaces around them ("## Title ##": Title), at least its first
+    character (as the pattern (.+?)[ \t]*#*[ \t]*$ took it, without its backtracking)."""
+    return rest.rstrip(" \t").rstrip("#").rstrip(" \t") or rest[:1]
 
 
 def sections(text: str) -> list[tuple[list[str], str]]:
@@ -86,7 +95,7 @@ def sections(text: str) -> list[tuple[list[str], str]]:
         if m:
             if "".join(lines).strip():
                 out.append((here, "\n".join(lines).strip()))
-            level, title = len(m.group(1)), HEADING_ATTRS.sub("", m.group(2)).strip()
+            level, title = len(m.group(1)), HEADING_ATTRS.sub("", _heading_text(m.group(2))).strip()
             path = [(lv, t) for lv, t in path if lv < level] + [(level, title)]
             here, lines = [t for _lv, t in path], []
         lines.append(line)
@@ -692,7 +701,8 @@ def sync(prefixes: tuple[str, ...] | None = None, dry_run: bool = False) -> dict
     if prefixes is not None:                             # (0.10.9.2) only those pieces read from the database
         q = q.filter(or_(*[Chunk.ref.like(p.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%",
                                           escape="\\") for p in prefixes]))
-    existing = {c.ref: c for c in q if prefixes is None or c.ref.startswith(prefixes)}
+    q = q.options(load_only(Chunk.id, Chunk.ref, Chunk.content_hash, Chunk.title))   # (0.11.0) not their texts
+    existing = {c.ref: c for c in q if prefixes is None or c.ref.startswith(prefixes)}   # and vectors (GBs an hour)
     wanted = (p for p in pieces(prefixes) if prefixes is None or p["ref"].startswith(prefixes))
     return _write(existing, wanted, dry_run, scope=prefixes)
 
@@ -711,7 +721,8 @@ def sync_objects(ids: list[int] | set[int]) -> dict[str, int]:
         if parent is not None:
             tops.add(parent[0])
     refs = [f"object:{i}" for i in tops]
-    existing = {c.ref: c for c in db.session.query(Chunk).filter(Chunk.ref.in_(refs or ["-"]))}
+    existing = {c.ref: c for c in db.session.query(Chunk).options(
+        load_only(Chunk.id, Chunk.ref, Chunk.content_hash, Chunk.title)).filter(Chunk.ref.in_(refs or ["-"]))}
     return _write(existing, _object_pieces(only=tops), scope=tuple(refs) or None)
 
 

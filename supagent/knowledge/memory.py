@@ -264,17 +264,30 @@ KIND_ORDER = {"rule": 0, "preference": 1, "fact": 2}
 ENTRY_CHARS = 400          # (until 0.10.9) of each memory in the prompt; since 0.10.9.1 a memory is given whole
 
 
-def prompt_block(user_id: int | None, shown: set[str] | None = None, asked: str | None = None) -> str:
+def prompt_block(user_id: int | None, shown: set[str] | None = None, asked: str | None = None,
+                 said: list[str] | None = None) -> str:
     """The memories given with every question, first of what is found for it: rules, then preferences, then facts
     (the user's own first, the newest first). (0.10.9.1) Each one whole and as written (its lines kept), and every one
     of them: none is left out to make room for the rest, the knowledge found gives way (memory.prompt_chars is their
     room before it does). `shown` gets the refs of the ones given, not given twice. (0.10.7) With `asked` (the
     question and the chat), a memory that applies only when the user says X ("When the user says 'X', filter by
     F='X'") is not given when they do not say X: told "applies only then", a model still filtered a question that
-    never named X."""
+    never named X. (0.11.0) With `said` (the team's rules the instructions give), each memory is given once: a copy of
+    another, or one said whole by another or by a rule, is left out (knowledge.contextplan; memories alike but not the
+    same are both given, and listed in To review)."""
     items = memories_for(user_id)
     if not items:
         return ""
+    if said is not None:
+        from supagent.knowledge.contextplan import unique
+
+        order = sorted(items, key=lambda m: KIND_ORDER.get(m.kind, 3))
+        live = [m for m in order if asked is None or triggered(m.text, asked)]
+        keep, _dropped = unique([(m.id, m.text or "") for m in live], said=said)
+        keep_ids = set(keep)
+        if shown is not None:
+            shown.update(f"memory:{m.id}" for m in live if m.id not in keep_ids)   # said: not found again either
+        items = [m for m in items if m.id in keep_ids or m not in live]
     from supagent.knowledge.resolve import gone_names, mentions_gone
 
     gone = gone_names()

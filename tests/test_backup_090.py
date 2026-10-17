@@ -156,11 +156,13 @@ def test_the_last_ones_are_kept_and_the_daily_one_is_due_once(knowledge):
     from supagent.knowledge import backup
 
     settings.set_value("backup.keep", 2)
+    settings.set_value("backup.keep_days", 0)                # (0.11.0) by number only here (age: test_final_0110)
     for stamp in ("20260101-010000", "20260102-010000", "20260103-010000"):
         with zipfile.ZipFile(os.path.join(knowledge["dir"], f"supagent-knowledge-{stamp}.zip"), "w") as z:
             z.writestr("manifest.json", json.dumps({"format": 1, "parts": {}, "created_at": stamp}))
     assert backup.prune() == ["supagent-knowledge-20260101-010000.zip"]
     assert [f["name"] for f in backup.listing()] == ["supagent-knowledge-20260103-010000.zip", "supagent-knowledge-20260102-010000.zip"]
+    settings.set_value("backup.keep_days", None)
     now = dt.datetime(2026, 10, 5, 3, 0)                                             # a Monday, 03:00
     assert backup.due(now)                                                           # none today: due (the hour is 1)
     assert not backup.due(now.replace(hour=0))                                       # not yet the hour

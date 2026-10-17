@@ -114,7 +114,8 @@ def catalog_task() -> None:
         db.session.remove()
 
 
-@celery_app.task(name="supagent.doc", ignore_result=True, soft_time_limit=1800, time_limit=1900)
+@celery_app.task(name="supagent.doc", ignore_result=True, soft_time_limit=6 * 3600, time_limit=6 * 3600 + 300)
+# (0.11.0) a wiki of 50,000 pages takes hours to read (was 30 minutes: such a read ended in error)
 def doc_task(doc_id: int) -> None:
     from superset import db
 
@@ -171,6 +172,12 @@ def learn_tick() -> None:
             from supagent.knowledge.usage import purge as purge_calls
 
             purge_calls(int(settings.get("usage.keep_days") or 0))      # the LLM usage page's old calls
+            from supagent.knowledge.history import purge as purge_history
+
+            purge_history()                  # (0.11.0) the learning's runs older than learn.history_days
+            from supagent.hoststats import purge_gone
+
+            purge_gone()                     # (0.11.0) the Servers card's hosts gone for a week
         except Exception:  # pylint: disable=broad-except
             db.session.rollback()
             log.exception("supagent: clean-up of the LLM calls")
@@ -179,6 +186,8 @@ def learn_tick() -> None:
 
             if backup.due():
                 backup.run_backup(reason="schedule")
+            else:
+                backup.prune()                   # (0.11.0) by number and age, and what a stopped backup left
         except Exception:  # pylint: disable=broad-except   (the learning goes on)
             db.session.rollback()
             log.exception("supagent: the daily backup of the knowledge")

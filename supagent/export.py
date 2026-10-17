@@ -825,6 +825,7 @@ class _Writer:
         head = cells(t.header, True) if t.header else None
         head_n = (max(len(c) for c in head) or 1) if head else 0
         head_h = head_n * lead + 2 * pad if head else 0.0
+        again = bool(head) and head_h + lead + 2 * pad <= TOP - MB      # a header leaving no line under it: once
         self.gap(4.0)
         if head:
             self.room(head_h + lead + 2 * pad)
@@ -835,14 +836,14 @@ class _Writer:
             h = n * lead + 2 * pad
             if self.y - h < MB and h <= (TOP - MB) - head_h:            # on the next page, under the header again
                 self.new_page()
-                if head:
+                if again:
                     self._row(head, widths, x, size, lead, pad, aligns, 0, head_n, HEAD_BG)
             done = 0
             while done < n:                                              # a row taller than a page: in parts
                 fit = int((self.y - MB - 2 * pad) // lead)
                 if fit <= 0:
                     self.new_page()
-                    if head:
+                    if again:
                         self._row(head, widths, x, size, lead, pad, aligns, 0, head_n, HEAD_BG)
                     continue
                 take = min(fit, n - done)
@@ -850,7 +851,7 @@ class _Writer:
                 done += take
                 if done < n:
                     self.new_page()
-                    if head:
+                    if again:
                         self._row(head, widths, x, size, lead, pad, aligns, 0, head_n, HEAD_BG)
         self.y -= 9.0
 

@@ -228,6 +228,12 @@ SPECS: list[Spec] = [
          "every question: the full version to a model of the long context profile; only what the user's databases "
          "hold. (0.10.9.3) A model of the short profile (32k-64k tokens) is given the light version only when this "
          "is set on here: on such a model it made the agent answer some follow-ups from it without a query"),
+    Spec("agent.context_tiers", True, "bool", "(0.11.0) The agent's context in tiers: first what the team keeps (the "
+         "catalog's rules, the memories, the team's words, where the data is, the learned answers), each said once (a "
+         "copy, or a text said whole by another, left out); then the chat, the newest messages first, in the room "
+         "they leave; then the documentation chosen for the question: the knowledge found and the LLM context's lines "
+         "about the question, never the whole page. Off: as 0.10.12 (the LLM context whole in the instructions, the "
+         "chat's last 40 messages)"),
     Spec("agent.context_tokens", 0, "int", "(0.10.9.1) Tokens the model reads per request, when its server does not "
          "say it (a gateway): sets the context profile (auto) and the long profile's sizes (0: as the server says)"),
     Spec("agent.answer_seconds", 1500, "int", "After this long, an answer still calling tools is told to answer "
@@ -278,6 +284,9 @@ SPECS: list[Spec] = [
     Spec("learn.days", ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "list",
          "Days of the week with a learning run (mon, tue, wed, thu, fri, sat, sun)"),
     Spec("learn.user", "", "str", "Superset user the learner reads the data as (empty: the first Admin)"),
+    Spec("learn.history_days", 30, "int", "(0.11.0) Days the learning's history is kept: the runs (learning, "
+         "classification, Context, backups, restores, documents) finished before are removed every hour, with the "
+         "changes they found; the last run of each kind is kept. 0: kept for ever"),
     Spec("learn.databases", [], "list", "Database names or ids to learn (empty: every osagg and promagg database)"),
     Spec("learn.indices", [], "list", "Only these indices (patterns with *, e.g. batch-jobs*); empty: every index "
          "the OpenSearch database lists. An index learned before that the patterns leave out is marked gone"),
@@ -471,6 +480,10 @@ SPECS: list[Spec] = [
     Spec("backup.hour", 1, "int", "The hour of the daily backup (the server's clock, 0-23)"),
     Spec("backup.days", [], "list", "The days of the daily backup (mon, tue...); empty: every day"),
     Spec("backup.keep", 14, "int", "Backups kept (the oldest are removed)"),
+    Spec("backup.keep_days", 30, "int", "(0.11.0) Backups older than this many days are removed too (the newest one "
+         "is always kept); the files a stopped backup left are removed after a day. 0: by number only"),
+    Spec("backup.upload_max_mb", 2048, "int", "(0.11.0) Largest backup file that can be brought from elsewhere to be "
+         "restored (Settings, Restore from a file), in MB"),
     Spec("backup.dir", "", "str", "The directory of the server where the backups are written (empty: "
          "supagent-backups in Superset's home). With several servers: a directory they share, or the backups are "
          "on the server that made them"),
@@ -790,6 +803,19 @@ def explicit(key: str) -> Any:
 
 
 CHANGED = [0]                              # (0.10.9.2) settings this process wrote (what caches of them are keyed on)
+YES_NO = ("1", "true", "yes", "on", "0", "false", "no", "off", "")
+
+
+def _written(spec: Spec, value: Any) -> Any:
+    """(0.11.0) A value as it is stored: a yes/no only from a word that says one (a typo was stored as "false": a TLS
+    check off), a JSON setting only of its default's shape (a list for an object broke every call reading it)."""
+    if spec.kind == "bool" and not isinstance(value, bool) and str(value).strip().lower() not in YES_NO:
+        raise ValueError(f"{spec.key}: true or false")
+    new = _coerce(spec, value)
+    if spec.kind == "json" and new is not None and isinstance(spec.default, (dict, list)) and \
+            not isinstance(new, type(spec.default)):
+        raise ValueError(f"{spec.key}: a JSON {'object' if isinstance(spec.default, dict) else 'list'}")
+    return new
 
 
 def set_value(key: str, value: Any, by: str = "") -> None:
@@ -805,7 +831,7 @@ def set_value(key: str, value: Any, by: str = "") -> None:
         row.secret = None if value in (None, "") else str(value)
         row.value = None
     else:
-        row.value = None if value is None else _coerce(spec, value)
+        row.value = None if value is None else _written(spec, value)
     row.updated_by = by
     stored = (row.value, row.secret)
     db.session.merge(row)

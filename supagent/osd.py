@@ -101,21 +101,26 @@ def _request_options() -> dict[str, Any]:
     auth = None
     kind = str(_setting("osd.auth", "") or "").strip()
     secret = str(_setting("osd.secret", "") or "")
+    token = secret.strip()                              # (0.11.0) a token read from a file ends with a line break
     if kind == "basic":
         auth = (str(_setting("osd.user", "") or ""), secret)
-    elif kind == "bearer" and secret:
-        headers["Authorization"] = f"Bearer {secret}"
-    elif kind == "header" and secret:
+    elif kind == "bearer" and token:
+        headers["Authorization"] = f"Bearer {token}"
+    elif kind == "header" and token:
         name = str(_setting("osd.header", "") or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", name):
             raise OSDError("osd.header: the header's name (letters, digits, dashes)")
-        headers[name] = secret
+        headers[name] = token
     verify: Any = bool(_setting("osd.verify_tls", True))
     ca = str(_setting("osd.ca_bundle", "") or "").strip()
     if verify and ca:
         verify = ca
     return {"headers": headers, "auth": auth, "verify": verify,
             "timeout": max(1.0, float(_setting("osd.timeout", 30) or 30))}
+
+
+BAD_HEADER = ("a header of the sign-in is not valid (a line break or a space inside osd.secret, osd.header or "
+              "osd.tenant?)")
 
 
 def _get(path: str, params: list[tuple[str, Any]]) -> Any:
@@ -128,8 +133,12 @@ def _get(path: str, params: list[tuple[str, Any]]) -> Any:
         raise OSDError("osd.url: an http:// or https:// address")
     try:
         r = requests.get(b + path, params=params, allow_redirects=False, **_request_options())
+    except requests.exceptions.InvalidHeader:          # (0.11.0) its text holds the header's value: the secret
+        raise OSDError(BAD_HEADER) from None
     except requests.RequestException as ex:
         raise OSDError(f"OpenSearch Dashboards does not answer: {type(ex).__name__}: {str(ex)[:200]}") from None
+    except ValueError:                                 # (0.11.0) http.client's check of a header: the same
+        raise OSDError(BAD_HEADER) from None
     if r.status_code in (401, 403):
         raise OSDError(f"OpenSearch Dashboards refused the sign-in ({r.status_code}): the user of osd.user (or the "
                        "token) must be able to read the saved objects" + (" of the tenant " + str(
@@ -229,7 +238,9 @@ def _pct(p: Any) -> str:
                 else {"1": "st", "2": "nd", "3": "rd"}.get(n[-1], "th"))
 
 
-def _metric_words(a: dict[str, Any], others: dict[str, dict[str, Any]]) -> str | None:
+def _metric_words(a: dict[str, Any], others: dict[str, dict[str, Any]], depth: int = 0) -> str | None:
+    if depth > 5:                                      # (0.11.0) a pipeline aggregation of itself (an import): no loop
+        return "a metric"
     kind = str(a.get("type") or "")
     p = a.get("params") or {}
     f = str(p.get("field") or "")
@@ -239,11 +250,11 @@ def _metric_words(a: dict[str, Any], others: dict[str, dict[str, Any]]) -> str |
             return f"the {', '.join(_pct(v) for v in values)} percentile{'s' if len(values) != 1 else ''} of {f}"
         return f"the share of {f} under {', '.join(str(v) for v in values)}"
     if kind in METRIC:
-        if p.get("customMetric"):                      # a pipeline aggregation: of the metric it is given
-            inner = _metric_words(p["customMetric"], others) or "a metric"
+        if isinstance(p.get("customMetric"), dict):    # a pipeline aggregation: of the metric it is given
+            inner = _metric_words(p["customMetric"], others, depth + 1) or "a metric"
             return METRIC[kind].format(f=inner)
         if p.get("metricAgg") and str(p["metricAgg"]) in others:
-            return METRIC[kind].format(f=_metric_words(others[str(p["metricAgg"])], others) or "a metric")
+            return METRIC[kind].format(f=_metric_words(others[str(p["metricAgg"])], others, depth + 1) or "a metric")
         if kind == "top_hits" and p.get("sortField"):
             f += f" (sorted by {p['sortField']})"
         return METRIC[kind].format(f=f or "a field")

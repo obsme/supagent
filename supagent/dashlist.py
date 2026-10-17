@@ -173,10 +173,10 @@ def record(source: str, items: list[dict[str, Any]], listed: bool, read: set[str
     have = {r.ref: r for r in db.session.query(DashItem).filter(DashItem.source == source)}
     out = {"new": 0, "updated": 0, "gone": 0, "back": 0}
     seen: set[str] = set()
-    boards = {str(i["ref"]) for i in items if i.get("kind") == "dashboard"}
+    boards = {str(i["ref"])[:255] for i in items if i.get("kind") == "dashboard"}
     on = {ref for ref in boards if (have[ref].active if ref in have else new_default)}
     for i in items:
-        ref = str(i.get("ref") or "")
+        ref = str(i.get("ref") or "")[:255]                # (0.11.0) as it is stored: found again the next time
         if not ref or ref in seen:
             continue
         seen.add(ref)
