@@ -1,5 +1,41 @@
 # Changes
 
+## 0.11.1.1 — 2026-10-18
+
+A fix of the learning that stayed at its step "search index and embeddings" and never finished.
+
+* **A reading of the documents ends in time**: a reading (the learning's step, the hourly one, the one after a
+  document is read) stops its embeddings at its time (`embed.max_minutes`, 45; the learning's step: what is left of
+  the run's time, ten minutes at least) and the next reading, hourly, embeds the pieces left. A whole wiki or
+  repository embedded again by an embedding model on CPUs took hours, and the learning waited for it.
+* **One reading at a time**: the reading's lease is renewed while it runs. It ran out after 30 minutes, and the
+  hourly reading and the documents read then started readings of their own at the same time, embedding the same
+  pieces twice and slowing each other down. A reading asked meanwhile is done once more only while time is left, else
+  by the next reading (each one asked meanwhile made the running reading read once more, without end).
+* **New documents in the search sooner**: a document read during a long embedding gets its pieces a minute later at
+  most (the embeddings stop for it and go on after), found by their words at once.
+* **The step shows what it does**: "running (embeddings: 400 of 2,000)" in the learning runs of Settings, saved as it
+  goes, so that a long step is never taken for a run whose process stopped.
+* **A worker's time limit is the worker's**: Celery's time limit now stops the reading instead of being taken for the
+  error of one of its parts (the reading went on to the hard limit, which killed the worker and left the run
+  "running").
+* `superset supagent index --minutes N`: readings one after the other until every piece has its vector or N minutes
+  are over (a big backlog of pieces embedded at once), with what the reading does every 30 seconds.
+
+Measured before the release under a rule written before any result (gate G-0.11.1.1, NOTES 2026-10-18 11:5x) on the
+frozen build 8c4251c, the release's code. On a copy of the lab's database with a repository like a team's (467 files,
+2.5 MB of shell scripts and Python), an embedding service slowed to 1.5 s per batch, the lease shortened to 60 s and
+another process asking for a reading every 20 s: 0.11.1's reading was joined by a second one 68 s in and showed
+nothing while it ran; 8c4251c's reading ended at its time (243 s for 240), the pieces it could not embed left for the
+next reading, with one lease holder, the other process's 12 requests all waiting, and its progress every 12 s at most.
+A learning run on the copy with the lab's embedding model and every piece without its vector: done in 130 s, its step
+"search index and embeddings" 112 s with 2,000 pieces embedded and 2,848 left for the next readings, its progress
+shown in Settings while it ran. The unit tests: 2351 passed (12 new); the knowledge store's 16 against PostgreSQL
+18.6: passed. The agent's answers are not measured again: no file the agent reads changes (0.11.1's measure stands).
+
+Upgrade from 0.11.1: pip install the wheel on every host, restart the web servers, the workers and beat; nothing to
+run (tables unchanged, v20). New setting: embed.max_minutes (45). INSTALL.txt, *From 0.11.1 to 0.11.1.1*.
+
 ## 0.11.1 — 2026-10-17
 
 A quality round on what the agent learns from the team's documents and code: the reader, the System map's learning

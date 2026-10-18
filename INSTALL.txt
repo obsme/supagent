@@ -1,16 +1,16 @@
-supagent 0.11.1 - the AI agent inside Apache Superset
-=====================================================
+supagent 0.11.1.1 - the AI agent inside Apache Superset
+=======================================================
 
 What is in this folder
-  supagent-0.11.1-py3-none-any.whl   the package for Superset 6.1 (pure Python; nothing else to install)
+  supagent-0.11.1.1-py3-none-any.whl   the package for Superset 6.1 (pure Python; nothing else to install)
   supagent-guide.html / .pdf          the guide (install, LLM middleware, learning, screens)
   supagent-user-guide.html / .pdf     how to use it: every page, button, setting and command
   catalog.example.yaml                an example catalog, to adapt
   grafana-wheels/                     mcp and what it needs beyond Superset 6.1 (Grafana, without internet)
   SHA256SUMS                          checksums
 
-Upgrading? From 0.11.0: pip install this wheel on every host, restart; nothing to run: "From 0.11.0 to
-0.11.1" below. From 0.10.12.1: the same, and "From 0.10.12.1 to 0.11.0" below. From 0.10.12: the same, and "From 0.10.12 to 0.10.12.1" below. From 0.10.11.2: the same, and "From 0.10.11.2 to 0.10.12" below. From 0.10.11.1: the same, and "From 0.10.11.1 to 0.10.11.2" below. From 0.10.11: the
+Upgrading? From 0.11.1: pip install this wheel on every host, restart; nothing to run: "From 0.11.1 to
+0.11.1.1" below. From 0.11.0: the same, and "From 0.11.0 to 0.11.1" below. From 0.10.12.1: the same, and "From 0.10.12.1 to 0.11.0" below. From 0.10.12: the same, and "From 0.10.12 to 0.10.12.1" below. From 0.10.11.2: the same, and "From 0.10.11.2 to 0.10.12" below. From 0.10.11.1: the same, and "From 0.10.11.1 to 0.10.11.2" below. From 0.10.11: the
 same, and "From 0.10.11 to 0.10.11.1" below. From 0.10.10: the
 same, and "From 0.10.10 to 0.10.11" below. From 0.10.9.2: pip install
 this wheel on every host, run superset supagent init (tables v20), restart: "From 0.10.9.2 to 0.10.10" and
@@ -40,7 +40,7 @@ role): three packages must be pinned, or Superset itself does not start (none is
 1. Install in Superset's virtualenv (pip only)
 
    PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-   $PY -m pip install supagent-0.11.1-py3-none-any.whl
+   $PY -m pip install supagent-0.11.1.1-py3-none-any.whl
    Superset 6.1: nothing else is needed (offline too).
 
 2. Register it: one line in superset_config.py (no logic)
@@ -191,6 +191,20 @@ role): three packages must be pinned, or Superset itself does not start (none is
    wait: grafana.read_new, osd.read_new); a whole search at once. What is switched off leaves the Context and the
    search at once and is no longer read, explained or watched; the agent says it exists and is switched off when a
    question names it. "List now" reads the list again (no AI); every learning does too.
+
+From 0.11.1 to 0.11.1.1
+=======================
+  - pip install the wheel on every host and restart the web servers, the workers and beat; nothing to run (tables
+    unchanged, v20).
+  - A learning run still shown "running" at "search index and embeddings" after the restart: stop it (Stop in
+    Settings, or `superset supagent learn --stop`), then Learn now.
+  - New setting embed.max_minutes (45): the time of one reading of the documents and the search's pieces; its
+    embeddings stop there and the next reading (hourly) continues. A big backlog of pieces without vectors (after a
+    reader change, a new wiki or repository) is embedded over the next hours; to embed it at once, on a worker host:
+    `superset supagent index --minutes 240`.
+  - Measured: on a copy with a slow embedding service and another process asking for a reading every 20 s, the reading
+    ended at its time with one lease holder and its progress shown (0.11.1: two readings at once, nothing shown); a
+    learning run on the copy done in 130 s, its step's progress shown; unit tests 2351.
 
 From 0.11.0 to 0.11.1
 =====================

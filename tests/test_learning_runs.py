@@ -101,7 +101,7 @@ def _fake_steps(monkeypatch, calls: list, stop_at: str | None = None):
     monkeypatch.setattr(curated, "apply_catalog", lambda: {"curated": 0})
     monkeypatch.setattr(autocatalog, "run", lambda llm_docs=True: {})
     monkeypatch.setattr(generic, "tidy_learned", lambda limit=50, deadline=None: {})
-    monkeypatch.setattr(index, "index_knowledge", lambda: {})
+    monkeypatch.setattr(index, "index_knowledge", lambda **k: {})
     monkeypatch.setattr(index, "sync", lambda prefixes=None: {})
     monkeypatch.setattr(quality, "evaluate_resolver", lambda limit=100, seconds=60: {})
 
@@ -179,7 +179,7 @@ def test_descriptions_are_written_while_a_database_is_still_being_read(four, mon
     monkeypatch.setattr(relations, "learn_relations", lambda: events.append(("relations", _time.time())) or {})
     monkeypatch.setattr(autocatalog, "run", lambda llm_docs=True: {})
     monkeypatch.setattr(generic, "tidy_learned", lambda limit=50, deadline=None: {})
-    monkeypatch.setattr(index, "index_knowledge", lambda: {})
+    monkeypatch.setattr(index, "index_knowledge", lambda **k: {})
     monkeypatch.setattr(quality, "evaluate_resolver", lambda limit=100, seconds=60: {})
     out = run_learning(reason="test")
     read_at = next(e[2] for e in events if e[0] == "read")

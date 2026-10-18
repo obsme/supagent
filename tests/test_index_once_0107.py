@@ -13,7 +13,7 @@ def test_a_reading_asked_meanwhile_is_done_by_the_running_one(ctx, monkeypatch):
 
     calls = []
 
-    def once():
+    def once(*_a):
         calls.append(1)
         if len(calls) == 1:                         # a document fetched during the first reading
             assert I.index_knowledge().get("queued")
@@ -22,7 +22,7 @@ def test_a_reading_asked_meanwhile_is_done_by_the_running_one(ctx, monkeypatch):
     monkeypatch.setattr(I, "_index_once", once)
     I._again(False)
     out = I.index_knowledge()
-    assert len(calls) == 2 and out == {"n": 2}       # read once more, not at the same time
+    assert len(calls) == 2 and out == {"n": 2, "passes": 2}       # read once more, not at the same time
     assert not I._again()
 
 
@@ -32,7 +32,7 @@ def test_a_lease_held_by_another_process_is_respected(ctx, monkeypatch):
     from supagent.knowledge import index as I
     from supagent.models import Meta
 
-    monkeypatch.setattr(I, "_index_once", lambda: {"read": True})
+    monkeypatch.setattr(I, "_index_once", lambda *_a: {"read": True})
     I._lease(True)
     row = db.session.get(Meta, I.INDEX_LEASE)
     row.value = f"another-host:1|{time.time() + 60:.0f}"

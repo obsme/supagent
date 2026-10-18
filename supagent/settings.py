@@ -532,6 +532,8 @@ SPECS: list[Spec] = [
          "(llm.base_url), with the LLM's authentication (token or middleware)"),
     Spec("embed.batch", 16, "int", "Texts per embedding request"),
     Spec("embed.per_run", 2000, "int", "Pieces embedded per indexing run at most (the next run continues)"),
+    Spec("embed.max_minutes", 45, "int", "Minutes a reading of the documents and the search's pieces may take (hourly, "
+         "after a document is read, the learning's step): its embeddings stop there, the next reading continues"),
     Spec("search.vector_store", "database", "choice", "Where the vectors are searched: database (Superset's "
          "database, compared in memory: no extension, no service) or qdrant (a Qdrant server)",
          choices=("database", "qdrant")),

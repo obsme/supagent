@@ -648,15 +648,32 @@ def lint(as_json: bool) -> None:
 
 @supagent.command(help="Update the searchable knowledge: pieces that changed, then their vectors")
 @click.option("--refresh-docs", is_flag=True, help="Also fetch the sites that are due")
+@click.option("--minutes", type=int, default=None, help="Read again until every piece has its vector or this many "
+              "minutes have passed (a big backlog embedded at once); default: one reading of embed.max_minutes")
 @with_appcontext
-def index(refresh_docs: bool) -> None:
+def index(refresh_docs: bool, minutes: int | None) -> None:
+    import time
+
     from supagent.knowledge.docs import refresh_due
     from supagent.knowledge.index import index_knowledge
 
     if refresh_docs:
         for r in refresh_due():
             click.echo(f"document {r['id']}: {r['status']}, {r['pages']} page(s) {r.get('error') or ''}")
-    click.echo(json.dumps(index_knowledge(), indent=2, default=str))
+    said = [0.0]
+
+    def progress(text: str) -> None:                  # (0.11.1.1) what the reading does, every 30 s at most
+        if time.time() - said[0] >= 30:
+            said[0] = time.time()
+            click.echo(f"{time.strftime('%H:%M:%S')} reading: {text}", err=True)
+
+    end = time.time() + 60.0 * minutes if minutes else None
+    while True:                                       # (0.11.1.1) --minutes: readings until the vectors are done
+        out = index_knowledge(seconds=end - time.time() if end else None, progress=progress)
+        click.echo(json.dumps(out, indent=2, default=str))
+        embed = out.get("embed") if isinstance(out.get("embed"), dict) else {}
+        if end is None or time.time() >= end or out.get("queued") or not embed.get("embedded") or not embed.get("left"):
+            break
 
 
 @supagent.command(help="Classify the knowledge that changed (categories and relations, with the LLM), now")

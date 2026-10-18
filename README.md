@@ -109,7 +109,7 @@ Content-Security-Policy (Talisman nonces).
 ```bash
 # the Python of Superset's virtualenv
 PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-$PY -m pip install supagent-0.11.1-py3-none-any.whl         # Superset 6.1: nothing else to install
+$PY -m pip install supagent-0.11.1.1-py3-none-any.whl       # Superset 6.1: nothing else to install
 ```
 
 One line in `superset_config.py` registers it. It holds no logic:
@@ -151,6 +151,15 @@ row level security filters and dashboards keep them), the AI roles' users moved 
 then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with the knowledge written) and Viewer
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
+## Upgrade from 0.11.1 to 0.11.1.1
+
+pip install the wheel on every host and restart (tables unchanged, v20). The learning's step "search index and
+embeddings" ends in time: a reading of the documents is bounded (embed.max_minutes), keeps its lease while it runs,
+shows its progress, and leaves the embeddings it could not do to the next hourly reading. Measured: on a copy with a
+slow embedding service and another process asking for a reading every 20 s, the reading ended at its time with one
+lease holder and its progress shown (0.11.1: two readings at once, nothing shown); a learning run on the copy done in
+130 s, its step's progress shown; unit tests 2351.
 
 ## Upgrade from 0.11.0 to 0.11.1
 

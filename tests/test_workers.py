@@ -293,7 +293,7 @@ def test_the_hourly_tick_cleans_the_queue(app, monkeypatch):
     monkeypatch.setattr(runner, "purge_old_chats", lambda: 0)
     monkeypatch.setattr(learner, "due_today", lambda: False)
     monkeypatch.setattr("supagent.knowledge.docs.refresh_due", lambda: 0)
-    monkeypatch.setattr("supagent.knowledge.index.index_knowledge", lambda: {})
+    monkeypatch.setattr("supagent.knowledge.index.index_knowledge", lambda **k: {})
     with app.app_context():
         tasks.learn_tick.run()
     assert done == ["queue"]

@@ -1212,6 +1212,7 @@ everything is also kept in the knowledge store (schema `supagent_store`).
 | `embed.base_url` | (empty) | The embedding API base (empty: the LLM's, with the LLM's authentication) |
 | `embed.batch` | 16 | Texts per embedding request |
 | `embed.per_run` | 2000 | Pieces embedded per indexing run at most (the next run continues) |
+| `embed.max_minutes` | 45 | Minutes one reading of the documents and the search's pieces may take (hourly, after a document is read, the learning's step): its embeddings stop there, the next reading continues |
 | `embed.query_instruction` | (empty) | A text put before a question when it is embedded, for models trained with one |
 | `qdrant.url` | (empty) | The Qdrant server (`search.vector_store` = qdrant) |
 | `qdrant.api_key` | (secret) | Its API key |
@@ -1710,6 +1711,11 @@ superset supagent conversations --delete 1234 --yes
   time: `superset supagent learn --database NAME --minutes 240`.
 * *stopped after N failures in a row*: the database was overloaded (429, 5xx, timeouts) and left for the day; lower
   `learn.max_requests_per_minute`.
+* A run long at *search index and embeddings*: the step says what it does (*running (embeddings: 400 of 2,000)*).
+  Its embeddings stop at its time (what is left of the run's, ten minutes at least, `embed.max_minutes` at most) and
+  the hourly readings embed the pieces left; until then they are found by their words. A big backlog (a new wiki or
+  repository, a reader change): `superset supagent index --minutes 240` on a worker host. An embedding model on CPUs
+  that times out: a smaller `embed.batch`.
 
 **7. The Context is not rebuilt, or a page did not change.**
 * `context.enabled` and `context.hour`; the build runs after the day's learning and never next to another run: look

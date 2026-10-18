@@ -19,7 +19,8 @@ import hashlib
 import logging
 import re
 import threading
-from typing import Any, Iterator
+import time
+from typing import Any, Callable, Iterator
 
 from sqlalchemy import or_
 from sqlalchemy.orm import load_only
@@ -698,10 +699,11 @@ def pieces(prefixes: tuple[str, ...] | None = None) -> Iterator[dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # keeping the chunks in step
 # --------------------------------------------------------------------------- #
-def sync(prefixes: tuple[str, ...] | None = None, dry_run: bool = False) -> dict[str, Any]:
+def sync(prefixes: tuple[str, ...] | None = None, dry_run: bool = False,
+         beat: Callable[..., None] | None = None) -> dict[str, Any]:
     """Write the pieces that changed, remove the ones whose origin is gone. `prefixes` limits
     the work to some kinds of refs (e.g. ("recipe:",) after an answer); `dry_run`: only count
-    (and name a few of) what would be written (the knowledge check)."""
+    (and name a few of) what would be written (the knowledge check); `beat`: told how far it is (the reading's)."""
     q = db.session.query(Chunk)
     if prefixes is not None:                             # (0.10.9.2) only those pieces read from the database
         q = q.filter(or_(*[Chunk.ref.like(p.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%",
@@ -709,7 +711,7 @@ def sync(prefixes: tuple[str, ...] | None = None, dry_run: bool = False) -> dict
     q = q.options(load_only(Chunk.id, Chunk.ref, Chunk.content_hash, Chunk.title))   # (0.11.0) not their texts
     existing = {c.ref: c for c in q if prefixes is None or c.ref.startswith(prefixes)}   # and vectors (GBs an hour)
     wanted = (p for p in pieces(prefixes) if prefixes is None or p["ref"].startswith(prefixes))
-    return _write(existing, wanted, dry_run, scope=prefixes)
+    return _write(existing, wanted, dry_run, scope=prefixes, beat=beat)
 
 
 def sync_objects(ids: list[int] | set[int]) -> dict[str, int]:
@@ -732,10 +734,10 @@ def sync_objects(ids: list[int] | set[int]) -> dict[str, int]:
 
 
 def _write(existing: dict[str, Chunk], wanted: Iterator[dict[str, Any]], dry_run: bool = False,
-           scope: tuple[str, ...] | None = None) -> dict[str, Any]:
+           scope: tuple[str, ...] | None = None, beat: Callable[..., None] | None = None) -> dict[str, Any]:
     """The chunks of `existing` made like the pieces `wanted` (new, changed, removed); `scope`: the refs' prefixes
     this write was about, given to the knowledge store as they are (0.10.12: one document's pieces made the store
-    read every document's, a wiki of thousands of pages, for one page removed)."""
+    read every document's, a wiki of thousands of pages, for one page removed); `beat`: told every BEAT_PIECES."""
     from supagent.knowledge.embeddings import qdrant_delete
 
     seen: set[str] = set()
@@ -743,6 +745,8 @@ def _write(existing: dict[str, Chunk], wanted: Iterator[dict[str, Any]], dry_run
     touched = False                                  # the dictionary or the catalog changed
     for p in wanted:
         seen.add(p["ref"])
+        if beat is not None and len(seen) % BEAT_PIECES == 0:
+            beat(detail=f"{len(seen):,} read")
         h = _hash(p.get("title"), p.get("text"), p.get("source_id"), p.get("database_id"), p.get("scope"),
                   p.get("user_id"))
         c = existing.get(p["ref"])
@@ -815,8 +819,13 @@ def embed_few(out: dict[str, int]) -> None:
             log.warning("supagent: vectors of the new pieces: %s", ex)
 
 
-def embed_pending(limit: int | None = None) -> dict[str, Any]:
-    """Vectors for the pieces that have none (or another model's), the newest first."""
+def embed_pending(limit: int | None = None, deadline: float | None = None, beat: Callable[..., None] | None = None,
+                  yield_to: Callable[[], bool] | None = None) -> dict[str, Any]:
+    """Vectors for the pieces that have none (or another model's), the newest first. (0.11.1.1) No batch begun after
+    `deadline` (a time.time()): the pieces left get theirs at the next reading (an embedding model on CPUs took hours
+    for a whole wiki read again, and the learning waited for them); `beat`: told after each batch; `yield_to()` true
+    after a batch, YIELD_AFTER_S into the embeddings: stop there (a document read meanwhile gets its pieces first,
+    found by their words at once)."""
     from supagent.knowledge import embeddings as E
 
     if not E.enabled():
@@ -827,10 +836,15 @@ def embed_pending(limit: int | None = None) -> dict[str, Any]:
             .order_by(Chunk.updated_at.desc(), Chunk.id).limit(limit).all())
     done, batch = 0, max(1, int(settings.get("embed.batch")))
     qdrant = settings.get("search.vector_store") == "qdrant"
+    timed_out = yielded = False
+    started = time.time()
     from supagent.knowledge.stopping import check
 
     for i in range(0, len(todo), batch):
         check()                                    # an admin stopped the learning run
+        if deadline is not None and time.time() >= deadline:
+            timed_out = True
+            break
         part = todo[i:i + batch]
         vectors = E.embed([f"{c.title}\n{c.text}" for c in part])
         for c, v in zip(part, vectors):
@@ -840,57 +854,157 @@ def embed_pending(limit: int | None = None) -> dict[str, Any]:
             E.qdrant_upsert([(c.id, v) for c, v in zip(part, vectors)])
         db.session.commit()
         done += len(part)
+        if beat is not None:
+            beat(detail=f"{done:,} of {len(todo):,}")
+        if yield_to is not None and done < len(todo) and time.time() - started >= YIELD_AFTER_S and yield_to():
+            yielded = True
+            break
     left = db.session.query(Chunk).filter((Chunk.vector.is_(None)) | (Chunk.embed_model != model)).count()
     if done:
         _store_sync(None)                          # the new vectors into the store
-    return {"embedded": done, "left": left}
+    out: dict[str, Any] = {"embedded": done, "left": left}
+    if timed_out:
+        out["note"] = "the reading's time is up (embed.max_minutes): the next reading embeds the pieces left"
+    elif yielded:
+        out["note"] = "a reading asked meanwhile is done first: the embeddings go on after it"
+    return out
 
 
 INDEX_LEASE, INDEX_AGAIN = "index:lease", "index:again"
 LEASE_S = 1800                 # a reading's lease (a process that died with it: free after this many seconds)
+RENEW_S = 300                  # (0.11.1.1) the lease renewed this often while the reading runs
+BEAT_PIECES = 2000             # the pieces written between two beats of a reading
+YIELD_AFTER_S = 60             # embeddings stop for a reading asked meanwhile after this many seconds (not before)
 _INDEX = threading.Lock()
+TIME_LIMITS = ("SoftTimeLimitExceeded", "TimeLimitExceeded")    # a Celery worker's time limits
 
 
-def index_knowledge() -> dict[str, Any]:
+def index_knowledge(seconds: float | None = None, progress: Callable[[str], None] | None = None) -> dict[str, Any]:
     """What the documents state read (the units whose text changed), proposed, synchronized and embedded. (0.10.7)
     One reading at a time, in this process and the others: two documents fetched together read the same units at the
     same time and proposed the same values, links and search pieces twice (the database refused one of them, its
     proposals or pieces lost until the next reading). A reading asked meanwhile is done by the running one, once
-    more when it ends."""
-    if not _INDEX.acquire(blocking=False):
-        _again(True)
-        return {"queued": "a reading of the documents is running: it reads them again when it ends"}
-    try:
-        if not _lease(True):
+    more when it ends.
+
+    (0.11.1.1) Within `seconds` (else embed.max_minutes): the embeddings stop there, and a reading asked meanwhile is
+    done once more only while time is left, else by the next reading (hourly). A learning's step waited hours: its
+    reading embedded a whole wiki again on CPUs, its lease ran out after 30 minutes, the hourly tick and the documents
+    read started readings of their own at the same time, and each one asked meanwhile made it read once more. The lease
+    is now renewed while the reading runs. `progress(text)`: what it does now (the learning's step shows it)."""
+    budget = 60.0 * max(1, int(settings.get("embed.max_minutes") or 45)) if seconds is None else max(0.0, seconds)
+    deadline = time.time() + budget
+    out: dict[str, Any] = {}
+    done = {"passes": 0, "embedded": 0}
+    while True:
+        if not _INDEX.acquire(blocking=False):
             _again(True)
-            return {"queued": "a reading of the documents is running elsewhere: it reads them again when it ends"}
+            return _summed(out, done) if out else {
+                "queued": "a reading of the documents is running: it reads them again when it ends"}
         try:
-            out: dict[str, Any] = {}
-            for _ in range(5):
-                _again(False)
-                out = _index_once()
-                if not _again():
-                    break
+            if not _lease(True):
+                _again(True)
+                return _summed(out, done) if out else {
+                    "queued": "a reading of the documents is running elsewhere: it reads them again when it ends"}
+            keeper = _Keeper()
+            try:
+                while True:                        # once more for each reading asked meanwhile, while time is left
+                    _again(False)
+                    out = _index_once(deadline, progress)
+                    done["passes"] += 1
+                    done["embedded"] += int((out.get("embed") or {}).get("embedded") or 0)
+                    if not _again() or time.time() >= deadline:
+                        break
+            finally:
+                keeper.stop()
+                _lease(False)
         finally:
-            _lease(False)
-    finally:
-        _INDEX.release()
-    if _again():                                   # asked between the last check and the end: read again now
-        return index_knowledge()
+            _INDEX.release()
+        if not _again():
+            return _summed(out, done)
+        if time.time() >= deadline:                # asked meanwhile, no time left: the next reading does it
+            out["again"] = "a reading asked meanwhile: done by the next one (hourly)"
+            return _summed(out, done)
+        # asked between the last check and the end: read again now
+
+
+def _summed(out: dict[str, Any], done: dict[str, int]) -> dict[str, Any]:
+    """A reading's result: its last pass's, with the number of passes and all their embeddings when it read more than
+    once."""
+    if done["passes"] > 1:
+        out["passes"] = done["passes"]
+        if isinstance(out.get("embed"), dict) and "embedded" in out["embed"]:
+            out["embed"]["embedded"] = done["embedded"]
     return out
+
+
+def _me() -> str:
+    """This process, as the lease names its holder."""
+    import os
+    import socket
+
+    return f"{socket.gethostname()}:{os.getpid()}"
+
+
+class _Keeper:
+    """(0.11.1.1) The reading's lease renewed every RENEW_S seconds by a thread of its own while the reading works (a
+    part of it may take longer than the lease: a whole wiki understood again, its pieces embedded on CPUs)."""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.thread: threading.Thread | None = None
+        try:
+            from flask import current_app
+
+            app = current_app._get_current_object()  # pylint: disable=protected-access
+        except RuntimeError:                         # no application: not renewed (as before 0.11.1.1)
+            return
+        me = _me()
+
+        def run() -> None:
+            while not self.done.wait(RENEW_S):
+                with app.app_context():
+                    if not _renew(me):
+                        log.warning("supagent: the reading's lease is not this process's any more")
+
+        self.thread = threading.Thread(target=run, name="supagent-index-lease", daemon=True)
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.done.set()
+        if self.thread is not None:
+            self.thread.join(timeout=15)
+
+
+def _renew(me: str) -> bool:
+    """(0.11.1.1) This process's lease made LEASE_S seconds longer, through a connection of its own: the reading's
+    session holds its work in progress, never committed or rolled back here. False when the lease is not its own."""
+    from sqlalchemy import select, text
+
+    from supagent.models import Meta
+
+    t = Meta.__table__
+    try:
+        with db.engine.begin() as con:
+            if con.dialect.name == "postgresql":
+                con.execute(text("SET LOCAL lock_timeout = '10s'"))
+            value = con.execute(select(t.c.value).where(t.c.key == INDEX_LEASE)).scalar()
+            if (value or "").rpartition("|")[0] != me:
+                return False
+            con.execute(t.update().where(t.c.key == INDEX_LEASE, t.c.value == value)
+                        .values(value=f"{me}|{time.time() + LEASE_S:.0f}"))
+        return True
+    except Exception as ex:  # pylint: disable=broad-except   (renewed at the next turn)
+        log.info("supagent: the reading's lease was not renewed: %s", str(ex)[:200])
+        return True
 
 
 def _lease(take: bool) -> bool:
     """The reading's lease taken for this process (unless another one holds it), or given back."""
-    import os
-    import socket
-    import time
-
     from sqlalchemy.exc import IntegrityError
 
     from supagent.models import Meta
 
-    me, now = f"{socket.gethostname()}:{os.getpid()}", time.time()
+    me, now = _me(), time.time()
     try:
         if take and db.session.get(Meta, INDEX_LEASE) is None:
             try:
@@ -937,29 +1051,64 @@ def _again(value: bool | None = None) -> bool:
         return False
 
 
-def _index_once() -> dict[str, Any]:
+def _index_once(deadline: float | None = None, progress: Callable[[str], None] | None = None) -> dict[str, Any]:
+    beat = _beat(progress)
     out: dict[str, Any] = {}
     try:                                       # what the documents state (0.10): the units whose text changed
         from supagent.knowledge import understand
 
         if settings.get("knowledge.understand"):
+            beat("what the documents state")
             out["understand"] = understand.run(reason="index")
             if settings.get("knowledge.propose"):    # what they state, proposed for the categories and the map
                 from supagent.knowledge.proposals import propose
 
+                beat("what they state, proposed")
                 out["proposed"] = propose()
                 if str(settings.get("learn.merge_duplicates") or "propose") != "off":   # (0.10.9.2) its names written
                     from supagent.knowledge.consolidate import run as merge_names    # differently: one value (no
                                                                                      # LLM here: the learning asks it)
+                    beat("one value per thing")
                     out["merged"] = {k: v for k, v in merge_names(llm_calls=0).items() if k != "examples"}
     except Exception as ex:  # pylint: disable=broad-except   (the search's pieces go on)
+        _time_limit(ex)
         db.session.rollback()
         log.warning("supagent: the documents' facts: %s", ex)
         out["understand"] = {"error": str(ex)[:300]}
-    out["sync"] = sync()
+    beat("the search's pieces")
+    out["sync"] = sync(beat=beat)
     try:
-        out["embed"] = embed_pending()
+        beat("embeddings")
+        out["embed"] = embed_pending(deadline=deadline, beat=beat, yield_to=_again)
     except Exception as ex:  # pylint: disable=broad-except
+        _time_limit(ex)
         db.session.rollback()
         out["embed"] = {"error": str(ex)[:300]}
     return out
+
+
+def _beat(progress: Callable[[str], None] | None) -> Callable[..., None]:
+    """(0.11.1.1) A reading's beat: an admin's stop of the learning seen, and what the reading does now told to
+    `progress` ("embeddings: 400 of 2,000"): the learning's step shows it, and its run is never taken for dead."""
+    from supagent.knowledge.stopping import check
+
+    now = {"phase": ""}
+
+    def beat(phase: str | None = None, detail: str | None = None) -> None:
+        check()
+        if phase:
+            now["phase"] = phase
+        if progress is not None and now["phase"]:
+            try:
+                progress(now["phase"] + (f": {detail}" if detail else ""))
+            except Exception:  # pylint: disable=broad-except   (the reading goes on)
+                log.debug("supagent: the reading's progress", exc_info=True)
+
+    return beat
+
+
+def _time_limit(ex: BaseException) -> None:
+    """(0.11.1.1) A Celery worker's time limit raised again, never taken for the error of one part of the reading: the
+    reading went on to the hard limit, which killed the worker with its learning run still "running"."""
+    if type(ex).__name__ in TIME_LIMITS:
+        raise ex

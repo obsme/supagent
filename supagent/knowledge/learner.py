@@ -39,6 +39,7 @@ EXPLAIN_FLOOR = 0.25   # explained after them; a quarter of the run kept for the
 BACKENDS = ("osagg", "promagg")
 START_LOCK = "learn:start"
 FINISHING = "relations, catalog and AI descriptions"
+INDEX_MIN_S = 600      # (0.11.1.1) the learning's index step: ten minutes at least for its embeddings
 
 
 def learning_username() -> str:
@@ -120,6 +121,24 @@ def _publish(run_id: int, stats: dict[str, Any]) -> None:
         db.session.rollback()
 
 
+def _publish_apart(run_id: int, stats: dict[str, Any]) -> None:
+    """(0.11.1.1) _publish through a connection of its own, never the session's: called in the middle of a step's work
+    not committed yet (the index step writes the search's pieces in one transaction), which a commit or a rollback of
+    the session here would cut."""
+    import copy
+
+    from sqlalchemy import text
+
+    t = Run.__table__
+    try:
+        with db.engine.begin() as con:
+            if con.dialect.name == "postgresql":
+                con.execute(text("SET LOCAL lock_timeout = '5s'"))
+            con.execute(t.update().where(t.c.id == run_id).values(stats=copy.deepcopy(stats)))
+    except Exception as ex:  # pylint: disable=broad-except   (the next beat, or the step's end, says it)
+        log.debug("supagent learn: run %s: its progress was not saved: %s", run_id, str(ex)[:200])
+
+
 class Steps:
     """What a run does, step by step (the settings page's runs list and the server log): name,
     database, start (UTC), seconds and counts of each step. The step in progress is published as
@@ -163,6 +182,18 @@ class Steps:
                  f" ({step['database']})" if step.get("database") else "", step["seconds"],
                  json.dumps(shown, default=str)[:600])
         self.publish()
+
+    def progress(self, phase: str) -> None:
+        """(0.11.1.1) What the step in progress does now, shown as "running (phase)", and published through a
+        connection of its own at most every PUBLISH_S (the step's work is not committed yet): its beat keeps the run
+        from being taken for dead (running_run) while one step takes long (the index step's embeddings)."""
+        if self.current is None:
+            return
+        self.current["phase"] = str(phase)[:200]
+        if time.time() - self.published >= self.PUBLISH_S:
+            self.published = time.time()
+            self.stats["beat"] = dt.datetime.utcnow().isoformat(timespec="seconds")
+            _publish_apart(self.run_id, self.stats)
 
     def interrupted(self, why: str) -> None:
         if self.current is not None:
@@ -489,7 +520,7 @@ def _run_learning(reason: str, databases: list[str] | None, llm: bool, max_minut
                     steps.end(**_flat(stats["osd"]))
                 check(force=True)
                 steps.begin("search index and embeddings")
-                stats["index"] = index_knowledge()
+                stats["index"] = index_knowledge(seconds=index_seconds(deadline), progress=steps.progress)
                 steps.end(**_flat(stats["index"]))
                 steps.begin("check of \"where the data is\"")
                 try:                                  # does "Where the data is" find the Helpful answers' data?
@@ -572,6 +603,14 @@ def _from_data(steps: "Steps", seconds: float) -> dict[str, Any]:
             out[key] = {"error": str(ex)[:300]}
         steps.end(**_flat(out[key]))
     return out
+
+
+def index_seconds(deadline: float) -> float:
+    """(0.11.1.1) The time of the learning's index step: what is left of the run's (learn.max_minutes), INDEX_MIN_S at
+    least, embed.max_minutes at most. Its embeddings stop there and the hourly readings embed the pieces left: the step
+    waited for a whole wiki embedded again on CPUs."""
+    most = 60.0 * max(1, int(settings.get("embed.max_minutes") or 45))
+    return min(most, max(INDEX_MIN_S, deadline - time.time()))
 
 
 def classify_limit(limit: int | None = None) -> int:
