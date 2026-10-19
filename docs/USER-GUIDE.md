@@ -42,7 +42,7 @@ What it adds to Superset:
 
 | Page | Where you find it | Who |
 |---|---|---|
-| **Chat** | The **Chat** tab of Superset's top bar. It opens as a panel beside the page you are on, or as a full page (`/supagent/`). | Everyone with a role of the agent |
+| **Chat** | The robot at the bottom right of Superset's pages (or the **Chat** tab of the top bar, with `agent.launcher` = tab). It opens as a panel beside the page you are on, or as a full page (`/supagent/`). | Everyone with a role of the agent |
 | **Data dictionary** | Superset's *Settings* menu, section *Manage*, then **Data dictionary**; also the *Data dictionary* tab at the top of the chat page. | Everyone with a role of the agent (read); Editors and Admins (write) |
 | **Chat settings** (the Settings page) | Superset's *Settings* menu, section *Manage*, then **Chat settings**; also the *Settings* tab of the chat page. | Admins |
 | **LLM usage** | The *LLM usage* tab at the top of the chat page, next to *Settings*. | Admins |
@@ -122,21 +122,22 @@ Giving a role from the command line: `superset supagent grant <user> [<user> ...
 
 ### 2.1 Open the chat
 
-* **On any Superset page** (a dashboard, a chart, a dataset, SQL Lab): click **Chat** in Superset's top bar. The
-  chat opens as a panel on the right; the page narrows beside it and its charts fit the width left. Click **Chat**
-  again to close it, or the **×** of the panel.
+* **On any Superset page** (a dashboard, a chart, a dataset, SQL Lab): click the round robot at the bottom right of
+  the page. The chat opens as a panel on the right; the page narrows beside it and its charts fit the width left.
+  The **×** of the panel closes it, and the robot comes back. (With `agent.launcher` = tab in Settings, *Agent*, the
+  robot is replaced by **Chat** in Superset's top bar, as before 0.11.3: click it to open and to close the panel.)
   * Drag the panel's left edge to make it wider or narrower (or focus the edge and use the arrow keys; Shift moves
     faster).
   * **⧉** floats the panel over the page: move it by its title bar, resize it from any edge or corner, double-click
     its title bar to make it as big as the window (and again to go back). **⇥** docks it again. In a window
     narrower than about 1,220 pixels the panel floats by itself (the page keeps at least 900 pixels); under 900
     pixels it takes the whole width.
-  * **⤢** opens the chat as a full page. Ctrl-click, Cmd-click, Shift-click or a middle click on the *Chat* tab
-    does the same.
+  * **⤢** opens the chat as a full page. Ctrl-click, Cmd-click, Shift-click or a middle click on the robot (or on
+    the *Chat* tab) does the same.
   * The panel stays open from page to page in the same browser tab. Links in an answer that lead to Superset open
     in the page beside the panel; links to other sites open in a new tab.
   * If the panel says "The chat cannot be shown here", open the full page with the link it gives (see section 9).
-* **As a full page**: Ctrl-click the *Chat* tab, or go to `/supagent/`. The full page has the tabs *Chat*,
+* **As a full page**: Ctrl-click the robot (or the *Chat* tab), or go to `/supagent/`. The full page has the tabs *Chat*,
   *Data dictionary* and, for admins, *Settings* and *LLM usage*.
 
 The left column of the chat (behind the **Conversations** button in the panel) holds:
@@ -991,6 +992,7 @@ Answers, tools and where they run:
 | `agent.max_steps` | 16 | Tool calls per question at most (a question of many parts gets half as many more, within the next limit); then the agent answers with what it found |
 | `agent.max_steps_big` | 32 | Tool calls at most for an investigation, or a request that builds charts or a dashboard |
 | `agent.answer_seconds` | 1500 | After this many seconds, an answer still calling tools is told to answer now (two calls left); 0: no limit |
+| `agent.launcher` | robot | How the chat opens on Superset's pages: `robot` (a round button at the bottom right; the top bar's *Chat* tab hidden) or `tab` (*Chat* in the top bar) |
 | `agent.executor` | auto | Where answers run: `celery` (the workers), `thread` (the web server), `auto` (the workers when one is alive, else the web server) |
 | `agent.celery_queue` | (empty) | The Celery queue of the answers and the learning runs, when the workers read named queues only (empty: the default queue) |
 | `agent.queue_keep_days` | 90 | With Celery's queue in Superset's database: delivered messages deleted after this many days (0: never) |

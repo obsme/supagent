@@ -31,7 +31,7 @@
     "llm.thinking": "Reasoning (thinking) mode", "llm.extra_headers": "Extra HTTP headers (JSON)",
     "agent.max_steps": "Tool calls per question", "agent.max_steps_big": "Tool calls of an investigation or a dashboard", "agent.general_answers": "General questions without the data", "agent.subjects": "Follow the subjects of a chat", "agent.now": "Fixed “now”", "agent.extra_instructions": "Extra instructions",
     "agent.disabled_tools": "Disabled tools", "agent.check_numbers": "Check the numbers of the answers",
-    "usage.keep_days": "Keep the LLM calls (days)", "agent.executor": "Where answers run", "agent.celery_queue": "Celery queue",
+    "usage.keep_days": "Keep the LLM calls (days)", "agent.launcher": "Open the chat with", "agent.executor": "Where answers run", "agent.celery_queue": "Celery queue",
     "learn.enabled": "Learn once a day", "learn.hour": "Daily at (hour)", "learn.days": "On these days",
     "learn.user": "Learn as user", "learn.profile_every_days": "Statistics refreshed every (days)",
     "learn.max_requests_per_minute": "Requests per minute (each database)", "learn.request_timeout": "Request timeout (s)",

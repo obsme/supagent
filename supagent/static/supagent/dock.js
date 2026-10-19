@@ -1,21 +1,33 @@
-/* The chat as a panel on Superset's pages (dashboards, charts, datasets, SQL Lab...): the Chat tab of the top bar
-   opens and closes it. Two ways (the button next to the title switches, remembered in this browser):
+/* The chat as a panel on Superset's pages (dashboards, charts, datasets, SQL Lab...): the robot at the bottom right
+   opens it (0.11.3; the top bar's Chat tab hidden), or with agent.launcher = tab the Chat tab of the top bar opens and
+   closes it. Two ways (the button next to the title switches, remembered in this browser):
      docked    on the right; the page narrows beside it and its charts fit the width left; drag the left edge (or
                focus it and use the arrow keys) to make it wider or narrower. It leaves the page PAGE_MIN pixels at
                least (a dashboard's header does not fit in less): in a window too small for both, the chat floats
      floating  a window over the page, moved by its title bar and resized from any edge or corner; the page and its
                charts do not move
-   Ctrl / Cmd / Shift / middle click on the tab still opens the full chat page. The panel stays open from page to
+   Ctrl / Cmd / Shift / middle click on the tab or the robot opens the full chat page. The panel stays open from page to
    page in this tab. The chat itself is the chat page in a frame of the same site (?embed=1): its links to Superset
    open in this page. */
 (function () {
   "use strict";
   var script = document.currentScript;
   var CHAT = (script && script.getAttribute("data-chat")) || "/supagent/";
+  var LAUNCHER = (script && script.getAttribute("data-launcher")) === "tab" ? "tab" : "robot";
   var OPEN_KEY = "supagent-dock-open", WIDTH_KEY = "supagent-dock-width", MODE_KEY = "supagent-dock-mode",
       BOX_KEY = "supagent-dock-box";
   var MIN = 320, MIN_H = 320, WIDTH = 440, NARROW = 900, KEEP = 120, PAGE_MIN = 900;
-  var dock = null, frame = null, fallback = null, modeBtn = null, hint = null, hintTimer = null;
+  var dock = null, frame = null, fallback = null, modeBtn = null, hint = null, hintTimer = null, launcher = null;
+  /* the robot (24 x 24, drawn in the button's text colour) */
+  var ROBOT = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+    '<circle cx="12" cy="2.6" r="1.5" fill="currentColor"/>' +
+    '<path d="M12 4.1v2.4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>' +
+    '<rect x="4.2" y="6.5" width="15.6" height="12.6" rx="4.2" fill="none" stroke="currentColor" stroke-width="1.9"/>' +
+    '<rect x="1.4" y="10.6" width="2.2" height="4.6" rx="1.1" fill="currentColor"/>' +
+    '<rect x="20.4" y="10.6" width="2.2" height="4.6" rx="1.1" fill="currentColor"/>' +
+    '<circle cx="9.1" cy="11.9" r="1.7" fill="currentColor"/><circle cx="14.9" cy="11.9" r="1.7" fill="currentColor"/>' +
+    '<path d="M9.3 15.6h5.4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>' +
+    '<path d="M8.5 21.6h7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
 
   function get(area, key) { try { return window[area].getItem(key); } catch (e) { return null; } }
   function put(area, key, value) {
@@ -82,6 +94,7 @@
     } else {
       dock.style.left = dock.style.top = dock.style.width = dock.style.height = "";
     }
+    if (launcher) launcher.hidden = open;              // the robot while the chat is closed
     if (modeBtn) {
       modeBtn.textContent = floating ? "⇥" : "⧉";
       modeBtn.title = floating ? "Dock on the right (the page narrows beside it)" : "Float over the page (move and resize it freely)";
@@ -127,7 +140,14 @@
     dock = el("aside", { id: "supagent-dock", "aria-label": "Chat", class: "sd-docked" });
     dock.hidden = true;
     var bar = el("div", { class: "sd-bar", title: "" });
-    bar.appendChild(el("span", { class: "sd-title" }, "Chat"));
+    var title = el("span", { class: "sd-title" });
+    if (LAUNCHER === "robot") {                        // the robot that opened it, before its name
+      var icon = el("span", { class: "sd-robot", "aria-hidden": "true" });
+      icon.innerHTML = ROBOT;
+      title.appendChild(icon);
+    }
+    title.appendChild(document.createTextNode("Chat"));
+    bar.appendChild(title);
     hint = el("span", { class: "sd-hint", role: "status" });
     hint.hidden = true;
     bar.appendChild(hint);
@@ -232,7 +252,29 @@
     ev.stopPropagation();
     if (dock && !dock.hidden) hide(); else show();
   }, true);
+  /* (0.11.3) the robot at the bottom right opens the chat; the top bar's Chat tab is hidden (dock.css). Not on the chat
+     page itself, nor in a frame (the chat embedded in this panel) */
+  function buildLauncher() {
+    launcher = el("button", { id: "supagent-launcher", type: "button", title: "Chat with the agent",
+                              "aria-label": "Open the chat" });
+    launcher.innerHTML = ROBOT;
+    launcher.addEventListener("click", function (ev) {
+      if (ev.ctrlKey || ev.metaKey || ev.shiftKey) { window.open(CHAT, "_blank"); return; }   // the full chat page
+      show();
+    });
+    launcher.addEventListener("auxclick", function (ev) {
+      if (ev.button === 1) { ev.preventDefault(); window.open(CHAT, "_blank"); }
+    });
+    document.body.appendChild(launcher);
+  }
+  var framed = false;
+  try { framed = window.top !== window; } catch (e) { framed = true; }
+  if (LAUNCHER === "robot" && !framed && location.pathname !== chatPath) {
+    document.documentElement.classList.add("supagent-robot");
+    buildLauncher();
+  }
+
   window.addEventListener("resize", layout);
   window.supagentDock = { show: show, hide: hide, mode: mode };
-  if (get("sessionStorage", OPEN_KEY) === "1") show();
+  if (get("sessionStorage", OPEN_KEY) === "1") show(); else layout();
 })();

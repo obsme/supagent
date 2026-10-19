@@ -1,5 +1,25 @@
 # Changes
 
+## 0.11.3 — 2026-10-19
+
+**The chat opens from a robot at the bottom right of Superset's pages.** The Chat tab of Superset's top bar is
+replaced by a round robot button in the bottom-right corner of every Superset page (dashboards, charts, datasets,
+SQL Lab), for everyone who may use the chat. A click opens the chat panel as before (docked on the right or
+floating, with the same ⧉, ⤢ and × buttons); the robot hides while the chat is open and comes back when it is
+closed. Ctrl-, Cmd-, Shift- or middle-click on the robot opens the full chat page, as the tab did. The robot is not
+shown on the chat's own pages. The new setting `agent.launcher` (Settings, Agent: *Open the chat with*) gives back
+the top bar's tab with `tab`; the default is `robot`. (There is no 0.11.2.)
+
+Measured before the release under a rule written before its runs (gate G-0.11.3, NOTES 2026-10-19 18:30) on the frozen
+build 04f8390, the release's code: the browser tests of every page against the lab's Superset 6.1 running it, 23
+passed (3 skipped: the ones that write or ask the LLM), the new one included (the robot at the bottom right, the top
+bar's Chat tab hidden, the chat panel opened by the robot and closed, no page error); the unit tests: 2354 passed. The
+agent's answers are not measured again: no file the agent reads changes (0.11.1's measure stands).
+
+Upgrade from 0.11.1.1: pip install the wheel on every host and restart the web servers (the workers and beat as
+usual); nothing to run (tables unchanged, v20). Browsers load the new page files at once (their names carry their
+content's hash). INSTALL.txt, *From 0.11.1.1 to 0.11.3*.
+
 ## 0.11.1.1 — 2026-10-18
 
 A fix of the learning that stayed at its step "search index and embeddings" and never finished.

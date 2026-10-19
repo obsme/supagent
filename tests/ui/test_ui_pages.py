@@ -261,6 +261,30 @@ def test_the_chat_panel_on_superset_pages(page):
     _no_errors(page)
 
 
+def test_the_robot_opens_the_chat(page):
+    """(0.11.3) agent.launcher = robot (the default): a round button at the bottom right of Superset's pages opens the
+    chat panel and hides while it is open; the top bar's Chat tab is hidden. With agent.launcher = tab: no robot, the
+    tab is there."""
+    _open(page, "/chart/list/")
+    page.wait_for_function("!!window.supagentDock", timeout=WAIT)
+    launcher = page.get_attribute("script[data-launcher]", "data-launcher")
+    robot = page.locator("#supagent-launcher")
+    tab = page.locator('li.ant-menu-item:has(a[href$="/supagent/"])')
+    if launcher == "tab":
+        assert robot.count() == 0 and tab.first.is_visible()
+        return
+    robot.wait_for(state="visible", timeout=WAIT)
+    assert all(t.is_hidden() for t in tab.all())
+    box, view = robot.bounding_box(), page.viewport_size
+    assert box["x"] + box["width"] >= view["width"] - 40 and box["y"] + box["height"] >= view["height"] - 40
+    robot.click()
+    page.wait_for_selector("#supagent-dock:not([hidden]) iframe[src*='/supagent/']", timeout=WAIT)
+    assert robot.is_hidden()
+    page.click("#supagent-dock button[title='Close the chat']")
+    robot.wait_for(state="visible", timeout=WAIT)
+    _no_errors(page)
+
+
 # ------------------------------------------------------------------------------------------------ writing
 @pytest.mark.skipif(not WRITE, reason="SUPAGENT_UI_WRITE not set: nothing written")
 def test_a_team_memory_made_and_removed(page):

@@ -5,11 +5,12 @@
 supagent is a Python package that you install in Superset's virtualenv, like a database driver.
 It adds:
 
-* **a chat** (the **Chat** tab of Superset's top bar opens it as a panel on the right of the page:
+* **a chat** (the round robot at the bottom right of Superset's pages opens it as a panel on the right
+  of the page; with `agent.launcher` = tab, the **Chat** tab of the top bar does, as before 0.11.3:
   the dashboard, chart, dataset or SQL Lab page stays beside it, and a link in an answer opens
   there while the chat stays open; docked, it leaves the page 900 pixels at least so a dashboard
   keeps all its charts; the panel can also float over the page, moved and resized freely (0.8),
-  as it does by itself in a window under 1,220 pixels; Ctrl+click on the tab, or the panel's ⤢
+  as it does by itself in a window under 1,220 pixels; Ctrl+click on the robot, or the panel's ⤢
   button, opens the full page).
   A user asks a question in plain words; the agent
   works with **that user's Superset permissions**, runs the queries, and answers with the key
@@ -109,7 +110,7 @@ Content-Security-Policy (Talisman nonces).
 ```bash
 # the Python of Superset's virtualenv
 PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-$PY -m pip install supagent-0.11.1.1-py3-none-any.whl       # Superset 6.1: nothing else to install
+$PY -m pip install supagent-0.11.3-py3-none-any.whl         # Superset 6.1: nothing else to install
 ```
 
 One line in `superset_config.py` registers it. It holds no logic:
@@ -151,6 +152,13 @@ row level security filters and dashboards keep them), the AI roles' users moved 
 then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with the knowledge written) and Viewer
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
+## Upgrade from 0.11.1.1 to 0.11.3
+
+pip install the wheel on every host and restart (tables unchanged, v20). The chat opens from a round robot at the
+bottom right of Superset's pages instead of the top bar's Chat tab (`agent.launcher` = tab keeps the tab). Measured:
+browser tests 23 passed on the lab's Superset 6.1 (the robot opens and closes the chat, the top bar's tab hidden, no
+page error); unit tests 2354.
 
 ## Upgrade from 0.11.1 to 0.11.1.1
 

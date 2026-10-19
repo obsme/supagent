@@ -56,6 +56,29 @@
 #supagent-dock.sd-dark .sd-btn:hover, #supagent-dock.sd-dark .sd-btn:focus-visible { background: rgba(255, 255, 255, .08); }
 #supagent-dock.sd-dark .sd-grip-dots { background: rgba(255, 255, 255, .25); }
 #supagent-dock.sd-dark .sd-hint { color: #2893b3; }
+/* (0.11.3) the robot at the bottom right that opens the chat (agent.launcher = robot); the top bar's Chat tab hidden */
+#supagent-launcher {
+  position: fixed; right: 24px; bottom: 24px; z-index: 998;
+  width: 56px; height: 56px; padding: 0; border: 0; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: #2893b3; color: #ffffff; cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .22), 0 2px 6px rgba(0, 0, 0, .12);
+  transition: transform .15s ease, box-shadow .15s ease, background-color .15s ease;
+}
+#supagent-launcher[hidden] { display: none; }
+#supagent-launcher svg { width: 30px; height: 30px; }
+#supagent-launcher:hover { background: #1f7d99; transform: translateY(-2px);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, .26), 0 3px 8px rgba(0, 0, 0, .14); }
+#supagent-launcher:active { transform: translateY(0); }
+#supagent-launcher:focus-visible { outline: 3px solid rgba(40, 147, 179, .45); outline-offset: 3px; }
+html.supagent-robot li.ant-menu-item:has(a[href$="/supagent/"]) { display: none !important; }
+#supagent-dock .sd-title { display: inline-flex; align-items: center; gap: 7px; }
+#supagent-dock .sd-robot { display: inline-flex; width: 18px; height: 18px; color: #2893b3; }
+#supagent-dock .sd-robot svg { width: 18px; height: 18px; }
+@media (prefers-reduced-motion: reduce) {
+  #supagent-launcher { transition: none; }
+  #supagent-launcher:hover, #supagent-launcher:active { transform: none; }
+}
 /* the page beside the docked panel (not on narrow screens: there the panel covers it; not when it floats) */
 html.supagent-docked body { margin-right: var(--supagent-dock-width, 440px) !important; }
-@media print { #supagent-dock { display: none; } html.supagent-docked body { margin-right: 0 !important; } }
+@media print { #supagent-dock, #supagent-launcher { display: none; } html.supagent-docked body { margin-right: 0 !important; } }

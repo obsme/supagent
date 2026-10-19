@@ -24,7 +24,7 @@ import logging
 import os
 from typing import Any, Callable
 
-__version__ = "0.11.1.1"
+__version__ = "0.11.3"
 
 log = logging.getLogger(__name__)
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -61,6 +61,7 @@ DOCK_SNIPPET = (
     "{% set supagent_chat = supagent_dock() %}{% if supagent_chat %}"
     '<link rel="stylesheet" href="{{ supagent_static(\'dock.css\') }}">'
     '<script src="{{ supagent_static(\'dock.js\') }}" data-chat="{{ supagent_chat }}"'
+    '{% if supagent_launcher is defined %} data-launcher="{{ supagent_launcher() }}"{% endif %}'
     '{% if csp_nonce is defined %} nonce="{{ csp_nonce() }}"{% endif %}></script>'
     "{% endif %}{% endif %}\n")
 
@@ -80,6 +81,17 @@ def dock_url() -> str:
         return url_for("ChatView.index")
     except Exception:  # pylint: disable=broad-except   (a page is never broken by the panel)
         return ""
+
+
+def dock_launcher() -> str:
+    """(0.11.3) How the chat opens on Superset's pages (agent.launcher): "robot", a round button at the bottom right
+    (the top bar's Chat tab hidden), or "tab", the top bar's Chat as before."""
+    try:
+        from supagent import settings
+
+        return "tab" if settings.get("agent.launcher") == "tab" else "robot"
+    except Exception:  # pylint: disable=broad-except   (a page is never broken by the panel)
+        return "robot"
 
 
 def _dock_loader(inner: Any) -> Any:
@@ -124,6 +136,7 @@ def init_app(app: Any) -> None:
                                          static_url_path="/supagent-static"))
     app.jinja_env.globals["supagent_static"] = static_url
     app.jinja_env.globals["supagent_dock"] = dock_url
+    app.jinja_env.globals["supagent_launcher"] = dock_launcher
     app.jinja_env.loader = _dock_loader(app.jinja_env.loader)      # the chat panel on Superset's pages
     # `superset init` gives every new view to Gamma unless it is admin-only: the agent's views
     # are admin-only there, and `superset supagent init` gives the chat and the dictionary to

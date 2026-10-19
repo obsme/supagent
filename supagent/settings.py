@@ -633,6 +633,9 @@ SPECS: list[Spec] = [
     Spec("chats.keep_days", 0, "int", "Delete the chats nobody used for this many days (0: keep every chat); "
          "what they taught (learned answers, memory, associations) stays"),
     Spec("tools.max_file_mb", 50, "int", "Files bigger than this (MB) are not kept for the chat page"),
+    # ---- how the chat opens on Superset's pages (0.11.3)
+    Spec("agent.launcher", "robot", "choice", "How the chat opens on Superset's pages: robot (a round button at the "
+         "bottom right of every page) or tab (Chat in Superset's top bar)", choices=("robot", "tab")),
     # ---- where answers are computed
     Spec("agent.executor", "auto", "choice", "Where questions are answered: celery (Superset's workers), "
          "thread (the web server), auto (celery when a worker answers, else thread)",
