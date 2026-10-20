@@ -81,6 +81,63 @@
     box.appendChild(inData);
     var changed = function () { load(); if (opts.onchange) opts.onchange(); };
     function dirOf(x) { return x.both ? "both" : x.out ? "out" : "in"; }
+    /* (0.11.4) links chosen (their boxes ticked): the same description and what they do written on all of them at
+       once (an empty field keeps each one's own), or (who may delete) taken off together */
+    var chosen = {}, bulkBar = el("div", { class: "links-bulk", role: "group", "aria-label": "The links chosen" });
+    bulkBar.hidden = true;
+    var allBox = el("label", { class: "links-all" }, [el("input", { type: "checkbox", "aria-label": "Choose every link" }),
+                                                      document.createTextNode("Choose every link")]);
+    allBox.hidden = true;
+    box.insertBefore(allBox, list);
+    box.insertBefore(bulkBar, list);
+    function bulkPaint(d) {
+      var ids = Object.keys(chosen).map(Number), n = ids.length;
+      var every = list.querySelectorAll(".links-pick"), all = allBox.querySelector("input");
+      all.checked = !!every.length && n === every.length;
+      all.indeterminate = n > 0 && n < every.length;
+      bulkBar.hidden = !n;
+      if (!n) { bulkBar.innerHTML = ""; bulkBar._built = false; return; }
+      var many = n + " link" + (n === 1 ? "" : "s");
+      if (bulkBar._built) { bulkBar._count(many); return; }
+      bulkBar._built = true;
+      bulkBar.innerHTML = "";
+      var res = el("span", { class: "result", role: "status", "aria-live": "polite" });
+      var say = function (t, bad) { res.textContent = t; res.className = "result" + (bad ? " bad" : " good"); };
+      var desc = el("input", { type: "text", maxlength: "500", "aria-label": "What the chosen links are",
+                               placeholder: "What they are, in a few words (empty: each keeps its own)" });
+      var work = el("textarea", { rows: "2", maxlength: "2000", "aria-label": "What the chosen links do",
+                                  placeholder: "What they do, what to check on the other part (empty: each keeps its own)" });
+      var count = el("strong");
+      var write = el("button", { type: "button", class: "btn small primary", onclick: function () {
+        if (!desc.value.trim() && !work.value.trim()) { say("write what they are, what they do, or both", true); desc.focus(); return; }
+        write.disabled = true;
+        S.dict("POST", "map", { describe_links: { ids: Object.keys(chosen).map(Number), note: desc.value, detail: work.value } }).then(function (r) {
+          write.disabled = false;
+          if (r.error) { say(r.error, true); return; }
+          say("Written on " + r.described + " link" + (r.described === 1 ? "" : "s") + ".", false);
+          desc.value = ""; work.value = "";
+          changed();
+        });
+      } });
+      var gone = d.can_delete ? sureButton("Remove them", function () {
+        S.dict("POST", "map", { remove_links: { ids: Object.keys(chosen).map(Number) } }).then(function (r) {
+          if (r.error) { say(r.error, true); return; }
+          chosen = {};
+          changed();
+        });
+      }, { cls: "btn small", ask: function () { return "Remove the " + Object.keys(chosen).length + " links chosen?"; }, yes: "Remove" }) : null;
+      var clear = el("button", { type: "button", class: "linkish", text: "Clear the choice", onclick: function () {
+        chosen = {};
+        list.querySelectorAll(".links-pick").forEach(function (c) { c.checked = false; });
+        bulkPaint(d);
+      } });
+      bulkBar._count = function (m) { count.textContent = m + " chosen"; write.textContent = "Write on the " + m; };
+      bulkBar._count(many);
+      bulkBar.appendChild(el("div", { class: "row" }, [count, clear]));
+      bulkBar.appendChild(el("div", { class: "row" }, [desc]));
+      bulkBar.appendChild(el("div", { class: "row" }, [work]));
+      bulkBar.appendChild(el("div", { class: "row" }, [write, gone, res]));
+    }
     function form(x, done) {                                  // what it is, what it does, which way
       var other = x ? null : picker({ single: true, placeholder: "The other part: type to search", label: "The other part",
         load: function (words) {
@@ -146,9 +203,24 @@
         var links = d.links || [];
         state.textContent = links.length ? "" : "No link yet.";
         state.hidden = !links.length ? false : true;
+        var here = {};                                        // (0.11.4) a link no longer here leaves the choice
+        links.forEach(function (x) { here[x.id] = 1; });
+        Object.keys(chosen).forEach(function (k) { if (!here[k]) delete chosen[k]; });
+        allBox.hidden = !(d.can_edit && links.length > 1);
+        allBox.querySelector("input").onchange = function (ev) {
+          chosen = {};
+          if (ev.target.checked) links.forEach(function (x) { chosen[x.id] = 1; });
+          list.querySelectorAll(".links-pick").forEach(function (c) { c.checked = ev.target.checked; });
+          bulkPaint(d);
+        };
         links.forEach(function (x) {
           var li = el("li", { class: "link-item" + (x.status === "proposed" ? " proposed" : "") });
           var line = el("div", { class: "link-line" }, [
+            d.can_edit ? el("input", { type: "checkbox", class: "links-pick", "aria-label": "Choose the link to " + x.other.value,
+              checked: chosen[x.id] ? "checked" : null, onchange: function (ev) {
+                if (ev.target.checked) chosen[x.id] = 1; else delete chosen[x.id];
+                bulkPaint(d);
+              } }) : null,
             el("span", { class: "link-dir", title: x.both ? "both ways" : x.out ? "from this part to the other" : "from the other part to this one",
                          text: GLYPH[dirOf(x)] }),
             el("strong", { text: " " + x.other.value }), el("span", { class: "muted", text: " (" + x.other.facet + ")" }),
@@ -173,6 +245,7 @@
           if (acts.childNodes.length) li.appendChild(acts);
           list.appendChild(li);
         });
+        bulkPaint(d);
         var adder = box.querySelector(".link-add");
         if (d.can_edit && !adder) {
           var holder = el("div", { class: "link-add" });
@@ -405,7 +478,7 @@
     }
     function pick(it) {
       toggle(it);
-      if (opts.single) { close(); return; }
+      if (opts.single) { input.value = ""; close(); return; }   // (0.11.4) the chip says it: the words typed go
       if (input.value) { input.value = ""; search(); }
     }
     function search() {

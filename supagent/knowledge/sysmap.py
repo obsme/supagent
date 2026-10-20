@@ -847,8 +847,6 @@ def move_value(fid: int, facet: str, by: str) -> dict[str, Any]:
     """(0.10.9.1) A value dropped on the map into another category (a subcategory of its own, or back): it becomes a
     value of that category, with its links, its items and its other names. Never merged away: a value of the same
     name there is said, and the person decides (in Categories)."""
-    import datetime as dt
-
     from supagent.knowledge.facets import editable, inside
     from supagent.knowledge.freshness import touch
     from supagent.models import Facet
@@ -858,23 +856,205 @@ def move_value(fid: int, facet: str, by: str) -> dict[str, Any]:
     if f is None or f.status != "approved":
         raise ValueError("no such part on the map")
     cats = editable()
-    if facet not in cats or f.facet not in cats:
-        raise ValueError("a value moves between " + ", ".join(cats))
-    if facet == f.facet:
+    if facet == f.facet and facet in cats:
         return {"id": f.id, "facet": f.facet, "value": f.value, "moved": False}
-    names = {" ".join(n.lower().split()) for n in [f.value] + [str(x) for x in (f.synonyms or [])]}
-    for other in db.session.query(Facet).filter(Facet.facet == facet, Facet.id != f.id, Facet.status != "rejected"):
-        if names & {" ".join(n.lower().split()) for n in [other.value] + [str(x) for x in (other.synonyms or [])]}:
-            raise ValueError(f'"{other.value}" is a value of {facet} already: merge the two in Categories if they '
-                             "are one")
     before = f.facet
-    f.facet = facet
-    f.reviewed_by, f.reviewed_at = by, dt.datetime.utcnow()
+    _move(f, facet, cats, by)
     db.session.commit()
     touch()
     db.session.commit()
     return {"id": f.id, "facet": f.facet, "value": f.value, "moved": True, "from": before,
             "inside": inside().get(facet, "")}
+
+
+def _names_in(facet: str) -> dict[str, str]:
+    """The names (and other names) of the values in use or proposed in a category, lowered: {name: its value}."""
+    from supagent.models import Facet
+
+    out: dict[str, str] = {}
+    for value, syn in db.session.query(Facet.value, Facet.synonyms).filter(Facet.facet == facet,
+                                                                          Facet.status != "rejected"):
+        for n in [value] + [str(x) for x in (syn or [])]:
+            out.setdefault(" ".join(n.lower().split()), value)
+    return out
+
+
+def _move(f: Any, facet: str, cats: tuple[str, ...], by: str, taken: dict[str, str] | None = None) -> None:
+    """A value put in another category (move_value, move_values), not saved: a value of the same name there (or one
+    of its other names) is said (ValueError), nothing changed. (0.11.4) A value of the same name refused there
+    before takes no place: what was refused with it (its items, its links) is this value's now, still refused, and
+    it goes (one value of a name in a category: the move failed on it). `taken`: the names there (_names_in), read
+    once for many moves and kept up to date here."""
+    import datetime as dt
+
+    from supagent.knowledge.facets import move_links
+    from supagent.models import Facet, Tag
+
+    if facet not in cats or f.facet not in cats:
+        raise ValueError("a value moves between " + ", ".join(cats))
+    names = {" ".join(n.lower().split()) for n in [f.value] + [str(x) for x in (f.synonyms or [])]}
+    there = _names_in(facet) if taken is None else taken
+    clash = next((there[n] for n in sorted(names) if n in there), None)
+    if clash is not None:
+        raise ValueError(f'"{clash}" is a value of {facet} already: merge the two in Categories if they are one')
+    gone = db.session.query(Facet).filter(Facet.facet == facet, Facet.value == f.value, Facet.id != f.id,
+                                          Facet.status == "rejected").first()
+    if gone is not None:
+        for t in db.session.query(Tag).filter(Tag.facet_id == gone.id):
+            if db.session.query(Tag.id).filter(Tag.ref == t.ref, Tag.facet_id == f.id).first() is None:
+                t.facet_id = f.id
+            else:
+                db.session.delete(t)
+        move_links(gone.id, f.id)
+        db.session.delete(gone)
+        db.session.flush()                             # (gone before the value takes its name there)
+    f.facet = facet
+    f.reviewed_by, f.reviewed_at = by, dt.datetime.utcnow()
+    db.session.flush()
+    if taken is not None:
+        for n in names:
+            taken.setdefault(n, f.value)
+
+
+BULK = 2000                    # (0.11.4) the values or links changed in one bulk action, at most
+
+
+def _ids(raw: Any) -> list[int]:
+    """The ids of a bulk action, as given (a list), once each, BULK at most."""
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError("ids: a list of ids")
+    out = list(dict.fromkeys(int(x) for x in raw if str(x).strip().isdigit()))
+    if not out:
+        raise ValueError("choose one or more")
+    if len(out) > BULK:
+        raise ValueError(f"{BULK} at a time at most")
+    return out
+
+
+def move_values(ids: Any, facet: str, by: str) -> dict[str, Any]:
+    """(0.11.4) Values chosen in Categories put in one category at once (a subcategory, another category): each as
+    when dropped on the map (move_value; a value still proposed too), saved together; the ones that cannot go are
+    said with why, the others go."""
+    from supagent.knowledge.facets import editable, inside
+    from supagent.knowledge.freshness import touch
+    from supagent.models import Facet
+
+    facet = " ".join(str(facet or "").lower().split())
+    cats = editable()
+    if facet not in cats:
+        raise ValueError("move to one of " + ", ".join(cats))
+    wanted = _ids(ids)
+    rows = {f.id: f for f in db.session.query(Facet).filter(Facet.id.in_(wanted))}
+    taken = _names_in(facet)
+    moved, there, skipped = 0, 0, []
+    for i in wanted:
+        f = rows.get(i)
+        if f is None or f.status not in ("approved", "proposed"):
+            skipped.append({"id": i, "value": f.value if f is not None else "", "why": "no longer a value"})
+        elif f.facet == facet:
+            there += 1
+        else:
+            try:
+                _move(f, facet, cats, by, taken)
+                moved += 1
+            except ValueError as ex:
+                skipped.append({"id": i, "value": f.value, "why": str(ex)})
+    if moved:
+        touch()
+    db.session.commit()
+    return {"facet": facet, "inside": inside().get(facet, ""), "moved": moved, "there": there, "skipped": skipped}
+
+
+def link_many(ids: Any, to: int, note: str, detail: str | None, way: str, by: str) -> dict[str, Any]:
+    """(0.11.4) One link between each value chosen in Categories and one other value (`way`: "out" from each to it,
+    "in" from it to each, "both"): the same description (what it is) and what it does on each, approved at once as
+    when drawn by hand. A link of that description already joining two of them is left as it is (what was written
+    on it stays) and counted; one waiting in To review, or refused before, is approved with what is written now."""
+    from supagent.knowledge.freshness import touch
+    from supagent.models import Facet, Link
+
+    short = " ".join(str(note or "").split())[:500]
+    if not short:
+        raise ValueError("say what the link is (its description)")
+    if way not in ("out", "in", "both"):
+        raise ValueError("way: out, in or both")
+    other = db.session.get(Facet, int(to or 0))
+    if other is None or other.status != "approved":
+        raise ValueError("the other part: a value in use")
+    long_ = str(detail or "").strip()[:2000] or None
+    kind = worded(short)
+    wanted = _ids(ids)
+    rows = {f.id: f for f in db.session.query(Facet).filter(Facet.id.in_(wanted))}
+    made: list[Any] = []
+    had, skipped = 0, []
+    for i in wanted:
+        f = rows.get(i)
+        if f is None or f.status != "approved":
+            skipped.append({"id": i, "value": f.value if f is not None else "",
+                            "why": "not in use yet: approve it first" if f is not None and f.status == "proposed"
+                            else "no longer a value"})
+            continue
+        if f.id == other.id:
+            skipped.append({"id": i, "value": f.value, "why": "it is the other part itself"})
+            continue
+        a, b = (other.id, f.id) if way == "in" else (f.id, other.id)
+        x = (db.session.query(Link).filter(Link.a_ref == f"facet:{a}", Link.b_ref == f"facet:{b}", Link.kind == kind)
+             .first())
+        if x is None:
+            # drawn the other way already: the same link when both ways are asked, or when it goes both ways
+            back = (db.session.query(Link).filter(Link.a_ref == f"facet:{b}", Link.b_ref == f"facet:{a}",
+                                                  Link.kind == kind).first())
+            if back is not None and (way == "both" or (back.both_ways and back.status == "approved")):
+                x = back
+        if x is not None and x.status == "approved":
+            if way == "both" and not x.both_ways:
+                x.both_ways, x.reviewed_by = True, by
+            had += 1
+            continue
+        if x is None:
+            x = Link(a_ref=f"facet:{a}", b_ref=f"facet:{b}", kind=kind, source="admin")
+            db.session.add(x)
+        x.note, x.detail, x.explained_by = short, long_, by
+        x.both_ways = way == "both"
+        x.status, x.reviewed_by, x.confidence = "approved", by, 1.0
+        x.proposed_drop, x.proposed_drop_at = None, None
+        made.append(x)
+    if made or had:
+        touch()
+    db.session.commit()
+    return {"made": len(made), "ids": [x.id for x in made], "had": had, "skipped": skipped, "kind": kind,
+            "other": {"id": other.id, "value": other.value, "facet": other.facet}}
+
+
+def describe_links(ids: Any, note: str | None, detail: str | None, by: str) -> dict[str, Any]:
+    """(0.11.4) The same description (what the link is) and what it does written on many links of the System map at
+    once, as a person corrects one in To review (set_link): only what is written changes (an empty field keeps
+    each link's own); their parts, direction, kind and state stay."""
+    from supagent.knowledge.freshness import touch
+    from supagent.models import Link
+
+    short = " ".join(str(note or "").split())[:500]
+    long_ = str(detail or "").strip()[:2000]
+    if not short and not long_:
+        raise ValueError("write what the links are, what they do, or both")
+    wanted = _ids(ids)
+    rows = {x.id: x for x in db.session.query(Link).filter(Link.id.in_(wanted))}
+    done, skipped = 0, []
+    for i in wanted:
+        x = rows.get(i)
+        if x is None or not (x.a_ref.startswith("facet:") and x.b_ref.startswith("facet:")):
+            skipped.append({"id": i, "why": "no such link of the System map"})
+            continue
+        if short:
+            x.note = short
+        if long_:
+            x.detail = long_
+        x.explained_by = by
+        done += 1
+    if done:
+        touch()
+    db.session.commit()
+    return {"described": done, "skipped": skipped}
 
 
 def add_category(name: str, inside: str, by: str) -> dict[str, Any]:
@@ -892,6 +1072,23 @@ def add_category(name: str, inside: str, by: str) -> dict[str, Any]:
     if str(inside or "").strip():
         set_inside(name, inside, by)
     return {"name": name, "inside": " ".join(str(inside or "").lower().split())}
+
+
+def remove_links(ids: Any) -> dict[str, Any]:
+    """(0.11.4) Links of the System map taken off at once (who may delete: the links chosen in a value's links, the
+    links just added in bulk taken back); counted."""
+    from supagent.knowledge.freshness import touch
+    from supagent.models import Link
+
+    wanted = _ids(ids)
+    rows = [x for x in db.session.query(Link).filter(Link.id.in_(wanted))
+            if x.a_ref.startswith("facet:") and x.b_ref.startswith("facet:")]
+    for x in rows:
+        db.session.delete(x)
+    if rows:
+        touch()
+    db.session.commit()
+    return {"removed": len(rows), "skipped": len(wanted) - len(rows)}
 
 
 def links_of_value(fid: int) -> list[dict[str, Any]]:

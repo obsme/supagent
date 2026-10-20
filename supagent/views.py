@@ -1730,7 +1730,10 @@ class KnowledgeView(_RecipesMixin, BaseView):
         "id"?}} draws or changes one (note: its short explanation, detail: its long one); {"remove_interaction": id}; {"describe": {"id", "description"}} what a part is;
         {"describe_category": {"name", "about"}} what a category is. 0.9.6.9: {"add_value": {"facet", "value",
         "inside"?}}; {"inside": {"id", "parent", "mode": move|copy|out}}; {"remove_value": id} (who may delete);
-        {"add_category": {"name", "inside"?}}; {"category_inside": {"name", "inside"}}."""
+        {"add_category": {"name", "inside"?}}; {"category_inside": {"name", "inside"}}. (0.11.4) in bulk, from the
+        Categories page: {"move_values": {"ids", "facet"}}; {"link_many": {"ids", "to", "note", "detail"?,
+        "way": out|in|both}}; {"describe_links": {"ids", "note"?, "detail"?}}; {"remove_links": {"ids"}} (who may
+        delete)."""
         from superset import db
 
         from supagent.knowledge import sysmap
@@ -1820,12 +1823,29 @@ class KnowledgeView(_RecipesMixin, BaseView):
                 x = body["category_inside"]
                 name = " ".join(str(x.get("name") or "").lower().split())
                 return _json({"name": name, "inside": set_inside(name, str(x.get("inside") or ""), g.user.username)})
+            # (0.11.4) the values chosen in Categories, at once: each one said when it cannot be done
+            if isinstance(body.get("move_values"), dict):     # put in a category (a subcategory, another one)
+                x = body["move_values"]
+                return _json(sysmap.move_values(x.get("ids"), str(x.get("facet") or ""), g.user.username))
+            if isinstance(body.get("link_many"), dict):       # one link from each to one other value
+                x = body["link_many"]
+                return _json(sysmap.link_many(x.get("ids"), _int(x.get("to"), 0), str(x.get("note") or ""),
+                                              str(x.get("detail") or ""), str(x.get("way") or "out"), g.user.username))
+            if isinstance(body.get("describe_links"), dict):  # the same description on many links
+                x = body["describe_links"]
+                return _json(sysmap.describe_links(x.get("ids"), str(x.get("note") or ""), str(x.get("detail") or ""),
+                                                   g.user.username))
+            if isinstance(body.get("remove_links"), dict):    # many links taken off (who may delete)
+                if not _can_delete():
+                    return _json({"error": "your role may not remove a link: propose its removal (AI Admin "
+                                           "decides)"}, 403)
+                return _json(sysmap.remove_links((body["remove_links"] or {}).get("ids")))
         except (ValueError, TypeError) as ex:
             db.session.rollback()
             return _json({"error": str(ex)}, 400)
         return _json({"error": "layout, interaction, remove_interaction, propose_removal, removal, describe, "
-                               "describe_category, add_value, inside, remove_value, add_category or category_inside"},
-                     400)
+                               "describe_category, add_value, inside, remove_value, add_category, category_inside, "
+                               "move_values, link_many, describe_links or remove_links"}, 400)
 
     @expose("/api/map/links", methods=("GET",))
     @has_access_api
@@ -1981,7 +2001,7 @@ class AdminView(BaseView):
         "stop_learning": "write", "runs": "write", "status": "write", "usage": "write", "usage_data": "write",
         "entries": "read", "entry_history": "read", "export_catalog": "read", "team_memory": "read", "docs": "read",
         "doc_pages": "read", "doc_page_remove": "delete", "doc_page_restore": "edit",
-        "review": "read", "facets": "read", "facet_map": "read", "facet_categories": "read", "apply_status": "read",
+        "review": "read", "review_refused": "read", "facets": "read", "facet_map": "read", "facet_categories": "read", "apply_status": "read",
         "create_entry": "edit", "update_entry": "edit", "restore_entry": "edit", "put_catalog": "edit",
         "set_memory": "edit", "add_doc": "edit", "edit_doc": "edit", "refresh_doc": "edit", "add_facet": "edit",
         "approve_found": "edit", "merge_same": "delete", "set_facet": "edit", "set_tag": "edit", "set_link": "edit", "set_route": "edit",
@@ -2979,6 +2999,78 @@ class AdminView(BaseView):
                                                          "removals", "retire", "context", "warnings", "fields",
                                                          "grafana"))})
 
+    @expose("/api/review/refused", methods=("GET",))
+    @has_access_api
+    def review_refused(self) -> Response:
+        """(0.11.4) What was refused before, kept out of the way (folded at the bottom of To review, read when
+        opened, never counted as waiting): the values of the categories set aside (refused, removed, retired) and
+        the links of the System map refused, the latest first; ?what=values|links (both: the first ones of each),
+        ?q= words, ?offset=, ?limit=. Each says whether it can be added again (a value: no other in use with its
+        name; a link: both its parts in use) and why not."""
+        from sqlalchemy import or_
+
+        from superset import db
+
+        from supagent.knowledge.facets import editable
+        from supagent.knowledge.sysmap import described
+        from supagent.models import Facet, Link
+
+        what = str(request.args.get("what") or "")
+        limit = min(max(_int(request.args.get("limit"), 30), 1), 200)
+        offset = max(_int(request.args.get("offset"), 0), 0)
+        q = " ".join(str(request.args.get("q") or "").split())[:200]
+        like = f"%{q}%" if q else None
+        out: dict[str, Any] = {"q": q, "can_delete": _can_delete()}
+        if what in ("", "values"):
+            val_q = db.session.query(Facet).filter(Facet.status == "rejected", Facet.facet.in_(list(editable())))
+            if like:
+                val_q = val_q.filter(or_(Facet.value.ilike(like), Facet.description.ilike(like),
+                                         Facet.facet.ilike(like)))
+            rows = (val_q.order_by(Facet.reviewed_at.desc().nullslast(), Facet.id.desc())
+                    .offset(offset).limit(limit).all())
+            names = {(f.facet, f.value.lower()) for f in rows}
+            in_use = {}
+            if rows:
+                for o in db.session.query(Facet).filter(Facet.status != "rejected",
+                                                        Facet.facet.in_({c for c, _v in names})):
+                    in_use.setdefault((o.facet, o.value.lower()), o)
+            out["values"] = [{"id": f.id, "facet": f.facet, "value": f.value, "description": f.description or "",
+                              "source": f.source, "by": f.reviewed_by or "", "at": f.reviewed_at,
+                              "origins": list(f.origins or [])[:2],
+                              "in_use": ({"id": in_use[(f.facet, f.value.lower())].id,
+                                          "value": in_use[(f.facet, f.value.lower())].value}
+                                         if (f.facet, f.value.lower()) in in_use else None)} for f in rows]
+            out.setdefault("counts", {})["values"] = val_q.count()
+        if what in ("", "links"):
+            link_q = db.session.query(Link).filter(Link.status == "rejected", Link.a_ref.like("facet:%"),
+                                                   Link.b_ref.like("facet:%"))
+            if like:
+                hits = [f"facet:{i}" for (i,) in db.session.query(Facet.id).filter(Facet.value.ilike(like))]
+                link_q = link_q.filter(or_(Link.note.ilike(like), Link.detail.ilike(like), Link.evidence.ilike(like),
+                                           Link.a_ref.in_(hits or ["-"]), Link.b_ref.in_(hits or ["-"])))
+            rows = link_q.order_by(Link.id.desc()).offset(offset).limit(limit).all()
+            ids = {int(r.split(":", 1)[1]) for x in rows for r in (x.a_ref, x.b_ref) if r.split(":", 1)[1].isdigit()}
+            parts = {f.id: f for f in db.session.query(Facet).filter(Facet.id.in_(ids or [-1]))}
+
+            def end(ref: str) -> dict[str, Any]:
+                i = ref.split(":", 1)[1]
+                f = parts.get(int(i)) if i.isdigit() else None
+                return ({"id": f.id, "value": f.value, "facet": f.facet, "status": f.status} if f is not None
+                        else {"id": None, "value": "(a value that no longer exists)", "facet": "", "status": "gone"})
+
+            links = []
+            for x in rows:
+                a, b = end(x.a_ref), end(x.b_ref)
+                why = next((f'"{e["value"]}" is not in use' + (" (refused)" if e["status"] == "rejected" else "")
+                            for e in (a, b) if e["status"] != "approved"), "")
+                links.append({"id": x.id, "a": a, "b": b, "kind": x.kind, "label": described(x.note, x.kind),
+                              "note": x.note or "", "detail": x.detail or "", "evidence": (x.evidence or "")[:300],
+                              "both": bool(x.both_ways), "source": x.source, "by": x.reviewed_by or "",
+                              "at": x.created_at, "why_not": why})
+            out["links"] = links
+            out.setdefault("counts", {})["links"] = link_q.count()
+        return _json(out)
+
     @expose("/api/grafana/<int:action_id>", methods=("POST",))
     @has_access_api
     def grafana_decide(self, action_id: int) -> Response:
@@ -3311,6 +3403,11 @@ class AdminView(BaseView):
                     if (t.confidence or 0) >= CONFIDENT:
                         t.status = "approved"
 
+        if f.status == "rejected" and body.get("status") in ("approved", "proposed"):   # (0.11.4) added again
+            same = (db.session.query(Facet).filter(Facet.facet == f.facet, Facet.id != f.id, Facet.status != "rejected",
+                                                   sa.func.lower(Facet.value) == sa.func.lower(f.value)).first())
+            if same is not None:
+                return _json({"error": f'"{same.value}" is a value of {f.facet} in use already', "id": same.id}, 409)
         new_facet = str(body.get("facet") or "").strip().lower() or f.facet
         if new_facet != f.facet and (f.facet not in editable() or new_facet not in editable()):
             return _json({"error": "the aspect (functional, technical) is fixed; a value moves between "
@@ -3429,6 +3526,15 @@ class AdminView(BaseView):
         body = _body()
         if x.status == "approved" and body.get("status") == "rejected" and not _can_delete():
             return _json({"error": "your role may not remove an approved link"}, 403)   # (0.11.0) a removal
+        if x.status == "rejected" and body.get("status") in ("approved", "proposed"):   # (0.11.4) added again, from
+            from supagent.models import Facet                                            # what was refused before:
+                                                                                         # both its parts in use
+            for ref in (x.a_ref, x.b_ref):
+                i = ref.split(":", 1)[1] if ref.startswith("facet:") else ""
+                f = db.session.get(Facet, int(i)) if i.isdigit() else None
+                if ref.startswith("facet:") and (f is None or f.status != "approved"):
+                    return _json({"error": (f'"{f.value}" is not in use: add it again first' if f is not None
+                                            else "one of its parts no longer exists")}, 409)
         edited = False
         if body.get("kind") or body.get("reverse"):    # (0.10.6) corrected in To review: its kind, its direction
             from supagent.knowledge.sysmap import INTERACTIONS
@@ -3448,8 +3554,9 @@ class AdminView(BaseView):
                 if key in body:
                     setattr(x, key, str(body.get(key) or "").strip()[:size] or None)
             x.explained_by = g.user.username
-        if body.get("status") in ("approved", "rejected") or "note" in body or "detail" in body or edited:
-            if body.get("status") in ("approved", "rejected"):
+        wanted = ("approved", "rejected", "proposed") if x.status == "rejected" else ("approved", "rejected")
+        if body.get("status") in wanted or "note" in body or "detail" in body or edited:
+            if body.get("status") in wanted:          # (0.11.4) a refused one proposed again: back in To review
                 x.status, x.reviewed_by = body["status"], g.user.username
             db.session.commit()
             if x.a_ref.startswith("facet:"):           # an interaction of the System map: the map and the agent follow

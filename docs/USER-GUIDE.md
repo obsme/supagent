@@ -409,6 +409,18 @@ the N <category> values found in the data** (the values read from a category's f
 other names of <category> values you have** (Admins: proposals written like a value you have become its other
 names), **Read: fine, all new pages shown** (new Context pages). Each asks for a confirmation first.
 
+**Refused earlier (new in 0.11.4).** At the very bottom of the tab, folded and in small grey letters, **Refused
+earlier** keeps what was refused before: the values of the categories (refused, removed or retired) and the links
+of the System map refused, the latest first, 30 at a time (**Show more**). It is read only when opened and never
+counted in what waits; the filter box above applies to it too. On each:
+
+* **Propose again**: it goes back to its group above, to decide;
+* **Use again**: in use at once.
+
+A value refused lost its links and items at that time; the next learning proposes them again. A value with the name
+of one in use cannot be added again (it says which), nor a link whose part is not in use (add the part again
+first). Refused items stay refused until then: they are what keeps the learning from proposing them again.
+
 **Context pages.** A change is shown as the page now against the page proposed, line by line, the changed words
 marked (**Side by side** / **One column**; long unchanged stretches folded, click to open them), with *In short: the
 statements added and dropped*. When it replaces an earlier proposal nobody reviewed, what the earlier one said and
@@ -651,6 +663,27 @@ with what it is and what it does, and *In the data (where the agent filters on i
 the value, as the data writes it. **+ Add a link**: the other part (type to find it), what the link is (a few
 words), what it does (what to check on the other part), its direction, **Add the link**. On a link: **Edit**,
 **Remove** (Admins) or **Propose its removal** (Editors).
+
+**Several values at once (new in 0.11.4).** Tick the box of each value (the box in the header ticks every value the
+list shows; the fixed aspects have none). A bar above the list says how many are chosen and offers:
+
+* **Put them in** a category or a subcategory (a subcategory is listed after the category it is inside, e.g.
+  *Component › Exporters*), then **Put the N values there**. Each one moves as when dropped on the System map, with
+  its links, items and other names; a value still proposed moves too. A value whose name (or other name) is already
+  used in that category is not moved, and the bar says so: merge the two first if they are one.
+* **Link each to** one other value (type to find it), with what the link is, what it does (optional) and its way
+  (*from each to it*, *from it to each*, *both ways*), then **Link the N values** (asked first). Example: every
+  server chosen gets "is scraped by" to the component *node_exporter*. A value that already has this link keeps it
+  as written; a value still proposed is skipped until approved. Admins get **Undo** right after, which takes the
+  links just added back.
+* **Clear the choice**.
+
+The choice follows the list: a value no longer shown (another filter) leaves it.
+
+**Several links at once (new in 0.11.4).** In a value's **Links…**, tick links (or **Choose every link**): a box
+appears to write **what they are** and **what they do** on all of them, then **Write on the N links**. An empty field
+keeps each link's own text; the links' parts, way, kind and state do not change. Admins also get **Remove them**
+(asked first). The same box is on the System map's panel of a value.
 
 ### 3.9 Knowledge → System map
 

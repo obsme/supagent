@@ -110,7 +110,7 @@ Content-Security-Policy (Talisman nonces).
 ```bash
 # the Python of Superset's virtualenv
 PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-$PY -m pip install supagent-0.11.3-py3-none-any.whl         # Superset 6.1: nothing else to install
+$PY -m pip install supagent-0.11.4-py3-none-any.whl         # Superset 6.1: nothing else to install
 ```
 
 One line in `superset_config.py` registers it. It holds no logic:
@@ -152,6 +152,14 @@ row level security filters and dashboards keep them), the AI roles' users moved 
 then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with the knowledge written) and Viewer
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
+## Upgrade from 0.11.3 to 0.11.4
+
+pip install the wheel on every host and restart (tables unchanged, v20). Categories: tick values to put them in a
+category or a subcategory, or to give each the same link to one value; Links…: one description on many links; To
+review: *Refused earlier*, folded at the very bottom. Measured: browser tests 26 passed on the lab's Superset 6.1, the
+new one included (values ticked and put in a subcategory, each linked to one value, the links described together, a
+refused value proposed again; nothing left behind); unit tests 2360.
 
 ## Upgrade from 0.11.1.1 to 0.11.3
 

@@ -884,9 +884,118 @@
         }, { fold: 10 })
       ];
       parts.forEach(function (p) { if (p) box.appendChild(p); });
+      box.appendChild(refusedFold());
     });
   }
   var ROUTES = ["functional", "technical", "incident", "charts", "observability", "infrastructure"];
+
+  /* (0.11.4) what was refused before, out of the way (the user's request: "in a hidden menu, not clearly visible"):
+     folded at the very bottom, read only when opened, never counted as waiting. A value or a link can be proposed
+     again (it comes back above, to decide) or used again at once; one that cannot says why. */
+  var refusedOpen = false;
+  function refusedFold() {
+    var fold = el("details", { class: "refused-fold" }, [el("summary", { text: "Refused earlier" })]);
+    var body = el("div", { class: "refused-body" });
+    fold.appendChild(body);
+    var loaded = false;
+    fold.addEventListener("toggle", function () {
+      refusedOpen = fold.open;
+      if (fold.open && !loaded) { loaded = true; refusedLoad(body); }
+    });
+    if (refusedOpen) { fold.open = true; }
+    return fold;
+  }
+  function refusedLoad(body) {
+    body.innerHTML = "";
+    body.appendChild(el("p", { class: "muted", text: "Reading what was refused…" }));
+    var q = reviewQ ? "&q=" + encodeURIComponent(reviewQ) : "";
+    S.admin("GET", "review/refused?limit=30" + q).then(function (d) {
+      body.innerHTML = "";
+      if (d.error) { body.appendChild(el("p", { class: "result bad", text: d.error })); return; }
+      body.appendChild(el("p", { class: "muted small-note", text: "Kept so that the learning does not propose them again. " +
+        "Propose again: back in the lists above, to decide; Use again: in use at once. A value refused lost its links " +
+        "and items then; the next learning proposes them again." + (reviewQ ? " Only what names \u201c" + reviewQ + "\u201d." : "") }));
+      var c = d.counts || {};
+      body.appendChild(refusedList("values", "Values", c.values || 0, d.values || [], q));
+      body.appendChild(refusedList("links", "Links", c.links || 0, d.links || [], q));
+    });
+  }
+  function refusedList(what, title, total, rows, q) {
+    var sec = el("section", { class: "refused-list" }, [el("h3", { text: title + " \u00b7 " + S.num(total) })]);
+    var list = el("div", { class: "rlist" });
+    sec.appendChild(list);
+    if (!total) { list.appendChild(el("p", { class: "muted", text: "None." })); return sec; }
+    var shown = 0;
+    var add = function (items) {
+      items.forEach(function (x) { list.appendChild(what === "values" ? refusedValue(x) : refusedLink(x)); });
+      shown += items.length;
+      more.hidden = shown >= total;
+      more.textContent = "Show more (" + S.num(total - shown) + ")";
+    };
+    var more = el("button", { type: "button", class: "btn small", onclick: function () {
+      more.disabled = true;
+      S.admin("GET", "review/refused?what=" + what + "&limit=30&offset=" + shown + q).then(function (d) {
+        more.disabled = false;
+        if (!d.error) add(d[what] || []);
+      });
+    } });
+    sec.appendChild(more);
+    add(rows);
+    return sec;
+  }
+  function refusedCard(main, meta, actions) {
+    var acts = el("div", { class: "ractions" }, actions);
+    var c = el("div", { class: "rcard refused" }, [el("div", { class: "rbody" }, main.concat([meta ? el("div", { class: "rmeta", text: meta }) : null])), acts]);
+    c._acts = acts;
+    return c;
+  }
+  function refusedAct(label, cls, fn, doneText) {
+    return el("button", { type: "button", class: "btn small" + (cls ? " " + cls : ""), text: label, onclick: function () {
+      var c = this.closest(".rcard"), buttons = c.querySelectorAll("button");
+      buttons.forEach(function (b) { b.disabled = true; });
+      fn().then(function (r) {
+        if (r && r.error) {
+          buttons.forEach(function (b) { b.disabled = false; });
+          var err = c.querySelector(".rerr") || c.querySelector(".rbody").appendChild(el("div", { class: "rerr result bad" }));
+          err.textContent = r.error;
+          return;
+        }
+        c.classList.add("done");
+        c._acts.innerHTML = "";
+        c._acts.appendChild(el("span", { class: "rdone", text: doneText }));
+        saved();
+        D.reviewWaiting();                                // a value proposed again waits again: the badge follows
+      });
+    } });
+  }
+  function refusedValue(f) {
+    var by = [f.by ? "refused by " + f.by : "", S.when(f.at), f.source ? { seed: "from the start", data: "from the data", llm: "by the LLM", admin: "by an admin", docs: "from the documents" }[f.source] || f.source : ""].filter(Boolean).join(" \u00b7 ");
+    var main = [el("div", { class: "rtext" }, [el("strong", { text: f.value }), el("span", { class: "muted", text: " (" + (FACET_NAMES[f.facet] || f.facet) + ")" })]),
+      f.description ? el("div", { class: "muted", text: f.description }) : null,
+      (f.origins || []).length ? el("div", { class: "muted small-note", text: "from: " + f.origins.join("; ") }) : null].filter(Boolean);
+    if (f.in_use) {
+      main.push(el("div", { class: "muted", text: "\u201c" + f.in_use.value + "\u201d is in use with this name: nothing to add again." }));
+      return refusedCard(main, by, []);
+    }
+    return refusedCard(main, by, [
+      refusedAct("Propose again", "", function () { return S.admin("POST", "facets/" + f.id, { status: "proposed" }); }, "proposed again (above)"),
+      refusedAct("Use again", "primary", function () { return S.admin("POST", "facets/" + f.id, { status: "approved" }); }, "in use again")]);
+  }
+  function refusedLink(x) {
+    var dir = x.both ? " \u2194 " : " \u2192 ";
+    var main = [el("div", { class: "rtext" }, [el("strong", { text: x.a.value }), el("span", { text: dir }), el("strong", { text: x.b.value }),
+                                              el("span", { class: "muted", text: ": " + x.label })]),
+      x.detail ? el("div", { class: "muted small-note", text: x.detail }) : null,
+      x.evidence ? el("div", { class: "muted small-note", text: "read in: " + x.evidence }) : null].filter(Boolean);
+    var meta = [x.by ? "refused by " + x.by : "", x.source ? { llm: "by the LLM", data: "from the data", admin: "by an admin", docs: "from the documents" }[x.source] || x.source : ""].filter(Boolean).join(" \u00b7 ");
+    if (x.why_not) {
+      main.push(el("div", { class: "muted", text: "Not added again: " + x.why_not + "." }));
+      return refusedCard(main, meta, []);
+    }
+    return refusedCard(main, meta, [
+      refusedAct("Propose again", "", function () { return S.admin("POST", "links/" + x.id, { status: "proposed" }); }, "proposed again (above)"),
+      refusedAct("Use again", "primary", function () { return S.admin("POST", "links/" + x.id, { status: "approved" }); }, "in use again")]);
+  }
 
   // ------------------------------------------------------------------ Catalog
   var cat = { entries: [], classifications: {}, current: null, loaded: false };
@@ -1890,13 +1999,32 @@
           (f.status === "approved" ? "Remove " : "Reject ") + "\u201c" + f.value + "\u201d?",
           (f.items ? "Its " + S.num(f.items) + " item" + (f.items === 1 ? "" : "s") + " lose this " + f.facet + ". " : "") +
           "It is not proposed again; adding it by hand brings it back."));
-        tb.appendChild(el("tr", {}, [valueCell, el("td", { text: f.facet }), el("td", { class: "num", text: S.num(f.items) }),
+        // (0.11.4) a box to choose it: the values chosen are changed together (the bar above the list)
+        var pick = f.facet === "aspect" ? null : el("input", { type: "checkbox", class: "fac-pick", "aria-label": "Choose " + f.value,
+          checked: facPicked[f.id] ? "checked" : null, onchange: function (ev) {
+            if (ev.target.checked) facPicked[f.id] = { id: f.id, value: f.value, facet: f.facet, status: f.status };
+            else delete facPicked[f.id];
+            facAll();
+            facBar();
+          } });
+        tb.appendChild(el("tr", { class: facPicked[f.id] ? "picked" : "" }, [el("td", { class: "pick-col" }, [pick]),
+          valueCell, el("td", { text: f.facet }), el("td", { class: "num", text: S.num(f.items) }),
           el("td", { class: "muted", text: (f.examples || []).join(" · ") }),
           el("td", {}, [badge(f.status === "approved" ? "used" : "proposed", f.status === "approved" ? "ok" : "warn"),
-                        el("div", { class: "muted", text: { seed: "from the start", data: "from the data", llm: "by the LLM", admin: "by an admin" }[f.source] || f.source || "" })]),
+                        el("div", { class: "muted", text: { seed: "from the start", data: "from the data", llm: "by the LLM", admin: "by an admin", docs: "from the documents" }[f.source] || f.source || "" })]),
           acts]));
       });
-      if (!all.length) tb.appendChild(D.emptyRow(6, "No category yet: the daily learning classifies the knowledge (or: superset supagent classify)."));
+      if (!all.length) tb.appendChild(D.emptyRow(7, "No category yet: the daily learning classifies the knowledge (or: superset supagent classify)."));
+      // (0.11.4) the choice is what the list shows: a value no longer shown (another filter, moved away) leaves it
+      var shown = {};
+      all.forEach(function (f) { shown[f.id] = f; });
+      Object.keys(facPicked).forEach(function (k) {
+        if (!shown[k] || shown[k].facet === "aspect") delete facPicked[k];
+        else facPicked[k] = { id: shown[k].id, value: shown[k].value, facet: shown[k].facet, status: shown[k].status };
+      });
+      facShown = all;
+      facAll();
+      facBar();
       // (0.10.6.1) the values shown removed at once (an admin; the fixed aspects stay): filter by category, state or
       // words first, then remove what is left in the list, asked once with how many
       var bulkBox = $("fac-bulk"), gone = all.filter(function (f) { return f.facet !== "aspect"; });
@@ -1925,6 +2053,165 @@
       }
     });
   }
+  /* (0.11.4) the values chosen in the list (their boxes ticked), changed together, the user's request: put in one
+     category (a subcategory, or another category), or each given the same link to one other value (a component, an
+     application…), with what it is and what it does. What cannot be done is said, value by value; the rest is done. */
+  var facPicked = {}, facShown = [], CATS = [];
+  function pickedIds() { return Object.keys(facPicked).map(Number); }
+  function facAll() {                          // the header's box: every value shown, some, none
+    var box = $("fac-all");
+    if (!box) return;
+    var can = facShown.filter(function (f) { return f.facet !== "aspect"; }), n = pickedIds().length;
+    box.checked = !!can.length && n === can.length;
+    box.indeterminate = n > 0 && n < can.length;
+    box.disabled = !can.length;
+    box.onchange = function () {
+      if (box.checked) can.forEach(function (f) { facPicked[f.id] = { id: f.id, value: f.value, facet: f.facet, status: f.status }; });
+      else facPicked = {};
+      $("facets").querySelectorAll("tbody tr").forEach(function (tr) {
+        var c = tr.querySelector(".fac-pick");
+        if (c) { c.checked = box.checked; tr.classList.toggle("picked", box.checked); }
+      });
+      facBar();
+    };
+    $("facets").querySelectorAll("tbody tr").forEach(function (tr) {
+      var c = tr.querySelector(".fac-pick");
+      if (c) tr.classList.toggle("picked", c.checked);
+    });
+  }
+  function catChoices() {                      // the categories as a tree: a subcategory after the one it is inside
+    var within = {}, kids = {}, seen = {}, out = [];
+    CATS.forEach(function (c) { within[c.name] = c.inside || ""; });
+    CATS.forEach(function (c) {
+      var p = within[c.name] && within.hasOwnProperty(within[c.name]) && within[c.name] !== c.name ? within[c.name] : "";
+      (kids[p] = kids[p] || []).push(c.name);
+    });
+    (function walk(p, path) {
+      (kids[p] || []).forEach(function (n) {
+        if (seen[n]) return;
+        seen[n] = 1;
+        var here = path.concat([FACET_NAMES[n] || n]);
+        out.push({ name: n, label: here.join(" › ") });
+        walk(n, here);
+      });
+    })("", []);
+    CATS.forEach(function (c) { if (!seen[c.name]) out.push({ name: c.name, label: FACET_NAMES[c.name] || c.name }); });
+    return out;
+  }
+  function facBar() {
+    var bar = $("fac-sel");
+    if (!bar) return;
+    var ids = pickedIds(), n = ids.length;
+    if (!n || !admin) { bar.hidden = true; bar.innerHTML = ""; bar._built = false; bar._fill = null; return; }
+    bar.hidden = false;
+    var many = function (k) { return S.num(k) + " value" + (k === 1 ? "" : "s"); };
+    if (bar._built) { bar._count(n); return; }        // the bar kept (what is typed in it too); its counts follow
+    bar.innerHTML = "";
+    bar._built = true;
+    var res = el("div", { class: "result", role: "status", "aria-live": "polite" });
+    var say = function (text, bad) { res.textContent = text; res.className = "result" + (bad ? " warn" : " good"); };
+    var skippedText = function (sk) {
+      if (!sk || !sk.length) return "";
+      return " Not done for " + sk.slice(0, 5).map(function (x) { return "“" + (x.value || "#" + x.id) + "” (" + x.why + ")"; }).join(", ") +
+        (sk.length > 5 ? " and " + (sk.length - 5) + " more" : "") + ".";
+    };
+    var count = el("strong", { class: "fac-sel-count" });
+    var clear = el("button", { type: "button", class: "linkish", text: "Clear the choice", onclick: function () {
+      facPicked = {};
+      $("facets").querySelectorAll(".fac-pick").forEach(function (c) { c.checked = false; });
+      facAll();
+      facBar();
+    } });
+    // put them in a category: a subcategory (a category drawn inside another), or another category
+    var to = el("select", { "aria-label": "The category to put them in" });
+    bar._fill = function () {
+      var was = to.value;
+      to.innerHTML = "";
+      to.appendChild(el("option", { value: "", text: "a category or a subcategory…" }));
+      catChoices().forEach(function (c) { to.appendChild(el("option", { value: c.name, text: c.label })); });
+      to.value = was;
+    };
+    bar._fill();
+    loadCategories();                                     // read again: one made meanwhile (on the map) is a choice
+
+    var move = el("button", { type: "button", class: "btn small primary", onclick: function () {
+      var ids = pickedIds();
+      if (!to.value) { say("Choose the category to put them in.", true); to.focus(); return; }
+      move.disabled = true;
+      S.dict("POST", "map", { move_values: { ids: ids, facet: to.value } }).then(function (r) {
+        move.disabled = false;
+        if (r.error) { say(r.error, true); return; }
+        var name = to.options[to.selectedIndex] ? to.options[to.selectedIndex].text : r.facet;
+        say((r.moved ? "Put " + many(r.moved) + " in " + name + "." : "Nothing moved.") +
+            (r.there ? " " + many(r.there) + " " + (r.there === 1 ? "was" : "were") + " there already." : "") +
+            skippedText(r.skipped), (r.skipped || []).length > 0);
+        if (r.moved) { saved(); loadCategories(); }
+        facetsLoad();
+      });
+    } });
+    // the same link from each one to one other value (or from it to each, or both ways)
+    var other = S.picker({ single: true, placeholder: "The other value: type to search", label: "The value to link them to",
+      load: function (words) {
+        return S.admin("GET", "facets?status=approved&brief=1&limit=60" + (words ? "&q=" + encodeURIComponent(words) : "")).then(function (d) {
+          var rows = d.facets || [];
+          return { items: rows.map(function (f) { return { id: f.id, label: f.value, group: f.facet, data: f }; }),
+                   more: Math.max(0, (d.total || 0) - rows.length) };
+        });
+      } });
+    var desc = el("input", { type: "text", maxlength: "500", class: "fac-sel-desc", "aria-label": "What the link is",
+                             placeholder: "What the link is (is scraped by, runs on, sends data to…)" });
+    var work = el("textarea", { rows: "2", maxlength: "2000", "aria-label": "What the link does",
+                                placeholder: "What it does, what to check on the other value when following it (optional)" });
+    var way = el("select", { "aria-label": "Direction" }, [
+      el("option", { value: "out", text: "from each to it →" }),
+      el("option", { value: "in", text: "from it to each ←" }),
+      el("option", { value: "both", text: "both ways ↔" })]);
+    var add = el("button", { type: "button", class: "btn small primary", onclick: function () {
+      var target = other.chosen()[0], ids = pickedIds();
+      if (!target) { say("Choose the value to link them to.", true); return; }
+      if (!desc.value.trim()) { say("Say what the link is.", true); desc.focus(); return; }
+      S.confirm(add, "Link " + many(ids.length) + " to “" + target.label + "”?", { yes: "Add the links", no: "Cancel",
+        detail: "Each chosen value gets the link “" + desc.value.trim() + "” (" + way.options[way.selectedIndex].text +
+          "), used at once. A value linked so already keeps its own link as written." }).then(function (ok) {
+        if (!ok) return;
+        add.disabled = true;
+        S.dict("POST", "map", { link_many: { ids: ids, to: +target.id, note: desc.value, detail: work.value, way: way.value } }).then(function (r) {
+          add.disabled = false;
+          if (r.error) { say(r.error, true); return; }
+          say((r.made ? "Added " + S.num(r.made) + " link" + (r.made === 1 ? "" : "s") + " to “" + r.other.value + "”." : "No link added.") +
+              (r.had ? " " + many(r.had) + " had it already (kept as written)." : "") + skippedText(r.skipped),
+              (r.skipped || []).length > 0);
+          if (r.made && canDelete && (r.ids || []).length) {        // a wrong target: the links just added taken back
+            var undo = el("button", { type: "button", class: "linkish", text: "Undo", onclick: function () {
+              undo.disabled = true;
+              S.dict("POST", "map", { remove_links: { ids: r.ids } }).then(function (x) {
+                if (x.error) { say(x.error, true); return; }
+                say("Taken back: the " + S.num(x.removed) + " link" + (x.removed === 1 ? "" : "s") + " just added.", false);
+                saved();
+              });
+            } });
+            res.appendChild(document.createTextNode(" "));
+            res.appendChild(undo);
+          }
+          if (r.made) saved();
+          facetsLoad();
+        });
+      });
+    } });
+    bar._count = function (k) {
+      count.textContent = many(k) + " chosen";
+      move.textContent = "Put the " + many(k) + " there";
+      add.textContent = "Link the " + many(k);
+    };
+    bar._count(n);
+    bar.appendChild(el("div", { class: "fac-sel-head" }, [count, clear]));
+    bar.appendChild(el("div", { class: "fac-sel-row", role: "group", "aria-label": "Put them in a category" }, [
+      el("span", { class: "fac-sel-label", text: "Put them in" }), to, move]));
+    bar.appendChild(el("div", { class: "fac-sel-row", role: "group", "aria-label": "Link each one to one value" }, [
+      el("span", { class: "fac-sel-label", text: "Link each to" }), other.el, desc, way, add]));
+    bar.appendChild(el("div", { class: "fac-sel-row fac-sel-work" }, [el("span", { class: "fac-sel-label" }), work]));
+    bar.appendChild(res);
+  }
   var FACET_NAMES = { subject: "Subject", application: "Application", component: "Component" };
   function plural(k) {                         // Subjects, Applications, Components; one's own: as named
     return FACET_NAMES[k] + (["subject", "application", "component"].indexOf(k) >= 0 ? "s" : "");
@@ -1934,6 +2221,7 @@
     return S.admin("GET", "facets/categories").then(function (d) {
       var cats = d.categories || [];
       if (!cats.length) return;
+      CATS = cats;
       Object.keys(FACET_NAMES).forEach(function (k) { delete FACET_NAMES[k]; });
       cats.forEach(function (c) { FACET_NAMES[c.name] = c.name.charAt(0).toUpperCase() + c.name.slice(1); });
       var add = $("fac-new-facet"), keep = add.value;
@@ -1950,6 +2238,8 @@
       var list = $("cat-own-list");
       list.innerHTML = "";
       cats.forEach(function (c) { list.appendChild(categoryRow(c, cats)); });
+      var bar = $("fac-sel");
+      if (bar && bar._fill) bar._fill();                  // (0.11.4) the bar's categories follow
     });
   }
   /* a category in the list: what it holds, where its values are read, the category it is drawn inside on the

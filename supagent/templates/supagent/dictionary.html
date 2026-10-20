@@ -273,7 +273,9 @@
         environment, team…). The LLM classifies what changes every day and may propose new values; a new value is used
         once an admin approves it. An admin also adds a value here (used at once) and, with Edit, moves a value to
         another category; Links… shows a value's links to other parts (what each is, what it does, its way) and adds
-        one. The router and the search use them to find the knowledge a question needs; the System map draws them.</div>
+        one. Tick the boxes of several values to change them together: put them in a category or a subcategory, or
+        give each the same link to one other value (a component, an application…). The router and the search use
+        them to find the knowledge a question needs; the System map draws them.</div>
       <div class="filters">
         <select id="fac-facet" aria-label="Category"><option value="">All categories</option>
           <option value="subject">Subjects</option><option value="application">Applications</option>
@@ -310,8 +312,10 @@
           <span id="cat-own-result" class="result" role="status" aria-live="polite"></span>
         </div>
       </details>
+      <div id="fac-sel" class="fac-sel" role="region" aria-label="The values chosen" hidden></div>
       <div class="table-wrap" id="fac-list"><table class="grid" id="facets">
-        <thead><tr><th>Value</th><th>Category</th><th class="num">Items</th><th>For example</th><th>State</th><th></th></tr></thead>
+        <thead><tr><th class="pick-col"><input type="checkbox" id="fac-all" aria-label="Choose every value shown"></th>
+          <th>Value</th><th>Category</th><th class="num">Items</th><th>For example</th><th>State</th><th></th></tr></thead>
         <tbody></tbody></table></div>
     </div>
 

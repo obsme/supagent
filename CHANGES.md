@@ -1,5 +1,53 @@
 # Changes
 
+## 0.11.4 — 2026-10-21
+
+**Several values of the categories changed at once.** In Knowledge → Categories each value has a box to tick (the
+header's box ticks every value shown; the fixed aspects have none). A bar above the list then puts the values chosen
+in a category or a subcategory at once (a subcategory is listed after the category it is inside, e.g. *Component ›
+Exporters*), each as when dropped on the System map, with its links, items and other names (a value still proposed
+moves too; a value whose name is already used there is said, not merged); or gives each one the same link to one
+other value, for instance every server chosen "is scraped by" the component node_exporter, with what the link is,
+what it does and its way, approved at once. A value already linked so keeps its link as written; a value still
+proposed waits for its approval. Admins get an Undo of the links just added.
+
+**One description on many links.** In a value's Links… (Categories, or the System map's panel), links are ticked
+(or all of them) and what they are and what they do are written on all of them at once; an empty field keeps each
+link's own text; their parts, way, kind and state do not change. Admins can also remove the links ticked.
+
+**What was refused earlier, out of the way.** At the very bottom of To review, folded in small letters, *Refused
+earlier* lists the values refused (or removed, or retired) and the links of the System map refused, the latest
+first; it is read only when opened and never counted in what waits. Each can be proposed again (back in its group
+above) or used again at once when it can be: a value with the name of one in use, or a link whose part is not in
+use, says why not. A value refused lost its links and items then; the next learning proposes them again.
+
+**Fixed.** Moving a value into a category that holds a refused value of the same name failed with a server error (the
+System map's drag too): the refused one gives way, what was refused with it (items, links) kept, still refused, on
+the moved value.
+
+**A wiki of thousands of pages on many subjects: checked, not changed yet.** Measured on a generated Confluence wiki
+of 6,006 pages on 28 subjects in 5 spaces, 12 of its facts changed by newer pages: the summaries of 0.11.3 do not
+cover such a wiki well. 6 of the 28 subjects never reach what the summaries are written from, and in every run an
+older value was stated as the current one. A change that fixes both (each page's last-changed day kept, every branch
+of the wiki's tree given room, the most recent page followed where pages disagree: 28 of 28 subjects, no older value
+stated as current in 12 page runs) is not in this release: with it, the overview pages named fewer of the other
+documents' applications when such a big wiki is present. It comes in a next release once that is solved.
+
+Measured before the release under a rule written before its runs (gate G-0.11.4, NOTES 2026-10-20 23:40, and its
+amendment of 2026-10-21 00:30 that holds the wiki change back) on the frozen build 8980dc4, the release's code: the
+browser tests of every page against the lab's Superset 6.1 running it, with the tests that write, 26 passed (1
+skipped: the one that asks the LLM a question), the new one included (three values ticked in Categories put in a
+subcategory made for the test, then each linked to a fourth value; the three links described together from its Links…;
+a value refused shown in To review's folded list and proposed again; nothing left behind); the unit tests: 2360
+passed, 6 of them new (values moved together, a refused value of the same name giving way, links from many values to
+one, a link already there kept as written, one description on many links, what was refused listed apart and added
+back). 1,000 values put in a category of 5,000 in 1.3 s, and linked in 1.3 s. The agent's answers are not measured
+again: no code they run changes (0.11.1's measure stands).
+
+Upgrade from 0.11.3: pip install the wheel on every host and restart the web servers (the workers and beat as usual);
+nothing to run (tables unchanged, v20). Browsers load the new page files at once (their names carry their content's
+hash). INSTALL.txt, *From 0.11.3 to 0.11.4*.
+
 ## 0.11.3 — 2026-10-19
 
 **The chat opens from a robot at the bottom right of Superset's pages.** The Chat tab of Superset's top bar is

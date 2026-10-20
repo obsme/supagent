@@ -979,3 +979,33 @@ svg.spark { vertical-align: middle; color: var(--accent); }
 .relations-diagram .rel-edge:hover path { stroke: var(--accent); stroke-width: 2; }
 .relations-diagram .rel-head { fill: var(--muted); }
 .relations-text summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+
+/* (0.11.4) values chosen in Categories (their boxes ticked) and changed together: the bar stays in sight while the
+   list scrolls; links chosen in a value's links (the same description on many) */
+.pick-col { width: 28px; text-align: center; }
+.pick-col input { margin: 0; cursor: pointer; }
+#facets tr.picked td { background: var(--accent-soft); }
+.fac-sel { position: sticky; top: 0; z-index: 4; display: flex; flex-direction: column; gap: 6px; margin: 6px 0 10px;
+  padding: 10px 12px; background: var(--panel); border: 1px solid var(--accent); border-radius: var(--radius);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .08); }
+.fac-sel-head { display: flex; align-items: center; gap: 12px; }
+.fac-sel-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.fac-sel-label { flex: 0 0 96px; color: var(--ink-2); font-size: 12px; }
+.fac-sel-row .pick { flex: 1 1 220px; min-width: 0; max-width: 340px; }
+.fac-sel-desc { flex: 2 1 240px; min-width: 0; }
+.fac-sel-work textarea { flex: 1 1 360px; min-width: 0; }
+.fac-sel .result:empty { display: none; }
+.links-pick { margin: 0 6px 0 0; vertical-align: middle; cursor: pointer; }
+.links-bulk { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; padding: 8px 10px;
+  border: 1px solid var(--accent); border-radius: var(--radius); background: var(--panel); }
+.links-bulk .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.links-bulk input[type="text"], .links-bulk textarea { flex: 1 1 260px; min-width: 0; }
+.links-bulk .result:empty { display: none; }
+.links-all { margin: 2px 0 4px; font-size: 12px; color: var(--ink-2); display: flex; align-items: center; gap: 6px; }
+/* (0.11.4) what was refused before: folded at the very bottom of To review, quiet until opened */
+.refused-fold { margin-top: 36px; color: var(--muted); }
+.refused-fold > summary { font-size: 12px; cursor: pointer; width: max-content; opacity: .8; }
+.refused-fold[open] > summary { margin-bottom: 8px; }
+.refused-list h3 { font-size: 13px; font-weight: 600; margin: 12px 0 4px; color: var(--ink-2); }
+.rcard.refused { opacity: .85; }
+.rcard.refused .rtext strong { font-weight: 600; }

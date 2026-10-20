@@ -320,3 +320,78 @@ def test_a_catalog_entry_made_and_deleted(page):
     page.locator(".pop button", has_text=re.compile("^(Delete|Yes)$")).first.click()
     page.wait_for_selector("#entry-drawer", state="hidden", timeout=WAIT)
     _no_errors(page)
+
+
+@pytest.mark.skipif(not WRITE, reason="SUPAGENT_UI_WRITE not set: nothing written")
+def test_values_changed_together_and_what_was_refused(page):
+    """(0.11.4) Three values made for the test are chosen in Categories (their boxes ticked): put in a subcategory
+    made for the test, then each linked to a fourth value with one description; the three links described together
+    from the fourth value's links; a value refused shows in To review's fold "Refused earlier" and is proposed
+    again from there. Everything made goes again with the test's subcategory."""
+    stamp = str(int(time.time()))[-6:]
+    sub, names = f"uitest {stamp}", [f"uitest-{stamp}-{k}" for k in ("a", "b", "c", "target")]
+    _open(page, "/supagent/dictionary/#categories")
+    page.wait_for_selector("#sub-categories:not([hidden])", timeout=WAIT)
+    call = "([api, m, p, b]) => window.supagent[api](m, p, b)"
+    made = page.evaluate(call, ["admin", "POST", "facets/categories", {"name": sub, "inside": "component"}])
+    assert not made.get("error"), made
+    ids = []
+    try:
+        for n in names:
+            r = page.evaluate(call, ["admin", "POST", "facets", {"facet": "component", "value": n}])
+            assert not r.get("error"), r
+            ids.append(r["id"])
+        page.fill("#fac-q", f"uitest-{stamp}-")                  # (the bar reads the new subcategory when it opens)
+        page.wait_for_function(f"document.querySelectorAll('#facets .fac-pick').length === 4", timeout=WAIT)
+        for n in names[:3]:
+            page.locator("#facets tr", has_text=n).locator(".fac-pick").check()
+        bar = page.locator("#fac-sel")
+        assert bar.is_visible() and "3 values chosen" in bar.inner_text()
+        page.select_option("#fac-sel select[aria-label='The category to put them in']", sub)
+        bar.locator("button", has_text="Put the 3 values there").click()
+        page.wait_for_function("(document.querySelector('#fac-sel .result') || {}).textContent && "
+                               "/Put 3 values in/.test(document.querySelector('#fac-sel .result').textContent)", timeout=WAIT)
+        page.wait_for_function("([sub, names]) => names.every(n => [...document.querySelectorAll('#facets tr')]"
+                               ".some(tr => tr.textContent.includes(n) && tr.textContent.includes(sub)))",
+                               arg=[sub, names[:3]], timeout=WAIT)        # the list read again: in the subcategory
+        for n in names[:3]:                                      # (the choice kept: the values still shown)
+            assert page.locator("#facets tr", has_text=n).locator(".fac-pick").is_checked()
+        pick = bar.locator(".pick-input")
+        pick.fill(names[3])
+        page.locator(".pick-opt", has_text=names[3]).first.click()
+        bar.locator("input[aria-label='What the link is']").fill("is watched by")
+        bar.locator("button", has_text="Link the 3 values").click()
+        page.locator(".pop-confirm button", has_text="Add the links").click()
+        page.wait_for_function("/Added 3 links/.test((document.querySelector('#fac-sel .result') || {}).textContent || '')",
+                               timeout=WAIT)
+        bar.locator("button", has_text="Clear the choice").click()
+        assert page.locator("#fac-sel").is_hidden()
+        row = page.locator("#facets tr", has_text=names[3])
+        row.locator("button", has_text="Links…").click()
+        box = row.locator(".links-box")
+        box.locator(".link-item").nth(2).wait_for(timeout=WAIT)
+        box.locator(".links-all input").check()
+        assert "3 links chosen" in box.locator(".links-bulk").inner_text()
+        box.locator(".links-bulk textarea").fill("check that the target still scrapes it")
+        box.locator(".links-bulk button", has_text="Write on the 3 links").click()
+        page.wait_for_function("[...document.querySelectorAll('.link-work')].filter(e => e.textContent.includes("
+                               "'still scrapes it')).length === 3", timeout=WAIT)
+        r = page.evaluate(call, ["admin", "POST", f"facets/{ids[2]}", {"status": "rejected"}])
+        assert r.get("status") == "rejected", r
+        _open(page, "/supagent/dictionary/#review")
+        page.wait_for_selector("#tab-review:not([hidden])", timeout=WAIT)
+        fold = page.locator("details.refused-fold")
+        fold.wait_for(timeout=WAIT)
+        assert fold.get_attribute("open") is None                # folded: out of the way
+        fold.locator("summary").click()
+        card = fold.locator(".rcard", has_text=names[2])
+        card.wait_for(timeout=WAIT)
+        card.locator("button", has_text="Propose again").click()
+        card.locator(".rdone", has_text="proposed again").wait_for(timeout=WAIT)
+        _no_errors(page)
+    finally:
+        for i in ids:                                            # every test value (a refused one too) in the
+            page.evaluate(call, ["admin", "POST", f"facets/{i}", {"status": "proposed"}])   # test's subcategory,
+        if ids:
+            page.evaluate(call, ["dict", "POST", "map", {"move_values": {"ids": ids, "facet": sub}}])
+        page.evaluate(call, ["admin", "POST", "facets/categories", {"name": sub, "remove": True}])   # then gone
