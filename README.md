@@ -110,7 +110,7 @@ Content-Security-Policy (Talisman nonces).
 ```bash
 # the Python of Superset's virtualenv
 PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-$PY -m pip install supagent-0.11.5-py3-none-any.whl         # Superset 6.1: nothing else to install
+$PY -m pip install supagent-0.11.6-py3-none-any.whl         # Superset 6.1: nothing else to install
 ```
 
 One line in `superset_config.py` registers it. It holds no logic:
@@ -152,6 +152,16 @@ row level security filters and dashboards keep them), the AI roles' users moved 
 then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with the knowledge written) and Viewer
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
+## Upgrade from 0.11.5 to 0.11.6
+
+pip install the wheel on every host and restart (tables unchanged, v20). A big Confluence wiki gets *How the wiki
+spaces connect*, and the two overviews read it through its space pages (current values, a section on the spaces); the
+next build writes these three pages. Measured: on the 6,006-page generated wiki kept out of the tuning, 5 builds: the
+links page 19-20 of the 20 main links between the spaces, none made up; How the system works never an older value as
+current (0.11.4: 9 of 9 runs), the 5 spaces named, 13.8 of the other documents' 24 names on average (0.11.4: 9.4);
+released by the owner's decision (the gate's one miss was its scorer reading "the 2024 pages" as a count); browser
+tests 26 passed; unit tests 2,377.
 
 ## Upgrade from 0.11.4 to 0.11.5
 

@@ -718,24 +718,30 @@ def _flat(content: str, pages: list[dict[str, Any]], chars: int, central: Any) -
 SPACE_SUBJECTS = 40         # (0.11.5) the subjects of a space named to its page at most (the biggest branches first)
 
 
-def _subject_names(pages: list[dict[str, Any]]) -> list[str]:
-    """(0.11.5) The subjects of a wiki space as its tree says them: the title of each branch's own page (_branches),
-    the biggest branches first."""
-    out: list[str] = []
+def _subjects(pages: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+    """(0.11.6) The subjects of a wiki space as its tree says them, each with its pages: the title of each branch's
+    own page (_branches), the biggest branches first (two branches of one title: one subject)."""
+    out: dict[str, list[dict[str, Any]]] = {}
     for place, mine in _branches(_top_first(pages)):
         if not place:
             continue
         own = next((p for p in mine if _place(p) == place[1:]), None)
         title = " ".join(str((own or {}).get("title") or "").split())
-        if title and title not in out:
-            out.append(title)
-    return out
+        if title:
+            out.setdefault(title, []).extend(mine)
+    return list(out.items())
 
 
-def _space_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
-    """(0.11.5) A summary page for each big space of a wiki read since 0.11.4 (its pages say their parents;
-    SPACE_MIN_PAGES pages or more; the biggest first, SPACE_PAGES_MAX at most): its subjects in turns, each page
-    dated, its latest changes first (_digest by branch): what the overviews no longer hold of such a wiki."""
+def _subject_names(pages: list[dict[str, Any]]) -> list[str]:
+    """(0.11.5) The subjects of a wiki space as its tree says them: the title of each branch's own page (_branches),
+    the biggest branches first."""
+    return [title for title, _mine in _subjects(pages)]
+
+
+def _big_spaces(ev: dict[str, Any]) -> list[dict[str, Any]]:
+    """(0.11.5) The big spaces of the wikis read since 0.11.5 (their pages say their parents; SPACE_MIN_PAGES pages or
+    more; the biggest first, SPACE_PAGES_MAX at most): [{"space": its key, "name": its home page's title, "doc": its
+    document, "pages": its pages}]."""
     found = []
     for d in ev["docs"]:
         mine: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -743,18 +749,193 @@ def _space_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
             if p.get("space") and isinstance(p.get("ancestors"), list):
                 mine[str(p["space"])].append(p)
         found += [(len(v), str(k), d, v) for k, v in mine.items() if len(v) >= SPACE_MIN_PAGES]
-    specs = []
+    out = []
     for _n, space, d, pages in sorted(found, key=lambda x: (-x[0], x[1]))[:SPACE_PAGES_MAX]:
         home = next((p for p in pages if not p.get("ancestors")), None)      # the space's home: no parent
-        name = str(home.get("title") or space) if home else space
+        out.append({"space": space, "name": str(home.get("title") or space) if home else space, "doc": d,
+                    "pages": pages})
+    return out
+
+
+def _space_specs(ev: dict[str, Any], spaces: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """(0.11.5) A summary page for each big space of a wiki (_big_spaces): its subjects in turns, each page dated, its
+    latest changes first (_digest by branch): what the overviews no longer hold of such a wiki."""
+    specs = []
+    for s in _big_spaces(ev) if spaces is None else spaces:
+        d, space, pages = s["doc"], s["space"], s["pages"]
         subjects = _subject_names(pages)[:SPACE_SUBJECTS]
-        specs.append({"section": "functional", "slug": f"space-{slugify(space)}", "title": f"Wiki space {name}",
+        specs.append({"section": "functional", "slug": f"space-{slugify(space)}", "title": f"Wiki space {s['name']}",
                       "database_ids": [], "diagram": [], "guard": {"subjects": subjects},
                       "brief": SPACE_BRIEF + (f" Its subjects (a row each): {', '.join(subjects)}." if subjects else ""),
                       "evidence": [{"ref": f"doc:{d['id']}", "title": f"{d['title']}: space {space}",
                                     "text": _digest({"content": d.get("content") or "", "pages": pages}, DOCS_CHARS,
                                                     by_branch=True)}]})
     return specs
+
+
+LINKS_SLUG = "spaces-links"    # (0.11.6) the page of the links between the big spaces' subjects (no space's slug:
+LINKS_TITLE = "How the wiki spaces connect"     # "space-<key>"; no wiki's facts page: "wiki-<title>")
+LINKS_MIN_PAGES = 2        # (0.11.6) pages of a subject that must name another for a link between them
+LINKS_GIVEN = 40           #   links given to the links page at most (across spaces first, the most named first)
+LINKS_ROWS = 20            #   the first ones across spaces: a row each on the page (asked again once when one is left out)
+LINK_EXAMPLE = 240         #   characters of a link's example sentence
+LINKS_BRIEF = ("Explain how the spaces of the wiki connect, for a newcomer: which subjects of a space the pages of "
+               "another space name, and what for, as their example sentences say (## Between the spaces: one table, "
+               "a row per pair of spaces the links join (the two spaces, the subjects that join them, what for); "
+               "## Main links: one table, a row per link between the spaces, in the order given (subject, its space, "
+               "the subject its pages name, its space, what for in a few words); ## Inside the spaces: the main links "
+               "between the subjects of one space, in a few sentences). Write only the links given: a link the "
+               "evidence does not give is never written; and no sentence about the evidence or its list itself.")
+#             (0.11.6: no number in it: "the first 20 links provided in the evidence" was written on the page)
+LINKS_NOTE = ("Which subjects' pages name which (between the spaces first, the most named first; read each line as: the "
+              "pages of the subject on the left name the subject on the right).")
+
+
+def _lead_of(content: str, p: dict[str, Any], chars: int = DIGEST_LEAD) -> str:
+    """(0.11.6) A page's first lines after its title, on one line."""
+    block = content[p["at"]:p["at"] + min(p["chars"], 600 + 8 * chars)]
+    first, _, body = block.partition("\n")
+    return " ".join((body if first.startswith("# ") else block).split())[:chars]
+
+
+def _naming(text: str, name: str) -> str:
+    """(0.11.6) The first sentence of a page's text that names `name`, on one line (a list's or a heading's mark left
+    out), LINK_EXAMPLE characters at most."""
+    said = re.compile(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])")
+    for line in text.splitlines():
+        if said.search(line):
+            for sentence in re.split(r"(?<=[.!?])\s+", line.strip()):
+                if said.search(sentence):
+                    return clip(re.sub(r"^\s*(?:#{1,6}\s+|[-*+>]\s+|\d+[.)]\s+)", "", sentence), LINK_EXAMPLE)
+    return ""
+
+
+def subject_links(spaces: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """(0.11.6) What the pages of the big spaces' subjects say of each other, without the LLM: for a subject A and
+    another subject B (of any big space), the pages of A's tree that name B (its title as the tree says it, a whole
+    word, its case kept), LINKS_MIN_PAGES at least, with the sentence of the latest of them that names B (one that
+    says it describes the past only when no other does). Across spaces first, then the most named first:
+    [{"a", "a_space", "b", "b_space", "pages", "page", "example", "doc"}]."""
+    subjects = [(name, s, mine) for s in spaces for name, mine in _subjects(s["pages"])]
+    names = sorted({name for name, _s, _mine in subjects}, key=len, reverse=True)
+    if len(names) < 2:
+        return []
+    said = re.compile(r"(?<![\w-])(" + "|".join(re.escape(n) for n in names) + r")(?![\w-])")
+    where: dict[str, dict[str, Any]] = {}
+    for name, s, _mine in subjects:
+        where.setdefault(name, s)
+    found: dict[tuple[str, str], list[tuple[dict[str, Any], str]]] = defaultdict(list)
+    for name, s, mine in subjects:
+        content = s["doc"].get("content") or ""
+        for p in mine:
+            if isinstance(p.get("at"), int) and isinstance(p.get("chars"), int):
+                for other in set(said.findall(content[p["at"]:p["at"] + p["chars"]])) - {name}:
+                    found[(name, other)].append((p, content))
+
+    def latest(x: tuple[dict[str, Any], str]) -> tuple[bool, str]:
+        p, content = x
+        past = STALE_TITLE.search(str(p.get("title") or "")) or STALE_LEAD.search(_lead_of(content, p))
+        return not past, str(p.get("modified") or "")
+
+    links = []
+    for (a, b), pages in found.items():
+        if len(pages) < LINKS_MIN_PAGES:
+            continue
+        p, content = max(pages, key=latest)
+        links.append({"a": a, "a_space": where[a]["name"], "b": b, "b_space": where[b]["name"], "pages": len(pages),
+                      "page": str(p.get("title") or ""), "doc": where[a]["doc"]["id"],
+                      "example": _naming(content[p["at"]:p["at"] + p["chars"]], b)})
+    links.sort(key=lambda x: (x["a_space"] == x["b_space"], -x["pages"], x["a"].lower(), x["b"].lower()))
+    return links
+
+
+def _links_spec(spaces: list[dict[str, Any]], links: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """(0.11.6) The page of how the big spaces connect (two big spaces or more, linked): each space's subjects with
+    their own page's first lines, then the links (subject_links: across spaces first, LINKS_GIVEN at most), each with
+    its example sentence; the first LINKS_ROWS across spaces a row each (its guard), the links drawn."""
+    across = [x for x in links if x["a_space"] != x["b_space"]]
+    if len(spaces) < 2 or not across:
+        return None
+    given, rows = links[:LINKS_GIVEN], across[:LINKS_ROWS]
+    evidence = []
+    for s in spaces:
+        content = s["doc"].get("content") or ""
+        lines = []
+        for name, mine in _subjects(s["pages"])[:SPACE_SUBJECTS]:
+            own = min((p for p in mine if " ".join(str(p.get("title") or "").split()) == name
+                       and isinstance(p.get("at"), int) and isinstance(p.get("chars"), int)),
+                      key=lambda p: len(p.get("ancestors") or []), default=None)
+            lines.append(f"{name}: {_lead_of(content, own)}" if own else name)
+        evidence.append({"ref": f"doc:{s['doc']['id']}", "title": f"the subjects of the wiki space {s['name']}",
+                         "subjects": lines})
+    for doc_id in dict.fromkeys(x["doc"] for x in given):
+        evidence.append({"ref": f"doc:{doc_id}", "title": "the links: the subjects whose pages name another subject (the "
+                                                          "ones across spaces first, the most named first)",
+                         "links": [f"{x['a']} ({x['a_space']}) -> {x['b']} ({x['b_space']}): \"{x['example']}\" "
+                                   f"(page \"{x['page']}\")" for x in given if x["doc"] == doc_id]})
+    return {"section": "functional", "slug": LINKS_SLUG, "title": LINKS_TITLE, "database_ids": [],
+            "brief": LINKS_BRIEF, "evidence": evidence,
+            "guard": {"pairs": [(x["a"], x["b"]) for x in rows], "missing": "these links",
+                      "ask": f"a row for each of the first {len(rows)} links given"},
+            "diagram": [{"a": x["a"], "b": x["b"], "verb": "names"} for x in given], "diagram_note": LINKS_NOTE}
+
+
+# (0.11.6) the overviews read a big wiki through its spaces' own pages and their links' page, once they are written
+WIKI_OVERVIEW = ("; ## The wiki's spaces: a short paragraph per space of the big wiki given by its spaces' own pages "
+                 "(what it documents, its main subjects with what holds now, how it connects to the other spaces; its "
+                 "page named: \"Wiki space ...\")")         # (0.11.6) in the overview's list of sections (asked
+WIKI_OVERVIEW_BEFORE = "; ## Processes and chains"     # after it, the LLM wrote no such section), before this one
+WIKI_TECHNICAL = (" A big wiki is given by its spaces' own pages: its hosts, versions and services as those pages give "
+                  "them now.")
+
+
+def _pages_text(pages: list[ContextPage], chars: int) -> str:
+    """(0.11.6) Context pages as another page reads them: each its title, then its text without its diagram, its code
+    and its citations (numbers of its own sources), whole lines in an equal share of `chars`."""
+    room = chars // max(1, len(pages))
+    out = []
+    for p in pages:
+        text = CITATION.sub("", re.sub(r"```.*?```", "", re.split(r"\n## Relations diagram\b", p.content or "")[0],
+                                       flags=re.S))
+        lines, used = [f"# {p.title}"], len(p.title or "") + 3
+        for line in (x for x in text.splitlines() if x.strip()):
+            if used + len(line) + 1 > room:
+                break
+            lines.append(line)
+            used += len(line) + 1
+        out.append("\n".join(lines))
+    return "\n\n".join(out)
+
+
+def _late(spec: dict[str, Any]) -> dict[str, Any]:
+    """(0.11.6) An overview reads a big wiki through its spaces' own pages as they are now (a person's version too),
+    their links' page first, in the place and the room of the wiki's digest, once every space of the wiki has its
+    page (written earlier in the same build: they come first), its brief told so; else as up to 0.11.5."""
+    late = spec.get("late") or {}
+    slugs = sorted({s for info in late.get("docs", {}).values() for s in info["slugs"]} |
+                   ({late["links"]} if late.get("links") else set()))
+    if not slugs:
+        return spec
+    have = {p.slug: p for p in db.session.query(ContextPage).filter(ContextPage.section == "functional",
+                                                                    ContextPage.slug.in_(slugs))
+            if p.kind != REJECTED and (p.content or "").strip()}
+    evidence, used = [], False
+    for item in spec["evidence"]:
+        ref = str(item.get("ref") or "")
+        info = late["docs"].get(ref[len("doc:"):]) if ref.startswith("doc:") else None
+        if info and all(s in have for s in info["slugs"]):
+            pages = ([have[late["links"]]] if not used and late.get("links") in have else []) + \
+                [have[s] for s in info["slugs"]]
+            item = {"ref": ref, "title": f"{item.get('title')}: its spaces, as their own pages say",
+                    "text": _pages_text(pages, info["chars"])}
+            used = True
+        evidence.append(item)
+    if not used:
+        return spec
+    brief, before = spec["brief"], late.get("before")
+    k = brief.find(before) if before else -1             # (an overview: a section of its own, in its list of sections)
+    return {**spec, "evidence": evidence,
+            "brief": brief[:k] + late["brief"] + brief[k:] if k >= 0 else brief + late["brief"]}
 
 
 def _numbered(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -833,7 +1014,18 @@ def summary_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
          "evidence": databases + inventory + relations + stated + docs,
          "diagram": [r for r in pool if r["verb"] in INFRA_VERBS]},
     ]
-    specs += _space_specs(ev)                         # (0.11.5) a big wiki's spaces, after the overviews
+    spaces = _big_spaces(ev)                          # (0.11.5) a big wiki's spaces: a page each; (0.11.6) written
+    first = _space_specs(ev, spaces)                  # before the overviews, with the page of how they connect, which
+    links = _links_spec(spaces, subject_links(spaces)) if len(spaces) > 1 else None    # the overviews then read
+    covered: dict[str, dict[str, Any]] = {}
+    for s, spec in zip(spaces, first):
+        covered.setdefault(str(s["doc"]["id"]), {"slugs": [], "chars": shares.get(s["doc"]["id"], DOCS_CHARS)})[
+            "slugs"].append(spec["slug"])
+    if covered:                                       # (in place of the wiki's digest, when written: _late)
+        for spec, brief, before in zip(specs, (WIKI_OVERVIEW, WIKI_TECHNICAL), (WIKI_OVERVIEW_BEFORE, None)):
+            spec["late"] = {"docs": covered, "links": links["slug"] if links else None, "brief": brief,
+                            "before": before}
+    specs = first + ([links] if links else []) + specs
     for app in _apps(ev):
         ev_app = []
         for d in ev["docs"]:
@@ -1125,8 +1317,9 @@ def _prompt(spec: dict[str, Any]) -> str:
 
 
 HOST_LIKE = re.compile(r"(?<![\w.-])[a-z][a-z0-9]*(?:-[a-z0-9]+)*-\d+[a-z]?(?![\w-])")   # (0.11.5) srv-web-01
-GUARD_ASK = ("Your page {what}. Write the whole page again with the same rules: a row for each subject of the space, "
+GUARD_ASK = ("Your page {what}. Write the whole page again with the same rules: {ask}, "
              "and none of those names (write \"not known yet\" where the evidence does not say).")
+#             (0.11.6: {ask}: the page's guard says it; a wiki space's: "a row for each subject of the space")
 
 
 def unknown_names(page: str, evidence: Any, spec: dict[str, Any] | None = None, hosts: bool = False) -> list[str]:
@@ -1164,16 +1357,22 @@ def guesses(page: str, evidence: Any, spec: dict[str, Any] | None = None) -> lis
 
 def _faults(text: str, prompt_items: Any, spec: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
     """(0.11.5) What a wiki space's page must be written again for: (the subjects of the space it leaves out, the
-    names its evidence never gives, bare host names too, the words it guesses with where its pages do not say)."""
-    missing = [n for n in (spec.get("guard") or {}).get("subjects") or []
-               if not re.search(r"(?<![\w-])" + re.escape(n) + r"(?![\w-])", text, re.I)]
+    names its evidence never gives, bare host names too, the words it guesses with where its pages do not say).
+    (0.11.6) The links' page: the links it leaves out (no line names both of their subjects)."""
+    guard = spec.get("guard") or {}
+    named = lambda n, t: re.search(r"(?<![\w-])" + re.escape(n) + r"(?![\w-])", t, re.I)  # noqa: E731
+    missing = [n for n in guard.get("subjects") or [] if not named(n, text)]
+    lines = text.splitlines()
+    missing += [f"{a} -> {b}" for a, b in guard.get("pairs") or []
+                if not any(named(a, line) and named(b, line) for line in lines)]
     return missing, unknown_names(text, prompt_items, spec, hosts=True), guesses(text, prompt_items, spec)
 
 
 def _guard(text: str, prompt_items: Any, spec: dict[str, Any]) -> str:
     """(0.11.5) _faults said to the LLM; "" when nothing."""
     missing, unknown, guessed = _faults(text, prompt_items, spec)
-    what = ([f"leaves out these subjects of the space: {', '.join(missing[:20])}"] if missing else []) + \
+    left = (spec.get("guard") or {}).get("missing") or "these subjects of the space"
+    what = ([f"leaves out {left}: {', '.join(missing[:20])}"] if missing else []) + \
         ([f"names these that the evidence never gives: {', '.join(unknown[:20])}"] if unknown else []) + \
         ([f"guesses from what is usual where the pages do not say ({', '.join(guessed[:10])}): write what the pages "
           f"say, or that they disagree, each statement with its day"] if guessed else [])
@@ -1249,7 +1448,9 @@ def write_summary(spec: dict[str, Any], llm: Any) -> dict[str, Any]:
         corrected = _guard(text, prompt_items, spec)
         if corrected:
             msg = llm.chat(messages[:2] + [{"role": "assistant", "content": text},
-                                           {"role": "user", "content": GUARD_ASK.format(what=corrected)}],
+                                           {"role": "user", "content": GUARD_ASK.format(
+                                               what=corrected, ask=spec["guard"].get("ask") or
+                                               "a row for each subject of the space")}],
                            max_tokens=room)
             usage = getattr(llm, "last_usage", None) or {}
             tokens += int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
@@ -1271,8 +1472,9 @@ def write_summary(spec: dict[str, Any], llm: Any) -> dict[str, Any]:
         text += "\n\n" + CUT_NOTE
     block = diagram_block(spec.get("diagram") or [])
     if text and block:                            # (0.11.0) the relations the documents state, drawn by the page
-        text += ("\n\n## Relations diagram\n\nWhat the documents and the code state about the parts (the most stated "
-                 "first; read each line as the part on the left, what it does, the part on the right).\n\n" + block)
+        text += ("\n\n## Relations diagram\n\n" + (spec.get("diagram_note") or   # (0.11.6: the links' page its own)
+                 "What the documents and the code state about the parts (the most stated first; read each line as the "
+                 "part on the left, what it does, the part on the right).") + "\n\n" + block)
     if corrected:
         checks = [f"written again once: it {corrected}"[:500]] + \
             ([f"still there after that, left out: {'; '.join(clip(s, 80) for s in left_out[:5])}"[:500]]
@@ -1666,6 +1868,8 @@ def build_context(reason: str = "manual", llm: bool = True, force: bool = False)
                 client = None
                 for spec in specs:
                     check()
+                    if spec.get("late"):                      # (0.11.6) an overview: a big wiki through its spaces'
+                        spec = _late(spec)                    # pages, written just before
                     h = _hash([_prompt(spec), spec["title"], spec["brief"], spec["evidence"]])
                     p = (db.session.query(ContextPage).filter(ContextPage.section == spec["section"],
                                                               ContextPage.slug == spec["slug"]).one_or_none())

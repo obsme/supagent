@@ -1,5 +1,33 @@
 # Changes
 
+## 0.11.6 — 2026-10-21
+
+**How the wiki spaces connect.** With two big wiki spaces or more, a new Context page, *How the wiki spaces connect*,
+shows which subjects of one space the pages of another name, and what for. The links are counted from the pages
+themselves, without the LLM: a subject's pages that name another subject (two pages at least), each link with the
+sentence of the latest page that says it. The page has a table of the links between the spaces (a row for each of the
+main ones: it is asked again once when one is left out, as a space page is for a subject) and draws them.
+
+**How the system works from the space pages.** The space pages and that page are written first in a build, then the
+two overviews. *How the system works* and *Technical overview* now read a big wiki through its spaces' own pages as
+they are at that moment (a person's corrected version of a space page counts) and how they connect, in the place and
+the room of the wiki's own pages; *How the system works* gets a section on the wiki's spaces. So the overviews give the
+current values the space pages give, no longer the old ones of the wiki's most linked pages. A wiki without such
+spaces, and any other document, is read exactly as before (those pages are not written again).
+
+Measured on the generated Confluence wiki of 6,006 pages (28 subjects in 5 spaces, 12 facts changed by newer pages),
+on the copy of it kept out of the tuning, in 5 builds: the links page gave 19 or 20 of the 20 main links between the
+spaces each time and never a link the pages do not state, and its diagram drew only real links; How the system works
+never gave an older value as the current one (0.11.4 did in each of 9 runs), named the 5 spaces each time, and named
+on average 13.8 of the other documents' 24 names (0.11.4: 9.4); the Technical overview never gave an older value as
+current either. The registered gate was not met as scored only because its scorer read "the 2024 pages" (the pages of
+2024) on a space page as a count of pages; 0.11.6 was released by the owner's decision. Browser tests: 26 passed on
+the lab's Superset 6.1; unit tests: 2,377.
+
+Upgrade from 0.11.5: pip install the wheel on every host and restart the web servers (the workers and beat as usual);
+nothing to run (tables unchanged, v20). With a big wiki read since 0.11.5, the next build writes the links page and the
+two overviews again (three more LLM calls). INSTALL.txt, *From 0.11.5 to 0.11.6*.
+
 ## 0.11.5 — 2026-10-21
 
 **A page per big wiki space.** A Confluence wiki of thousands of pages on many subjects is now summarized space by
