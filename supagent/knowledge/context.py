@@ -53,6 +53,30 @@ DOCS_CHARS = 30000         # (0.10.12) of all the documents of a summary page: a
 DIGEST_LEAD = 160          #   central pages (the most linked to) with their first lines (0.10.12.1: ~100 of them; a
                            #   share by number of pages, not the same for every document)
 DIGEST_DOCS = 6            # documents in a summary page's evidence (the ones with the most pages first)
+DATED_HEAD = " and the day it was last changed"     # (0.11.5) a digest whose pages say their day (the writer's
+#                                                     RECENCY rule given with it)
+SPACE_MIN_PAGES = 200      # (0.11.5) a wiki space this big (read since 0.11.4: its pages say their parents) has a summary
+SPACE_PAGES_MAX = 6        #   page of its own, its subjects in turns (the biggest spaces first, so many at most)
+SPACE_BRIEF = ("Explain what this wiki space documents, for a newcomer (## Subjects: one table, a row per subject of "
+               "the space: subject, what it is, what holds now (its owner, hosts, versions, schedules, as the most "
+               "recent pages say; where a page's own text says since when something holds, what that replaced and "
+               "since when, with that day); ## Where to read more: its main pages, by their titles).")
+#                            (0.11.5: no dated list of changes: it gave routine page updates wrong years)
+DIGEST_BRANCH = 3          # (0.11.4) pages a branch of a document's tree needs to be a subject of its digest (fewer:
+#                            with its other pages)
+STALE_TITLE = re.compile(r"\b(?:archived|deprecated|obsolete|outdated)\b", re.I)    # (0.11.4) a page that says (0.11.5:
+#                                                                        not "legacy": a legacy system is still there)
+STALE_LEAD = re.compile(r"^\W*(?:archived|deprecated|obsolete|outdated)\b|\b(?:this|the)\s+(?:page|document|article|"
+                        r"content)\s+(?:is|was|has\s+been)\s+(?:now\s+)?(?:archived|deprecated|obsolete|outdated|"
+                        r"superseded|no\s+longer\s+(?:maintained|valid|accurate|up\s+to\s+date))|\bsuperseded\s+by\b",
+                        re.I)      # it describes the past (its title, or a banner in its first lines)
+MONTHS = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|"
+          r"oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?")                   # (a month's name, not "decision")
+CHANGE_LEAD = re.compile(        # (0.11.4) first lines that say since when something holds: "since 12 March 2026",
+    r"\b(?:since|as\s+of|from|starting|effective)\s+(?:(?:the\s+)?\d{1,2}(?:st|nd|rd|th)?\s+" + MONTHS + r"\s+\d{4}|"
+    + MONTHS + r"\s+\d{1,2},?\s+\d{4}|" + MONTHS + r"\s+\d{4}|(?:199\d|20[0-3]\d)(?:-\d{2}){0,2})\b|"   # "as of
+    r"\bfrom\s+now\s+on\b", re.I)  # 2026-03" (a year: not "from 8443 to 8080"), "from now on" (a change's verbs alone,
+#                                  "no longer", "upgraded": in release notes and meeting notes as often: not said apart)
 PART_RELATIONS = 80        # (0.10.12) the relations the documents and the code state (calls, uses, runs on...) given
 RELATIONS_POOL = 600       #   to the summaries, the most stated first; an application's page: its own, from the pool
 RELATION_VERBS = {"calls": "calls", "sends_to": "sends data to", "reads_from": "reads from", "uses": "uses",
@@ -103,6 +127,14 @@ Name each part as the evidence names it, the same way every time. Cite the evide
 paragraphs, bullet lists, and a Markdown table where several things are compared on the same points (one row
 each) instead of a list repeated per group; no HTML, no code fences unless quoting a query. Write in the language
 of most of the evidence. The page: {title}. {brief}"""
+# (0.11.5) given only to a page whose evidence says the day its pages were last changed (the prompt is part of a page's
+# hash: a page without such evidence is not written again for it)
+RECENCY = """Where two sources disagree (an owner, a host, a version, a port, a schedule...) and the evidence gives the
+day each was last changed, follow the most recent one, say what it replaced and since when, and never give the older
+statement as the current one; a page that says it is archived or superseded describes the past. Never guess from
+what is usual or likely: where the most recent page does not settle it, say that the pages disagree and give each
+statement with its day; and do not write these rules on the page. """
+#                     (0.11.5: "never guess": a page reasoned "given typical feature store patterns, we assume ...")
 DIAGRAM_EDGES = 30         # (0.11.0) relations drawn on a summary page's diagram at most (the most stated first)
 DIAGRAM_HEAD = "diagram: relations"     # the first line of the block the pages draw (dictionary.js: S.diagrams)
 
@@ -487,12 +519,87 @@ def _shares(chosen: list[dict[str, Any]]) -> dict[int, int]:
     return out
 
 
-def _digest(d: dict[str, Any], chars: int) -> str:
+def _place(p: dict[str, Any]) -> tuple[str, ...] | None:
+    """(0.11.4) A page's place in its document's tree, from the top: a wiki page its parents and itself (Confluence's
+    ancestors, kept since 0.11.4: a wiki read before has none until its next reading), a repository's file its folders
+    and itself, a site's page the folders of its address and itself; None: not known."""
+    if p.get("id"):
+        parents = p.get("ancestors")
+        return tuple(str(x) for x in parents) + (str(p["id"]),) if isinstance(parents, list) else None
+    if p.get("path"):
+        return tuple(x for x in str(p["path"]).split("/") if x) or None
+    from urllib.parse import urlparse
+
+    return tuple(x for x in urlparse(str(p.get("url") or "")).path.split("/") if x) or None
+
+
+def _top_first(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """(0.11.5) A wiki page's parents from the top, whatever the order its source gives them: the parents that are
+    pages of the document say their depth (how many parents they have); a list that goes from the page up is turned
+    round (a copy: the document's pages are not changed)."""
+    depth = {str(p["id"]): len(p["ancestors"]) for p in pages if p.get("id") and isinstance(p.get("ancestors"), list)}
+    out = []
+    for p in pages:
+        parents = p.get("ancestors")
+        if isinstance(parents, list) and len(parents) > 1:
+            known = [depth[str(x)] for x in parents if str(x) in depth]
+            if len(known) > 1 and known[0] > known[-1]:
+                p = {**p, "ancestors": list(reversed(parents))}
+        out.append(p)
+    return out
+
+
+def _branches(pages: list[dict[str, Any]]) -> list[tuple[tuple[str, ...] | None, list[dict[str, Any]]]]:
+    """(0.11.4) A document's pages as its subjects: in each space, the branches where its tree first splits into
+    several of DIGEST_BRANCH pages or more (a wiki's page trees under its space's home, a repository's or a site's
+    folders), the biggest first (of one size: in the reading's order). The pages at the top of the tree that are no
+    subject's (a space's home, a repository's README next to its folders): first (key ()); the pages of a smaller
+    branch below them, and the ones whose place is not known: last (key None). [(the branch's place, its pages)]."""
+    spaces: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for p in pages:
+        spaces[str(p.get("space") or "")].append(p)
+    found: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    top: list[dict[str, Any]] = []
+    rest: list[dict[str, Any]] = []
+    for space, mine in spaces.items():
+        placed = [(p, _place(p)) for p in mine]
+        level = 0
+        while True:                                   # down while one node alone holds pages below it (a space's home,
+            below = Counter(x[level] for _p, x in placed if x and len(x) > level + 1)      # a repository's src/)
+            if sum(1 for c in below.values() if c >= DIGEST_BRANCH) != 1:
+                break
+            level += 1
+        for p, x in placed:
+            if x and len(x) > level:
+                found.setdefault((space,) + x[:level + 1], []).append(p)
+            else:
+                (top if x else rest).append(p)
+    out: list[tuple[tuple[str, ...] | None, list[dict[str, Any]]]] = []
+    for key, mine in sorted(found.items(), key=lambda kv: -len(kv[1])):     # (of one size: in the reading's order)
+        if len(mine) >= DIGEST_BRANCH:
+            out.append((key, mine))
+        else:                                         # a small branch: its own page at the top, the others last
+            for p in mine:
+                (top if len(_place(p) or ()) == len(key) - 1 else rest).append(p)
+    return ([((), top)] if top else []) + out + ([(None, rest)] if rest else [])
+
+
+def _digest(d: dict[str, Any], chars: int, by_branch: bool = False) -> str:
     """(0.10.12) What a summary page reads of a document: a small one, its beginning; one of many pages (a wiki, a
-    repository), its central pages first (the most linked to by its other pages), each with its first lines, up to
-    `chars`: what thousands of pages are about, not their first page."""
+    repository), each with its first lines, up to `chars`: what thousands of pages are about, not their first page.
+    (0.11.4) Each of its subjects (_branches: the branches of its tree, a wiki's page trees, a repository's folders)
+    has its room, in turns, not only the few most linked to (a wiki of many subjects was summarized by the few its
+    other pages link to most): its own page first, then its most linked and its latest pages in turn (the latest that
+    say since when something holds first), a page that says it is archived or superseded last; the pages at the top
+    that are no subject's first (a space's home, a repository's README); each page with the day its source says it
+    was last changed, so that the summary follows the latest where pages disagree. A wiki read before 0.11.4 (no
+    parents yet), a site of one folder: its central pages first (the ones its other pages link to most), as before,
+    dated when known.
+    (0.11.5) By subject (by_branch) only for a wiki space's own summary page (_space_specs); the overviews read every
+    document as up to 0.11.4 (_flat)."""
     content = d.get("content") or ""
-    pages = [p for p in d.get("pages") or [] if isinstance(p.get("at"), int) and isinstance(p.get("chars"), int)]
+    pages = _top_first([p for p in d.get("pages") or []
+                        if isinstance(p.get("at"), int) and isinstance(p.get("chars"), int)])
     if len(content) <= chars or len(pages) < 3:
         return content[:chars]
     key = lambda p: str(p.get("id") or p.get("path") or p.get("title") or p.get("url") or "")  # noqa: E731
@@ -505,13 +612,97 @@ def _digest(d: dict[str, Any], chars: int) -> str:
             target = ids.get(x) or titles.get(x.split(":", 1)[-1].lower())     # a page's id, or "SPACE:Title"
             if target and target != key(p):
                 inbound[target] += 1
+
+    made: dict[int, tuple[str, bool, str, bool]] = {}
+
+    def line(p: dict[str, Any]) -> tuple[str, bool, str, bool]:
+        """The page's line (title, its day when known, its first lines), whether it says it describes the past, its
+        title, whether its first lines say what changed (each page's once: a wiki of 50,000 pages)."""
+        if id(p) not in made:
+            block = content[p["at"]:p["at"] + min(p["chars"], 600 + 8 * DIGEST_LEAD)]     # its first lines only
+            first, _, body = block.partition("\n")
+            title = str(p.get("title") or first.lstrip("# ").strip())
+            lead = " ".join((body if first.startswith("# ") else block).split())[:DIGEST_LEAD]
+            day = p.get("modified")
+            made[id(p)] = (f"- {title}{f' [last changed {day}]' if day else ''}: {lead}\n",   # (0.11.5: said: a
+            #                                    title of a day of its own, "2025-06-18 weekly sync", was mixed with it)
+                           bool(STALE_TITLE.search(title) or STALE_LEAD.search(lead)), title,
+                           bool(CHANGE_LEAD.search(lead)))
+        return made[id(p)]
+
+    central = lambda p: (-inbound[key(p)], str(p.get("path") or "").count("/"),  # noqa: E731
+                         len(str(p.get("title") or "")))
+    read_since = any(p.get("modified") or isinstance(p.get("ancestors"), list) for p in pages)
+    if not by_branch:                                 # (0.11.5) the overviews: as up to 0.11.4, to the byte
+        return _flat(content, pages, chars, central)
+    # (0.11.5) by subject only a wiki whose pages say their parents (read since 0.11.4): a repository or a site keeps
+    # its central pages first, as before
+    branches = _branches(pages) if any(isinstance(p.get("ancestors"), list) for p in pages) else [(None, pages)]
+    subjects = any(place for place, _mine in branches)
+    if not subjects:                                  # no subject (a wiki read before 0.11.4, a flat site): one list
+        branches = [(None, pages)]
+    groups: list[tuple[str, list[str]]] = []          # (its name, its lines in the order they are given room)
+    for place, mine in branches:
+        own = [p for p in mine if place and _place(p) == place[1:]]
+        lines = [line(p) for p in own]
+        rest = sorted((p for p in mine if not any(p is o for o in own)), key=central)
+        latest = sorted((p for p in rest if p.get("modified")),       # the latest: the ones that say since when
+                        key=lambda p: (line(p)[3], str(p["modified"])), reverse=True)    # something holds first (a
+        #                                      dated change: "since 12 March 2026"), then the newest first
+        taken: set[int] = set()
+        ordered = []
+        for i in range(max(len(rest), len(latest))):  # the latest and the most linked in turn (0.11.5: the latest
+            #                                           first: in a small room, a subject's last change before the rest)
+            for p in (latest[i] if i < len(latest) else None, rest[i] if i < len(rest) else None):
+                if p is not None and id(p) not in taken:
+                    taken.add(id(p))
+                    ordered.append(p)
+        if read_since:                                # what says it describes the past: last (0.11.5: a document
+            lines += [line(p) for p in ordered if not line(p)[1]] + [line(p) for p in ordered if line(p)[1]]
+        else:                                         # read before 0.11.4, no day nor parent: its pages as before)
+            lines += [line(p) for p in ordered]
+        name = lines[0][2] if own else ("/".join(place[1:]) if place and not mine[0].get("id") else
+                                        lines[0][2] if place else "Top pages" if place == () else "Other pages")
+        groups.append((name, [x[0] for x in lines]))
+    spaces = sorted({str(p["space"]) for p in pages if p.get("space")})
+    dated = DATED_HEAD if any(p.get("modified") for p in pages) else ""
+    # (0.11.1) no count of its pages, nor of the pages linking to each (the summaries said "the wiki has 5,000 pages")
+    head = (f"Spaces: {', '.join(spaces[:10])}. " if spaces else "") + (
+        f"Its subjects (the branches of its tree), each with its own page first, then its most linked and its latest "
+        f"pages, each page with its first lines{dated}:\n" if subjects else
+        f"Its central pages first (the ones its other pages link to most), each with its first lines{dated}:\n")
+    used, taken_lines = len(head), [0] * len(groups)
+    open_ = list(range(len(groups)))
+    while open_:                                      # in turns: a line of each subject, as long as there is room
+        for g in list(open_):
+            name, lines = groups[g]
+            if taken_lines[g] >= len(lines):
+                open_.remove(g)
+                continue
+            cost = len(lines[taken_lines[g]]) + (len(name) + 2 if subjects and not taken_lines[g] else 0)
+            if used + cost > chars:
+                open_.remove(g)
+                continue
+            used += cost
+            taken_lines[g] += 1
+    out = [head]
+    for (name, lines), n in zip(groups, taken_lines):
+        if n:
+            out += ([f"{name}:\n"] if subjects else []) + lines[:n]
+    return "".join(out)
+
+
+def _flat(content: str, pages: list[dict[str, Any]], chars: int, central: Any) -> str:
+    """(0.11.5) A document as the overviews read it, exactly as up to 0.11.4 (its central pages first, the ones its
+    other pages link to most, each with its first lines): every change of it made a big wiki's subjects or its changes
+    take the overview, the other documents left out (measured, 0.11.5). A big wiki's subjects and what changed are on
+    its spaces' own pages (_space_specs)."""
     spaces = sorted({str(p["space"]) for p in pages if p.get("space")})
     # (0.11.1) no count of its pages, nor of the pages linking to each (the summaries said "the wiki has 5,000 pages")
     head = ((f"Spaces: {', '.join(spaces[:10])}. " if spaces else "") +
             "Its central pages first (the ones its other pages link to most), each with its first lines:\n")
     out, used = [head], len(head)
-    for p in sorted(pages, key=lambda p: (-inbound[key(p)], str(p.get("path") or "").count("/"),
-                                          len(str(p.get("title") or "")))):
+    for p in sorted(pages, key=central):
         block = content[p["at"]:p["at"] + p["chars"]]
         first, _, body = block.partition("\n")
         title = str(p.get("title") or first.lstrip("# ").strip())
@@ -522,6 +713,48 @@ def _digest(d: dict[str, Any], chars: int) -> str:
         out.append(line)
         used += len(line)
     return "".join(out)
+
+
+SPACE_SUBJECTS = 40         # (0.11.5) the subjects of a space named to its page at most (the biggest branches first)
+
+
+def _subject_names(pages: list[dict[str, Any]]) -> list[str]:
+    """(0.11.5) The subjects of a wiki space as its tree says them: the title of each branch's own page (_branches),
+    the biggest branches first."""
+    out: list[str] = []
+    for place, mine in _branches(_top_first(pages)):
+        if not place:
+            continue
+        own = next((p for p in mine if _place(p) == place[1:]), None)
+        title = " ".join(str((own or {}).get("title") or "").split())
+        if title and title not in out:
+            out.append(title)
+    return out
+
+
+def _space_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
+    """(0.11.5) A summary page for each big space of a wiki read since 0.11.4 (its pages say their parents;
+    SPACE_MIN_PAGES pages or more; the biggest first, SPACE_PAGES_MAX at most): its subjects in turns, each page
+    dated, its latest changes first (_digest by branch): what the overviews no longer hold of such a wiki."""
+    found = []
+    for d in ev["docs"]:
+        mine: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for p in d.get("pages") or []:
+            if p.get("space") and isinstance(p.get("ancestors"), list):
+                mine[str(p["space"])].append(p)
+        found += [(len(v), str(k), d, v) for k, v in mine.items() if len(v) >= SPACE_MIN_PAGES]
+    specs = []
+    for _n, space, d, pages in sorted(found, key=lambda x: (-x[0], x[1]))[:SPACE_PAGES_MAX]:
+        home = next((p for p in pages if not p.get("ancestors")), None)      # the space's home: no parent
+        name = str(home.get("title") or space) if home else space
+        subjects = _subject_names(pages)[:SPACE_SUBJECTS]
+        specs.append({"section": "functional", "slug": f"space-{slugify(space)}", "title": f"Wiki space {name}",
+                      "database_ids": [], "diagram": [], "guard": {"subjects": subjects},
+                      "brief": SPACE_BRIEF + (f" Its subjects (a row each): {', '.join(subjects)}." if subjects else ""),
+                      "evidence": [{"ref": f"doc:{d['id']}", "title": f"{d['title']}: space {space}",
+                                    "text": _digest({"content": d.get("content") or "", "pages": pages}, DOCS_CHARS,
+                                                    by_branch=True)}]})
+    return specs
 
 
 def _numbered(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -600,6 +833,7 @@ def summary_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
          "evidence": databases + inventory + relations + stated + docs,
          "diagram": [r for r in pool if r["verb"] in INFRA_VERBS]},
     ]
+    specs += _space_specs(ev)                         # (0.11.5) a big wiki's spaces, after the overviews
     for app in _apps(ev):
         ev_app = []
         for d in ev["docs"]:
@@ -864,13 +1098,7 @@ def check_page(text: str, evidence: list[dict[str, Any]], spec: dict[str, Any] |
     if dropped:
         notes.append(f"not known yet: {dropped} points left out")
         page = "\n".join(kept)
-    said = json.dumps(evidence, ensure_ascii=False, default=str).lower() + " " + \
-        " ".join(str((spec or {}).get(k) or "") for k in ("title", "brief")).lower()
-    folded = re.sub(r"[_\-\s]+", " ", said)
-    unknown = []
-    for name in re.findall(r"`([^`\s]{3,60})`", page):
-        if name.lower() not in said and part_key(name) not in folded and name not in unknown:
-            unknown.append(name)
+    unknown = unknown_names(page, evidence, spec)
     if unknown:
         notes.append("names not in the evidence: " + ", ".join(f"`{x}`" for x in unknown[:10]))
     spelled: dict[str, dict[str, str]] = defaultdict(dict)          # one part, one name (case aside)
@@ -887,13 +1115,117 @@ def check_page(text: str, evidence: list[dict[str, Any]], spec: dict[str, Any] |
     return re.sub(r"\n{3,}", "\n\n", page).strip(), notes
 
 
+def _prompt(spec: dict[str, Any]) -> str:
+    """(0.11.5) The writer's prompt for a page: with RECENCY when its evidence gives its pages' days (DATED_HEAD)."""
+    if not any(DATED_HEAD in str(item.get("text") or "") for item in spec.get("evidence") or []
+               if isinstance(item, dict)):
+        return PROMPT
+    k = PROMPT.rindex("The page: {title}.")
+    return PROMPT[:k] + RECENCY + PROMPT[k:]
+
+
+HOST_LIKE = re.compile(r"(?<![\w.-])[a-z][a-z0-9]*(?:-[a-z0-9]+)*-\d+[a-z]?(?![\w-])")   # (0.11.5) srv-web-01
+GUARD_ASK = ("Your page {what}. Write the whole page again with the same rules: a row for each subject of the space, "
+             "and none of those names (write \"not known yet\" where the evidence does not say).")
+
+
+def unknown_names(page: str, evidence: Any, spec: dict[str, Any] | None = None, hosts: bool = False) -> list[str]:
+    """The names a page writes in backticks (and, with `hosts`, the host-like names it writes bare: srv-web-01) that
+    its evidence never gives (its title and its brief count as evidence)."""
+    said = json.dumps(evidence, ensure_ascii=False, default=str).lower() + " " + \
+        " ".join(str((spec or {}).get(k) or "") for k in ("title", "brief")).lower()
+    folded = re.sub(r"[_\-\s]+", " ", said)
+    unknown: list[str] = []
+    found = re.findall(r"`([^`\s]{3,60})`", page) + (HOST_LIKE.findall(re.sub(r"`[^`]*`", " ", page)) if hosts else [])
+    for name in found:
+        if name.lower() not in said and part_key(name) not in folded and name not in unknown:
+            unknown.append(name)
+    return unknown
+
+
+GUESS = re.compile(r"\b(?:assum(?:e|ed|es|ing|ption)|presumabl[ey]|probabl[ey]|typical(?:ly)?|usually|likely|"
+                   r"implie[sd]|suggest(?:s|ed)?|seems?|appears? to|guess(?:ed|es)?|inferr?(?:ed|s)?)\b", re.I)
+#                    (0.11.5) a page that reasons from what is usual where its pages do not say (the words its
+#                    evidence never uses: "given typical feature store patterns, we assume ...")
+
+
+def guesses(page: str, evidence: Any, spec: dict[str, Any] | None = None) -> list[str]:
+    """(0.11.5) The words of a page that guess from what is usual or likely (GUESS) where its evidence never uses them
+    (its title and its brief count as evidence), lower case, once each; code left out."""
+    said = json.dumps(evidence, ensure_ascii=False, default=str).lower() + " " + \
+        " ".join(str((spec or {}).get(k) or "") for k in ("title", "brief")).lower()
+    out: list[str] = []
+    for m in GUESS.finditer(re.sub(r"`[^`]*`", " ", page)):
+        word = m.group(0).lower()
+        if word not in out and not re.search(r"\b" + re.escape(word) + r"\b", said):
+            out.append(word)
+    return out
+
+
+def _faults(text: str, prompt_items: Any, spec: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
+    """(0.11.5) What a wiki space's page must be written again for: (the subjects of the space it leaves out, the
+    names its evidence never gives, bare host names too, the words it guesses with where its pages do not say)."""
+    missing = [n for n in (spec.get("guard") or {}).get("subjects") or []
+               if not re.search(r"(?<![\w-])" + re.escape(n) + r"(?![\w-])", text, re.I)]
+    return missing, unknown_names(text, prompt_items, spec, hosts=True), guesses(text, prompt_items, spec)
+
+
+def _guard(text: str, prompt_items: Any, spec: dict[str, Any]) -> str:
+    """(0.11.5) _faults said to the LLM; "" when nothing."""
+    missing, unknown, guessed = _faults(text, prompt_items, spec)
+    what = ([f"leaves out these subjects of the space: {', '.join(missing[:20])}"] if missing else []) + \
+        ([f"names these that the evidence never gives: {', '.join(unknown[:20])}"] if unknown else []) + \
+        ([f"guesses from what is usual where the pages do not say ({', '.join(guessed[:10])}): write what the pages "
+          f"say, or that they disagree, each statement with its day"] if guessed else [])
+    return "; and ".join(what)
+
+
+def _without_names(page: str, names: list[str]) -> tuple[str, list[str]]:
+    """(0.11.5) A page without the sentences that say a name its evidence never gives (what a page still names after
+    it was asked again: an invented host; a word it guesses with): in a paragraph or a list item, the sentence; in a
+    table, the sentence of its cell (its parts apart: "<br>"; "not known yet" when the cell held nothing else);
+    headings and code as written. (the page, the sentences left out)"""
+    if not names:
+        return page, []
+    said = re.compile(r"(?<![\w.-])(?:" + "|".join(re.escape(n) for n in names) + r")(?![\w-])", re.I)
+    removed: list[str] = []
+
+    def without(text: str) -> str:
+        parts = []
+        for part in re.split(r"\s*<br\s*/?>\s*", text):
+            kept = []
+            for sentence in SENTENCE_END.split(part):
+                (removed if said.search(sentence) else kept).append(sentence.strip())
+            if any(kept):
+                parts.append(" ".join(s for s in kept if s))
+        return "<br>".join(parts)
+
+    out: list[str] = []
+    fence = False
+    for line in page.splitlines():
+        if line.lstrip().startswith("```"):
+            fence = not fence
+            out.append(line)
+        elif fence or line.lstrip().startswith("#") or not said.search(line):
+            out.append(line)
+        elif line.lstrip().startswith("|"):
+            out.append("|".join(" " + (without(c.strip()) or "not known yet") + " " if said.search(c) else c
+                                for c in line.split("|")))
+        else:
+            lead = re.match(r"^(\s*(?:[-*+>]\s+|\d+[.)]\s+)?)", line).group(1)
+            text = without(line[len(lead):])
+            if text:
+                out.append(lead + text)
+    return "\n".join(out), removed
+
+
 def write_summary(spec: dict[str, Any], llm: Any) -> dict[str, Any]:
     """One summary page. An answer cut by the length limit (finish_reason "length") is asked to go on, at most
     CONTINUATIONS times (one cut while reasoning, with nothing written yet, is asked again with twice the room);
     still cut, the page keeps its whole lines and says that it stops there ("cut": the next build writes it
     again)."""
     prompt_items, sources = _numbered(spec["evidence"])
-    messages = [{"role": "system", "content": PROMPT.format(title=spec["title"], brief=spec["brief"])},
+    messages = [{"role": "system", "content": _prompt(spec).format(title=spec["title"], brief=spec["brief"])},
                 {"role": "user", "content": json.dumps(prompt_items, ensure_ascii=False, default=str)}]
     text, tokens, cut, room = "", 0, False, SUMMARY_TOKENS
     for _turn in range(CONTINUATIONS + 1):
@@ -912,6 +1244,23 @@ def write_summary(spec: dict[str, Any], llm: Any) -> dict[str, Any]:
     text = text.strip()
     if cut and text:
         text = text.rsplit("\n", 1)[0].rstrip() if "\n" in text else text
+    calls, corrected, left_out = 1, "", []            # (a page's calls as before; the corrective turn counted)
+    if spec.get("guard") and text and not cut:        # (0.11.5) asked once again, what to correct said
+        corrected = _guard(text, prompt_items, spec)
+        if corrected:
+            msg = llm.chat(messages[:2] + [{"role": "assistant", "content": text},
+                                           {"role": "user", "content": GUARD_ASK.format(what=corrected)}],
+                           max_tokens=room)
+            usage = getattr(llm, "last_usage", None) or {}
+            tokens += int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
+            calls += 1
+            again = _page_text(msg).strip()
+            if again and getattr(llm, "last_finish", None) != "length" and \
+                    sum(map(len, _faults(again, prompt_items, spec))) <= \
+                    sum(map(len, _faults(text, prompt_items, spec))):
+                text = again                          # what comes back, unless it is worse (no second turn)
+            text, left_out = _without_names(text, sum(_faults(text, prompt_items, spec)[1:], []))   # still invented
+    #                                                   (a host completed from another: atl-sso-11) is left out
     checks: list[str] = []
     try:                                          # (0.11.1) checked before it is saved; a check that fails never
         text, checks = check_page(text, prompt_items, spec) if text else (text, [])     # costs the page
@@ -924,7 +1273,11 @@ def write_summary(spec: dict[str, Any], llm: Any) -> dict[str, Any]:
     if text and block:                            # (0.11.0) the relations the documents state, drawn by the page
         text += ("\n\n## Relations diagram\n\nWhat the documents and the code state about the parts (the most stated "
                  "first; read each line as the part on the left, what it does, the part on the right).\n\n" + block)
-    return {"content": text, "sources": sources, "tokens": tokens, "cut": cut, "checks": checks}
+    if corrected:
+        checks = [f"written again once: it {corrected}"[:500]] + \
+            ([f"still there after that, left out: {'; '.join(clip(s, 80) for s in left_out[:5])}"[:500]]
+             if left_out else []) + checks
+    return {"content": text, "sources": sources, "tokens": tokens, "cut": cut, "checks": checks, "calls": calls}
 
 
 # --------------------------------------------------------------------------- #
@@ -1313,7 +1666,7 @@ def build_context(reason: str = "manual", llm: bool = True, force: bool = False)
                 client = None
                 for spec in specs:
                     check()
-                    h = _hash([PROMPT, spec["title"], spec["brief"], spec["evidence"]])
+                    h = _hash([_prompt(spec), spec["title"], spec["brief"], spec["evidence"]])
                     p = (db.session.query(ContextPage).filter(ContextPage.section == spec["section"],
                                                               ContextPage.slug == spec["slug"]).one_or_none())
                     if p is not None and (p.author or "agent") != "agent":
@@ -1350,7 +1703,7 @@ def build_context(reason: str = "manual", llm: bool = True, force: bool = False)
                         log.warning("supagent context: the page %s was not written: %s", spec["title"], ex)
                         steps.update(**res)
                         continue
-                    res["llm_calls"] += 1
+                    res["llm_calls"] += out.get("calls", 1)      # (0.11.5: a space's page asked again: 2)
                     res["tokens"] += out["tokens"]
                     if not out["content"]:
                         res["empty"] += 1

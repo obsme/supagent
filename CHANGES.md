@@ -1,5 +1,40 @@
 # Changes
 
+## 0.11.5 — 2026-10-21
+
+**A page per big wiki space.** A Confluence wiki of thousands of pages on many subjects is now summarized space by
+space: each space of 200 pages or more (six at most, the biggest first) gets a Context page of its own, *Wiki space
+<name>*, right after the two overviews. It holds one table, a row per subject of the space (the branches of its page
+tree): what the subject is and what holds now, as the most recent pages say (its owner, hosts, versions, schedules;
+where a page says since when something holds, what that replaced and since when), then the space's main pages. The
+wiki reader now keeps the day each page was last changed (Confluence's version date) and its place in the wiki's tree
+(its parents); where two pages disagree, the space page follows the one changed last, and where the newest page does
+not settle it, it says that the pages disagree, each statement with its day: it never guesses. Before it is saved, a
+space page is checked: when it leaves out a subject of its space, names what its pages never give (a host name the
+LLM completed itself) or guesses from what is usual ("typically", "we assume"), the LLM is asked once to write it
+again (one more call, counted in context.max_llm_calls); a made-up name or a guess still there after that is taken
+out with its sentence.
+
+**The overviews stay as they were.** *How the system works* and *Technical overview* read every document exactly as
+in 0.11.4: their inputs are the same bytes, so the upgrade does not write them again. With a very big wiki they can
+still give an older value as the current one, as 0.11.4 does; the space pages give the current values. Next: the
+overview written from the space pages, and a page of the links between the spaces.
+
+Measured on a generated Confluence wiki of 6,006 pages (28 subjects in 5 spaces, 12 facts changed by newer pages), on
+a second copy of it laid out differently and kept out of the tuning: in 3 builds, the 15 space pages named every
+subject of their space (28 of 28) and none guessed between pages; read one by one, none gave an older value as the
+current one and none named something the wiki never gives. The registered gate was not met as scored: its scorer
+counted "30 days" written for the wiki's "thirty days" as made up, and a sentence starting "Historically, ..." as an
+older value given as current; each was checked against the wiki, and 0.11.5 was released by the owner's decision.
+Before that, 2 test builds on the first wiki: 10 of 10 space pages right. The overviews read exactly what they read in
+0.11.4. Browser tests: 26 passed on the lab's Superset 6.1; unit tests: 2,373.
+
+Upgrade from 0.11.4: pip install the wheel on every host and restart the web servers (the workers and beat as usual);
+nothing to run (tables unchanged, v20). The space pages come after the wiki's next reading with 0.11.5 (its pages then
+say their day and their parents): **Read again** on the wiki's row in Documents and sites brings them sooner. The
+first build after that writes up to six more pages: with the default context.max_llm_calls (12), some application
+pages can wait for the next build. INSTALL.txt, *From 0.11.4 to 0.11.5*.
+
 ## 0.11.4 — 2026-10-21
 
 **Several values of the categories changed at once.** In Knowledge → Categories each value has a box to tick (the

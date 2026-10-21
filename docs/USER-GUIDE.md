@@ -591,8 +591,20 @@ a book: the contents on the left (*Functional* and *Technical* parts, numbered c
   the agent never writes over it. **Give it back to the agent** (on a page you edited): the next build writes it
   again from its sources.
 
-The pages: *How the system works*, *Technical overview* and one page per main application (AI-written, at most
-`context.max_llm_calls` LLM calls a build, written again only when their sources changed); facts pages written
+The pages: *How the system works*, *Technical overview*, (new in 0.11.5) one page per big wiki space, **Wiki space
+<name>**, and one page per main application (AI-written, at most `context.max_llm_calls` LLM calls a build, written
+again only when their sources changed). A wiki space page is written for each space of 200 pages or more of a
+Confluence wiki read with 0.11.5 or later (six at most, the biggest first, right after the two overviews): its
+subjects in a table (what each is and what holds now, as the most recent pages say; where a page says since when
+something holds, what that replaced and since when), and its main pages. Where two pages disagree, it follows the
+one changed last (the reader keeps the day each wiki page was last changed and its place in the wiki's tree); where
+the newest page does not settle it, the page says that the pages disagree and gives each statement with its day,
+never a guess. Before it is saved, a space page is checked: when it leaves out a subject of its space, names
+something its pages never give (a host name the LLM made up) or guesses from what is usual ("typically", "we
+assume"), the LLM is asked once to write it again (one more LLM call); a made-up name or a guess still there after
+that is taken out with its sentence. A wiki read before 0.11.5 gets its space pages
+after its next reading (**Read again** on its row in Documents and sites brings them sooner). The two overviews read
+every document as before. Facts pages written
 without the LLM: each data source, each inventory (servers, services, applications, environments...), the links
 between databases, the glossary, the rules and facts, the dashboards and their charts, Grafana and OpenSearch
 Dashboards pages, the parts, repositories, wiki spaces and server groups the documents describe, a page per system

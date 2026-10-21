@@ -242,6 +242,9 @@ _VERIFY: contextvars.ContextVar[Any] = contextvars.ContextVar("supagent_doc_veri
 _READ_LOG: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("supagent_doc_read", default=None)
 NOT_READ_KEPT = 1000            # pages not read, said one by one at most
 READ_LOG_KEY = "docread:{}"     # supagent_meta: the last reading of a document (pages not read, limit reached)
+# (0.11.4) the date the page being fetched says it was last changed (fetch writes it, _read_web keeps it in the page)
+_PAGE_DAY: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar("supagent_page_day", default=None)
+ANCESTORS = 12                  # (0.11.4) a Confluence page's parents kept (the top ones: its place in the tree)
 
 
 def _not_read(where: str, title: str, why: str) -> None:
@@ -256,6 +259,43 @@ def _left_unread(n: int) -> None:
     got = _READ_LOG.get()
     if got is not None:
         got["left"] = max(0, int(n))
+
+
+def day_of(value: Any) -> str | None:
+    """(0.11.4) The day a source says a page was last changed, as YYYY-MM-DD: an ISO date or time (Confluence's
+    version.when, a page's dated meta) or an HTTP date (Last-Modified). None when it is not a date, or not a plausible
+    one (before 1990, after tomorrow): a page's date is what its source says, never guessed."""
+    s = str(value or "").strip()
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})(?![\d])", s)
+    try:
+        if m:
+            day = dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        elif re.search(r"[A-Za-z]{3}", s) and re.search(r"\b\d{4}\b", s):
+            from email.utils import parsedate_to_datetime
+
+            day = parsedate_to_datetime(s).date()
+        else:
+            return None
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    return day.isoformat() if dt.date(1990, 1, 1) <= day <= dt.date.today() + dt.timedelta(days=1) else None
+
+
+def _header_day(headers: Any) -> str | None:
+    """(0.11.4) A web page's Last-Modified header as its date, only when it is a day older than the answer (its Date
+    header, else now): a page made for each request says when it was made, not when its text changed."""
+    from email.utils import parsedate_to_datetime
+
+    said = (headers or {}).get("Last-Modified")
+    if not said or day_of(said) is None:
+        return None
+    try:
+        changed = parsedate_to_datetime(said)
+        sent = parsedate_to_datetime(headers["Date"]) if headers.get("Date") else dt.datetime.now(dt.timezone.utc)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    changed, sent = (x if x.tzinfo else x.replace(tzinfo=dt.timezone.utc) for x in (changed, sent))
+    return day_of(said) if sent - changed >= dt.timedelta(days=1) else None
 
 
 def read_log(doc_id: int) -> dict[str, Any]:
@@ -300,11 +340,17 @@ class _Text(HTMLParser):
         self._anchor: tuple[str, int] | None = None      # (0.10.7) the full address of the link being read
         self._rows = 0                                  # (0.10.9) inside a table's row: the row stays one line
         self._cell_at: int | None = None                # where the cell being read starts (its text so far)
+        self.metas: dict[str, str] = {}                 # (0.11.4) <meta> name (or property, itemprop) -> content
 
     def _in_cell_text(self) -> bool:
         return self._cell_at is not None and bool("".join(self.parts[self._cell_at:]).strip(" |"))
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "meta":
+            a = {k: v or "" for k, v in attrs}
+            name = (a.get("property") or a.get("name") or a.get("itemprop") or a.get("http-equiv") or "").lower()
+            if name and a.get("content"):
+                self.metas.setdefault(name, a["content"])
         if tag in ("script", "style", "noscript", "svg", "nav", "footer"):
             self._skip += 1
         elif tag == "title":
@@ -476,9 +522,29 @@ def _lines(parts: list[str]) -> str:
 
 def html_to_text(html: str) -> tuple[str, str, list[str]]:
     """(title, text, links) of an HTML page."""
+    return _html_read(html)[:3]
+
+
+# (0.11.4) the metas that say when a page was changed, the surest first; then the ones that say when it was written
+DATED_METAS = ("article:modified_time", "og:updated_time", "datemodified", "dcterms.modified", "dc.date.modified",
+               "last-modified", "modified", "article:published_time", "datepublished", "dcterms.created",
+               "dc.date.created", "dc.date", "date")
+JSON_LD = re.compile(r"<script[^>]*application/ld\+json[^>]*>(.*?)</script>", re.S | re.I)
+
+
+def _html_read(html: str) -> tuple[str, str, list[str], str | None]:
+    """(title, text, links, the day it says it was changed or written) of an HTML page: (0.11.4) its dated meta, else
+    the dateModified (or datePublished) of its structured data (JSON-LD); None when it says none."""
     p = _Text()
     p.feed(html or "")
-    return p.title.strip(), _lines(p.parts), p.links
+    day = next((d for k in DATED_METAS if (d := day_of(p.metas.get(k)))), None)
+    if day is None:
+        for key in ("dateModified", "datePublished"):
+            m = next((m for block in JSON_LD.findall(html or "")
+                      if (m := re.search(r'"' + key + r'"\s*:\s*"([^"]{8,40})"', block))), None)
+            if m and (day := day_of(m.group(1))):
+                break
+    return p.title.strip(), _lines(p.parts), p.links, day
 
 
 def storage_to_text(xhtml: str) -> str:
@@ -937,6 +1003,7 @@ class _Answer:
     url: str
     ctype: str
     body: bytes
+    modified: str | None = None       # (0.11.4) its Last-Modified day, when older than the answer (_header_day)
 
     def text(self) -> str:
         return _decode(self.body, self.ctype)
@@ -977,7 +1044,7 @@ def _get(url: str, sign: SignIn | None, limit: int, accept: str | None = None) -
                 body += chunk
                 if len(body) > limit:
                     raise DocError(f"{_where(url)}: larger than {limit // 1024} KB")
-            return _Answer(url, r.headers.get("Content-Type", ""), body)
+            return _Answer(url, r.headers.get("Content-Type", ""), body, _header_day(r.headers))
     raise DocError(f"{_where(url)}: too many redirects")
 
 
@@ -1017,15 +1084,24 @@ class _Calls:
 
 
 def fetch(url: str, sign: SignIn | None = None) -> tuple[str, str, list[str]]:
-    """(title, text, links) of one page, following redirects only to allowed addresses."""
+    """(title, text, links) of one page, following redirects only to allowed addresses. (0.11.4) The day it says it
+    was changed (a dated meta, else its Last-Modified header when older than the answer) given to the reading that
+    asks for it (_PAGE_DAY)."""
     got = _get(url, sign, _limit())
     text = got.text()
+    day = got.modified
     if "html" in got.ctype or text.lstrip()[:15].lower().startswith(("<!doctype html", "<html")):
-        title, content, links = html_to_text(text)
-        return title, content, [urljoin(got.url, link) for link in links]
-    if got.ctype and not got.ctype.startswith(("text/", "application/json", "application/xml")):
+        title, content, links, said = _html_read(text)
+        out: tuple[str, str, list[str]] = (title, content, [urljoin(got.url, link) for link in links])
+        day = said or day
+    elif got.ctype and not got.ctype.startswith(("text/", "application/json", "application/xml")):
         raise DocError(f"{_where(got.url)}: {got.ctype} is not text (text, Markdown and HTML only)")
-    return "", text, []
+    else:
+        out = ("", text, [])
+    holder = _PAGE_DAY.get()
+    if holder is not None and day:
+        holder["modified"] = day
+    return out
 
 
 # --------------------------------------------------------------------------------------------- #
@@ -1054,6 +1130,8 @@ def _read_web(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
         if url in seen:
             continue
         seen.add(url)
+        dated: dict[str, str] = {}
+        day_token = _PAGE_DAY.set(dated)               # (0.11.4) the day the page says it was changed
         try:
             title, text, links = fetch(url, sign) if sign is not None else fetch(url)
         except (DocError, requests.exceptions.RequestException) as ex:
@@ -1063,12 +1141,15 @@ def _read_web(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
             log.info("supagent: document %s: a page not read (%s): %s", doc.id, _where(url), str(ex)[:200])
             _not_read(_where(url), "", f"not read: {str(ex)[:150]}")
             continue                                   # 403, not text, too large): skipped, the others read
+        finally:
+            _PAGE_DAY.reset(day_token)
         if len(seen) > 1 and skip is not None and skip.search(title or ""):
             skipped += 1                               # (0.10.6.1) "deprecated" in its title: not read, nor what it
             _not_read(_where(url), title, "its title matches the setting docs.skip_titles")
             continue                                   # leads to (the first page always is)
         if (text or "").strip():
-            pages.append((url, title, text))
+            pages.append((url, title, text, {"modified": dated["modified"]}) if dated.get("modified") else
+                         (url, title, text))
         else:
             skipped += 1                               # (0.10.6.1) no text: not kept, its links followed
             _not_read(_where(url), title, "no text (its links followed)")
@@ -1191,7 +1272,7 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
     pages: list[tuple[str, str, str, dict[str, Any]]] = []
     skipped = 0
     q = lambda s: quote(str(s), safe="")  # noqa: E731
-    expand = "expand=body.storage,version,space"
+    expand = "expand=body.storage,version,space,ancestors"     # (0.11.4) its parents: its place in the tree
 
     def get(path: str) -> dict[str, Any]:
         calls.spend()
@@ -1320,8 +1401,13 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
             linked: list[tuple[str, ...]] = [("title", ti, sp or space) for ti, sp in read["pages"]]
             linked += [("id", i) for i in read.get("ids") or []]
             linked += [x for x in (_href_target(h, url, t["web"], tuple(bases)) for h in read["links"]) if x]
+            parents = [str(a["id"]) for a in item.get("ancestors") or [] if isinstance(a, dict) and a.get("id")]
+            changed = day_of((item.get("version") or {}).get("when"))
             meta = {"id": pid, "space": space, "version": (item.get("version") or {}).get("number"),
                     "links": [x[1] if x[0] == "id" else f"{x[2]}:{x[1]}" for x in linked][:200],
+                    # (0.11.4) when it was last changed (version.when), and its parents, the top first: the Context
+                    # compares the pages' dates and gives every branch of the tree its room
+                    **({"modified": changed} if changed else {}), "ancestors": parents[:ANCESTORS],
                     **({"diagram_edges": dedges[:200]} if dedges else {}),
                     **({"images": [{k: v for k, v in i.items() if v} for i in read["images"]][:50]} if read["images"]
                        else {})}
@@ -1814,7 +1900,7 @@ def _join(found: list) -> tuple[str, list[dict[str, Any]]]:
         pages.append({"url": url, "title": title, "chars": len(block), "at": at,
                       **{k: v for k, v in (more[0] if more and isinstance(more[0], dict) else {}).items()
                          if k in ("path", "commit", "scope", "id", "space", "version", "links", "diagram_edges",
-                                  "images")}})
+                                  "images", "modified", "ancestors")}})       # (0.11.4) its date, its parents
         texts.append(block)
         at += len(block)
     return "\n\n".join(texts), pages

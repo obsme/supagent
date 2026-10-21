@@ -2230,6 +2230,7 @@ class AdminView(BaseView):
             abort(404)
         pages = [{"url": p.get("url"), "title": p.get("title"), "chars": p.get("chars"), "space": p.get("space"),
                   "page_id": p.get("id"), "version": p.get("version"), "path": p.get("path"),
+                  "modified": p.get("modified"),            # (0.11.4) when its source says it was last changed
                   "links": len(p.get("links") or []), "images": len(p.get("images") or []),
                   "diagrams": len(p.get("diagram_edges") or [])}
                  for p in (d.pages or []) if isinstance(p, dict)]

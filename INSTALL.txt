@@ -1,16 +1,16 @@
-supagent 0.11.4 - the AI agent inside Apache Superset
+supagent 0.11.5 - the AI agent inside Apache Superset
 =====================================================
 
 What is in this folder
-  supagent-0.11.4-py3-none-any.whl   the package for Superset 6.1 (pure Python; nothing else to install)
+  supagent-0.11.5-py3-none-any.whl   the package for Superset 6.1 (pure Python; nothing else to install)
   supagent-guide.html / .pdf          the guide (install, LLM middleware, learning, screens)
   supagent-user-guide.html / .pdf     how to use it: every page, button, setting and command
   catalog.example.yaml                an example catalog, to adapt
   grafana-wheels/                     mcp and what it needs beyond Superset 6.1 (Grafana, without internet)
   SHA256SUMS                          checksums
 
-Upgrading? From 0.11.3: pip install this wheel on every host, restart; nothing to run: "From 0.11.3 to
-0.11.4" below. From 0.11.1.1: the same, and "From 0.11.1.1 to 0.11.3" below. From 0.11.1: the same, and "From 0.11.1 to 0.11.1.1" below. From 0.11.0: the same, and "From 0.11.0 to 0.11.1" below. From 0.10.12.1: the same, and "From 0.10.12.1 to 0.11.0" below. From 0.10.12: the same, and "From 0.10.12 to 0.10.12.1" below. From 0.10.11.2: the same, and "From 0.10.11.2 to 0.10.12" below. From 0.10.11.1: the same, and "From 0.10.11.1 to 0.10.11.2" below. From 0.10.11: the
+Upgrading? From 0.11.4: pip install this wheel on every host, restart; nothing to run: "From 0.11.4 to
+0.11.5" below. From 0.11.3: the same, and "From 0.11.3 to 0.11.4" below. From 0.11.1.1: the same, and "From 0.11.1.1 to 0.11.3" below. From 0.11.1: the same, and "From 0.11.1 to 0.11.1.1" below. From 0.11.0: the same, and "From 0.11.0 to 0.11.1" below. From 0.10.12.1: the same, and "From 0.10.12.1 to 0.11.0" below. From 0.10.12: the same, and "From 0.10.12 to 0.10.12.1" below. From 0.10.11.2: the same, and "From 0.10.11.2 to 0.10.12" below. From 0.10.11.1: the same, and "From 0.10.11.1 to 0.10.11.2" below. From 0.10.11: the
 same, and "From 0.10.11 to 0.10.11.1" below. From 0.10.10: the
 same, and "From 0.10.10 to 0.10.11" below. From 0.10.9.2: pip install
 this wheel on every host, run superset supagent init (tables v20), restart: "From 0.10.9.2 to 0.10.10" and
@@ -40,7 +40,7 @@ role): three packages must be pinned, or Superset itself does not start (none is
 1. Install in Superset's virtualenv (pip only)
 
    PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-   $PY -m pip install supagent-0.11.4-py3-none-any.whl
+   $PY -m pip install supagent-0.11.5-py3-none-any.whl
    Superset 6.1: nothing else is needed (offline too).
 
 2. Register it: one line in superset_config.py (no logic)
@@ -191,6 +191,18 @@ role): three packages must be pinned, or Superset itself does not start (none is
    wait: grafana.read_new, osd.read_new); a whole search at once. What is switched off leaves the Context and the
    search at once and is no longer read, explained or watched; the agent says it exists and is switched off when a
    question names it. "List now" reads the list again (no AI); every learning does too.
+
+From 0.11.4 to 0.11.5
+=====================
+  - pip install the wheel on every host and restart the web servers, the workers and beat; nothing to run (tables
+    unchanged, v20).
+  - A Confluence wiki: each space of 200 pages or more gets a "Wiki space <name>" Context page (its subjects and what
+    holds now, the most recent page followed) after the wiki's next reading ("Read again" on its row in Documents
+    and sites brings it sooner). How the system works and Technical overview are not written again by the upgrade.
+  - Measured: on a 6,006-page generated wiki kept out of the tuning, 3 builds: 15 space pages with all 28 subjects, no
+    guess, and, read one by one, no older value as current and no made-up name (the gate's 2 misses were its scorer's
+    own errors: number words, "Historically"; released by the owner's decision); browser tests 26 passed; unit tests
+    2,373.
 
 From 0.11.3 to 0.11.4
 =====================
