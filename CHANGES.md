@@ -1,5 +1,28 @@
 # Changes
 
+## 0.11.6.1 — 2026-10-21
+
+**A wiki of many spaces stays whole in the overviews.** *How the system works* and *Technical overview* now read a
+Confluence wiki space by space: a space that has its own page (*Wiki space …*) from that page, every other space of
+the wiki from its own pages, as before 0.11.6; the spaces without a page are named. In 0.11.6 the overviews read
+such a wiki through its space pages alone, so that a wiki of 30 spaces, one or two of them big enough for a page of
+their own, lost the others. The overviews also keep every document's applications in their Applications table.
+
+**Which spaces get a page of their own is a setting.** `context.space_min_pages` (200 pages by default) and
+`context.space_pages_max` (6 spaces by default, the biggest first). For a wiki of many small spaces, lower the first
+and raise the second; each space page is one LLM call (two when it is asked again) when its space changes, within
+`context.max_llm_calls`, so a first build of many space pages can take a few nights, or one build with a higher
+`context.max_llm_calls`.
+
+Checked without the LLM: on a generated wiki of 32 spaces and about 3,000 pages with two space pages written, the
+overviews' input names all 32 spaces and stays in the wiki's room; with no space page it is 0.11.5's input; on the
+three test databases of 0.11.5 and 0.11.6 (with and without a big wiki) every summary page's input is the same as in
+0.11.6 until a space page is written. Browser tests: 26 passed on the lab's Superset 6.1; unit tests: 2,379. The
+sentence that keeps every document's applications in the Applications table is not measured with the LLM.
+
+Upgrade from 0.11.6: pip install the wheel on every host and restart the web servers (the workers and beat as usual);
+nothing to run (tables unchanged, v20). INSTALL.txt, *From 0.11.6 to 0.11.6.1*.
+
 ## 0.11.6 — 2026-10-21
 
 **How the wiki spaces connect.** With two big wiki spaces or more, a new Context page, *How the wiki spaces connect*,

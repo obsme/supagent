@@ -347,6 +347,11 @@ SPECS: list[Spec] = [
          "team and environment holding them: written from the approved map without the LLM, again when it changes"),
     Spec("context.max_llm_calls", 12, "int", "LLM calls of a Context build at most (its summary pages: only the ones "
          "whose sources changed are written again; the facts pages need no LLM)"),
+    Spec("context.space_min_pages", 200, "int", "(0.11.6.1) A space of a Confluence wiki with this many pages or more "
+         "gets a Context page of its own (\"Wiki space ...\": its subjects and what holds now, the most recent page "
+         "followed); a wiki of many small spaces: lower it"),
+    Spec("context.space_pages_max", 6, "int", "(0.11.6.1) Wiki space pages at most (the biggest spaces first); each is "
+         "an LLM call (two when it is asked again) when its space changes, within context.max_llm_calls"),
     Spec("context.fields_shown", 30, "int", "The fields (or labels) listed on a data source's Context page for each of "
          "its first three main indices (or metrics), the described ones first, then the most filled (0: none; the "
          "Data dictionary has them all)"),

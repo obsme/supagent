@@ -610,9 +610,13 @@ name, and what for: the links are counted from the pages themselves, without the
 another subject, two pages at least), each with the sentence of the latest page that says it; the page has a row for
 each of the main links between the spaces (checked as a space page is) and draws them. The space pages and this page
 are written first in a build, then the two overviews: from 0.11.6 they read a big wiki through its spaces' pages as
-they are then (your corrected version of a space page counts), in the place of the wiki's own pages, so that *How the
-system works* gives the spaces, how they connect and their current values. A wiki without such spaces is read as
-before. Facts pages written
+they are then (your corrected version of a space page counts), so that *How the system works* gives the spaces, how
+they connect and their current values; from 0.11.6.1 space by space: a space with its own page from that page, every
+other space of the wiki from its own pages as before, so that none is left out. A wiki without such spaces is read as
+before. Which spaces get a page of their own: `context.space_min_pages` (200 pages by default) and
+`context.space_pages_max` (6 by default, the biggest spaces first) in Settings; a wiki of many small spaces: lower the
+first, raise the second (each space page is one or two LLM calls when its space changes, within
+`context.max_llm_calls`). Facts pages written
 without the LLM: each data source, each inventory (servers, services, applications, environments...), the links
 between databases, the glossary, the rules and facts, the dashboards and their charts, Grafana and OpenSearch
 Dashboards pages, the parts, repositories, wiki spaces and server groups the documents describe, a page per system

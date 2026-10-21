@@ -129,7 +129,9 @@ def test_the_space_pages_come_first_then_the_links_then_the_overviews_which_read
     assert slugs[:5] == ["space-plt", "space-prd", LINKS_SLUG, "overview", "architecture"]
     specs = {s["slug"]: s for s in summary_specs(_ev(_wiki(), small))}
     late = specs["overview"]["late"]
-    assert late["docs"] == {"11": {"slugs": ["space-plt", "space-prd"], "chars": late["docs"]["11"]["chars"]}}
+    info = late["docs"]["11"]
+    assert info["slugs"] == ["space-plt", "space-prd"] and info["spaces"] == {"space-plt": "PLT", "space-prd": "PRD"}
+    assert info["doc"]["id"] == 11 and info["chars"] > 0
     assert late["links"] == LINKS_SLUG and specs["architecture"]["late"]["docs"] == late["docs"]
     plain = summary_specs(_ev(small))
     assert [s["slug"] for s in plain][:2] == ["overview", "architecture"] and not any("late" in s for s in plain)
@@ -142,7 +144,7 @@ def test_an_overview_reads_a_big_wiki_through_its_spaces_pages_once_they_are_wri
     0.11.5. The hash changes with what the pages say."""
     from superset.extensions import db
 
-    from supagent.knowledge.context import LINKS_SLUG, WIKI_OVERVIEW, _hash, _late, summary_specs
+    from supagent.knowledge.context import LINKS_SLUG, WIKI_OVERVIEW, WIKI_OVERVIEW_AFTER, _hash, _late, summary_specs
     from supagent.models import ContextPage
 
     small = {"id": 12, "title": "Runbook", "content": "# Runbook\nRestart the ERP.\n", "pages": []}
@@ -169,11 +171,94 @@ def test_an_overview_reads_a_big_wiki_through_its_spaces_pages_once_they_are_wri
         assert len(text) <= spec["late"]["docs"]["11"]["chars"]
         assert [x for i, x in enumerate(late["evidence"]) if i != k] == [x for i, x in enumerate(before) if i != k]
         assert WIKI_OVERVIEW + "; ## Processes and chains" in late["brief"]       # a section in its list of sections
-        assert late["brief"].replace(WIKI_OVERVIEW, "", 1) == spec["brief"]
+        assert late["brief"].replace(WIKI_OVERVIEW, "", 1) == spec["brief"] + WIKI_OVERVIEW_AFTER
         assert _hash([late["brief"], late["evidence"]]) != _hash([spec["brief"], spec["evidence"]])
         db.session.query(ContextPage).filter_by(slug="space-plt").update({"kind": "rejected"})
+        db.session.commit()                       # (0.11.6.1) a space's page refused: that space from its pages
+        part = _late(spec)["evidence"][k]["text"]
+        assert "# Wiki space Product home" in part and "# Wiki space Platform home" not in part
+        assert "The other spaces of the wiki (no page of their own), their central pages below: PLT (Platform home)." \
+            in part and "- Gateway page 0:" in part and "- Orders page 0:" not in part
+        assert len(part) <= spec["late"]["docs"]["11"]["chars"]
+        db.session.query(ContextPage).filter(ContextPage.slug.in_(list(rows))).update({"kind": "rejected"},
+                                                                                       synchronize_session=False)
         db.session.commit()
-        assert _late(spec) is spec                                        # a space's page refused: the digest
+        assert _late(spec) is spec                                        # no space page: as in 0.11.5
     finally:
         db.session.query(ContextPage).filter(ContextPage.slug.in_(list(rows))).delete(synchronize_session=False)
+        db.session.commit()
+
+
+def _many_spaces():
+    """(0.11.6.1) One wiki link of 12 spaces, as a team's real one: two big (250 pages), ten small (40 pages)."""
+    content, pages = "", []
+    for i in range(12):
+        key, per = f"S{i:02d}", (124 if i < 2 else 19)
+        space = _space(key, f"Space {i} home", [(f"Topic {i}a", []), (f"Topic {i}b", [])], per, len(content))
+        content += space["content"]
+        pages += space["pages"]
+    return {"id": 21, "title": "Team wiki", "content": content, "pages": pages}
+
+
+def test_a_wiki_of_many_spaces_keeps_every_space_in_the_overview(ctx):
+    """(0.11.6.1) A wiki of many spaces, two of them with a page of their own (200 pages or more, the default): the
+    overview reads those two from their pages and every other space from its own pages, as before, all of them named,
+    in the wiki's room (0.11.6 read it through the two pages alone and lost the ten others). The limits are settings:
+    lower, every space has its page."""
+    from superset.extensions import db
+
+    from supagent.knowledge.context import _big_spaces, _late, summary_specs
+    from supagent.models import ContextPage
+
+    wiki = _many_spaces()
+    assert [s["space"] for s in _big_spaces(_ev(wiki))] == ["S00", "S01"]          # 200 pages, 6 spaces: defaults
+    assert len(_big_spaces({**_ev(wiki), "space_limits": (20, 40)})) == 12          # the settings, lowered
+    spec = {s["slug"]: s for s in summary_specs(_ev(wiki))}["overview"]
+    rows = {"space-s00": "In short, space 0 [E1].", "space-s01": "In short, space 1 [E1]."}
+    try:
+        for slug, text in rows.items():
+            db.session.add(ContextPage(section="functional", slug=slug, title=f"Wiki space {slug[-1]}", kind="summary",
+                                       content=text, author="agent"))
+        db.session.commit()
+        text = next(x["text"] for x in _late(spec)["evidence"] if x["ref"] == "doc:21")
+        assert text.startswith("# Wiki space 0\nIn short, space 0.\n\n# Wiki space 1\nIn short, space 1.")
+        assert all(f"S{i:02d} (Space {i} home)" in text for i in range(2, 12))          # every other space named
+        assert "- Topic 7a page 0:" in text and "- Topic 0a page 0:" not in text       # its pages, as before
+        assert len(text) <= spec["late"]["docs"]["21"]["chars"]
+    finally:
+        db.session.query(ContextPage).filter(ContextPage.slug.in_(list(rows))).delete(synchronize_session=False)
+        db.session.commit()
+
+
+def test_a_wiki_of_32_spaces_and_3000_pages_keeps_every_space_in_the_overview(ctx):
+    """(0.11.6.1) A wiki the size of a team's real one (one link, 32 spaces, about 3,000 pages, two spaces of 200 pages
+    or more): with those two pages written, every one of the 32 spaces is named in the overview's input and the wiki
+    stays in its room; with no space page, the overview reads the wiki exactly as in 0.11.5."""
+    from superset.extensions import db
+
+    from supagent.knowledge.context import _late, summary_specs
+    from supagent.models import ContextPage
+
+    content, pages = "", []
+    for i in range(32):
+        per = 110 if i < 2 else 41
+        space = _space(f"K{i:02d}", f"Area {i} home", [(f"Part {i}x", []), (f"Part {i}y", [])], per, len(content))
+        content += space["content"]
+        pages += space["pages"]
+    wiki = {"id": 31, "title": "Company wiki", "content": content, "pages": pages}
+    assert 2900 <= len(pages) <= 3100
+    spec = {s["slug"]: s for s in summary_specs(_ev(wiki))}["overview"]
+    assert _late(spec) is spec                                            # no space page yet: as in 0.11.5
+    rows = ("space-k00", "space-k01")
+    try:
+        for i, slug in enumerate(rows):                 # (titled as _space_specs titles them: its home's title)
+            db.session.add(ContextPage(section="functional", slug=slug, title=f"Wiki space Area {i} home",
+                                       kind="summary", content=f"In short, {slug} documents two parts [E1].",
+                                       author="agent"))
+        db.session.commit()
+        text = next(x["text"] for x in _late(spec)["evidence"] if x["ref"] == "doc:31")
+        assert all(f"K{i:02d}" in text or f"Area {i} home" in text for i in range(32))   # every space named
+        assert len(text) <= spec["late"]["docs"]["31"]["chars"]
+    finally:
+        db.session.query(ContextPage).filter(ContextPage.slug.in_(rows)).delete(synchronize_session=False)
         db.session.commit()

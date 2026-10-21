@@ -355,6 +355,8 @@ def collect() -> dict[str, Any]:
         out["answers"].append({"id": r.id, "question": r.question, "tool": r.tool, "database_id": r.database_id})
     db.session.commit()
     out["inventory"] = dict(out["inventory"])
+    out["space_limits"] = (int(settings.get("context.space_min_pages")),       # (0.11.6.1) the wiki spaces with a
+                           int(settings.get("context.space_pages_max")))       # page of their own (_big_spaces)
     return out
 
 
@@ -584,6 +586,22 @@ def _branches(pages: list[dict[str, Any]]) -> list[tuple[tuple[str, ...] | None,
     return ([((), top)] if top else []) + out + ([(None, rest)] if rest else [])
 
 
+def _central(pages: list[dict[str, Any]]) -> Any:
+    """A document's pages in order of weight (the sort key): the ones its other pages link to most first, then the
+    shallowest, then the shortest titles (0.11.6.1: out of _digest, for the pages of a wiki no space page holds)."""
+    key = lambda p: str(p.get("id") or p.get("path") or p.get("title") or p.get("url") or "")  # noqa: E731
+    ids = {str(p.get("id")): key(p) for p in pages if p.get("id")}
+    titles = {str(p.get("title") or "").lower(): key(p) for p in pages if p.get("title")}
+    inbound: Counter = Counter()
+    for p in pages:
+        for x in p.get("links") or []:
+            x = str(x)
+            target = ids.get(x) or titles.get(x.split(":", 1)[-1].lower())     # a page's id, or "SPACE:Title"
+            if target and target != key(p):
+                inbound[target] += 1
+    return lambda p: (-inbound[key(p)], str(p.get("path") or "").count("/"), len(str(p.get("title") or "")))
+
+
 def _digest(d: dict[str, Any], chars: int, by_branch: bool = False) -> str:
     """(0.10.12) What a summary page reads of a document: a small one, its beginning; one of many pages (a wiki, a
     repository), each with its first lines, up to `chars`: what thousands of pages are about, not their first page.
@@ -602,17 +620,7 @@ def _digest(d: dict[str, Any], chars: int, by_branch: bool = False) -> str:
                         if isinstance(p.get("at"), int) and isinstance(p.get("chars"), int)])
     if len(content) <= chars or len(pages) < 3:
         return content[:chars]
-    key = lambda p: str(p.get("id") or p.get("path") or p.get("title") or p.get("url") or "")  # noqa: E731
-    ids = {str(p.get("id")): key(p) for p in pages if p.get("id")}
-    titles = {str(p.get("title") or "").lower(): key(p) for p in pages if p.get("title")}
-    inbound: Counter = Counter()
-    for p in pages:
-        for x in p.get("links") or []:
-            x = str(x)
-            target = ids.get(x) or titles.get(x.split(":", 1)[-1].lower())     # a page's id, or "SPACE:Title"
-            if target and target != key(p):
-                inbound[target] += 1
-
+    central = _central(pages)
     made: dict[int, tuple[str, bool, str, bool]] = {}
 
     def line(p: dict[str, Any]) -> tuple[str, bool, str, bool]:
@@ -630,8 +638,6 @@ def _digest(d: dict[str, Any], chars: int, by_branch: bool = False) -> str:
                            bool(CHANGE_LEAD.search(lead)))
         return made[id(p)]
 
-    central = lambda p: (-inbound[key(p)], str(p.get("path") or "").count("/"),  # noqa: E731
-                         len(str(p.get("title") or "")))
     read_since = any(p.get("modified") or isinstance(p.get("ancestors"), list) for p in pages)
     if not by_branch:                                 # (0.11.5) the overviews: as up to 0.11.4, to the byte
         return _flat(content, pages, chars, central)
@@ -742,15 +748,16 @@ def _big_spaces(ev: dict[str, Any]) -> list[dict[str, Any]]:
     """(0.11.5) The big spaces of the wikis read since 0.11.5 (their pages say their parents; SPACE_MIN_PAGES pages or
     more; the biggest first, SPACE_PAGES_MAX at most): [{"space": its key, "name": its home page's title, "doc": its
     document, "pages": its pages}]."""
+    least, most = ev.get("space_limits") or (SPACE_MIN_PAGES, SPACE_PAGES_MAX)   # (0.11.6.1) settings
     found = []
     for d in ev["docs"]:
         mine: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for p in d.get("pages") or []:
             if p.get("space") and isinstance(p.get("ancestors"), list):
                 mine[str(p["space"])].append(p)
-        found += [(len(v), str(k), d, v) for k, v in mine.items() if len(v) >= SPACE_MIN_PAGES]
+        found += [(len(v), str(k), d, v) for k, v in mine.items() if len(v) >= max(1, least)]
     out = []
-    for _n, space, d, pages in sorted(found, key=lambda x: (-x[0], x[1]))[:SPACE_PAGES_MAX]:
+    for _n, space, d, pages in sorted(found, key=lambda x: (-x[0], x[1]))[:max(0, most)]:
         home = next((p for p in pages if not p.get("ancestors")), None)      # the space's home: no parent
         out.append({"space": space, "name": str(home.get("title") or space) if home else space, "doc": d,
                     "pages": pages})
@@ -885,6 +892,8 @@ WIKI_OVERVIEW = ("; ## The wiki's spaces: a short paragraph per space of the big
                  "(what it documents, its main subjects with what holds now, how it connects to the other spaces; its "
                  "page named: \"Wiki space ...\")")         # (0.11.6) in the overview's list of sections (asked
 WIKI_OVERVIEW_BEFORE = "; ## Processes and chains"     # after it, the LLM wrote no such section), before this one
+WIKI_OVERVIEW_AFTER = (" Every document's applications stay in the Applications table, the wiki's beside the others'.")
+#                       (without it, a build's table held the wiki's subjects alone: the other documents' left out)
 WIKI_TECHNICAL = (" A big wiki is given by its spaces' own pages: its hosts, versions and services as those pages give "
                   "them now.")
 
@@ -907,10 +916,32 @@ def _pages_text(pages: list[ContextPage], chars: int) -> str:
     return "\n\n".join(out)
 
 
+def _wiki_text(info: dict[str, Any], written: list[str], pages: list[ContextPage]) -> str:
+    """(0.11.6.1) A wiki as an overview reads it once some of its spaces have their own page: those spaces from their
+    pages (the links' page first), every other page of the wiki in a digest as before (its central pages first), the
+    spaces it holds named; the wiki's room shared between the two by their number of pages. (0.11.6 read the wiki
+    through its space pages alone once all were written: a wiki of 30 spaces, one or two of them big, would have lost
+    the others.)"""
+    d, room = info["doc"], int(info["chars"])
+    done = {info["spaces"][s] for s in written}
+    every = [p for p in d.get("pages") or [] if isinstance(p.get("at"), int) and isinstance(p.get("chars"), int)]
+    rest = [p for p in every if str(p.get("space") or "") not in done]
+    if not rest:
+        return _pages_text(pages, room)
+    text = _pages_text(pages, room * (len(every) - len(rest)) // max(1, len(every)))
+    homes = {str(p.get("space")): str(p.get("title") or "") for p in rest if p.get("space") and not p.get("ancestors")}
+    others = sorted({str(p.get("space")) for p in rest if p.get("space")})
+    line = ("The other spaces of the wiki (no page of their own), their central pages below: " +
+            ", ".join(f"{k} ({homes[k]})" if homes.get(k) else k for k in others) + ".\n") if others else ""
+    return text + "\n\n" + line + _flat(d.get("content") or "", rest, max(0, room - len(text) - len(line) - 2),
+                                         _central(rest))
+
+
 def _late(spec: dict[str, Any]) -> dict[str, Any]:
     """(0.11.6) An overview reads a big wiki through its spaces' own pages as they are now (a person's version too),
-    their links' page first, in the place and the room of the wiki's digest, once every space of the wiki has its
-    page (written earlier in the same build: they come first), its brief told so; else as up to 0.11.5."""
+    their links' page first, in the place and the room of the wiki's digest (pages written earlier in the same build:
+    they come first), its brief told so. (0.11.6.1) Space by space: a space with its page written from that page,
+    every other page of the wiki as before (_wiki_text); no space page yet: as up to 0.11.5."""
     late = spec.get("late") or {}
     slugs = sorted({s for info in late.get("docs", {}).values() for s in info["slugs"]} |
                    ({late["links"]} if late.get("links") else set()))
@@ -923,19 +954,20 @@ def _late(spec: dict[str, Any]) -> dict[str, Any]:
     for item in spec["evidence"]:
         ref = str(item.get("ref") or "")
         info = late["docs"].get(ref[len("doc:"):]) if ref.startswith("doc:") else None
-        if info and all(s in have for s in info["slugs"]):
+        written = [s for s in info["slugs"] if s in have] if info else []
+        if written:
             pages = ([have[late["links"]]] if not used and late.get("links") in have else []) + \
-                [have[s] for s in info["slugs"]]
+                [have[s] for s in written]
             item = {"ref": ref, "title": f"{item.get('title')}: its spaces, as their own pages say",
-                    "text": _pages_text(pages, info["chars"])}
+                    "text": _wiki_text(info, written, pages)}
             used = True
         evidence.append(item)
     if not used:
         return spec
     brief, before = spec["brief"], late.get("before")
-    k = brief.find(before) if before else -1             # (an overview: a section of its own, in its list of sections)
-    return {**spec, "evidence": evidence,
-            "brief": brief[:k] + late["brief"] + brief[k:] if k >= 0 else brief + late["brief"]}
+    k = brief.find(before) if before else -1             # (an overview: a section of its own, in its list of sections;
+    return {**spec, "evidence": evidence,                # its other documents' applications kept in its table)
+            "brief": brief[:k] + late["brief"] + brief[k:] + late.get("after", "") if k >= 0 else brief + late["brief"]}
 
 
 def _numbered(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1019,12 +1051,14 @@ def summary_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
     links = _links_spec(spaces, subject_links(spaces)) if len(spaces) > 1 else None    # the overviews then read
     covered: dict[str, dict[str, Any]] = {}
     for s, spec in zip(spaces, first):
-        covered.setdefault(str(s["doc"]["id"]), {"slugs": [], "chars": shares.get(s["doc"]["id"], DOCS_CHARS)})[
-            "slugs"].append(spec["slug"])
+        info = covered.setdefault(str(s["doc"]["id"]), {"slugs": [], "spaces": {}, "doc": s["doc"],
+                                                       "chars": shares.get(s["doc"]["id"], DOCS_CHARS)})
+        info["slugs"].append(spec["slug"])
+        info["spaces"][spec["slug"]] = s["space"]           # (0.11.6.1) the space each page holds
     if covered:                                       # (in place of the wiki's digest, when written: _late)
         for spec, brief, before in zip(specs, (WIKI_OVERVIEW, WIKI_TECHNICAL), (WIKI_OVERVIEW_BEFORE, None)):
             spec["late"] = {"docs": covered, "links": links["slug"] if links else None, "brief": brief,
-                            "before": before}
+                            "before": before, "after": WIKI_OVERVIEW_AFTER if before else ""}
     specs = first + ([links] if links else []) + specs
     for app in _apps(ev):
         ev_app = []

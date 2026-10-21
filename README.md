@@ -110,7 +110,7 @@ Content-Security-Policy (Talisman nonces).
 ```bash
 # the Python of Superset's virtualenv
 PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-$PY -m pip install supagent-0.11.6-py3-none-any.whl         # Superset 6.1: nothing else to install
+$PY -m pip install supagent-0.11.6.1-py3-none-any.whl         # Superset 6.1: nothing else to install
 ```
 
 One line in `superset_config.py` registers it. It holds no logic:
@@ -152,6 +152,13 @@ row level security filters and dashboards keep them), the AI roles' users moved 
 then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with the knowledge written) and Viewer
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
+## Upgrade from 0.11.6 to 0.11.6.1
+
+pip install the wheel on every host and restart (tables unchanged, v20). The overviews read a wiki space by space, so
+a wiki of many spaces stays whole; context.space_min_pages and context.space_pages_max choose which spaces get a page
+of their own. Measured: without the LLM: a 32-space, ~3,000-page wiki keeps all 32 spaces in the overviews' input, in
+its room; the test databases' page inputs as in 0.11.6; browser tests 26 passed; unit tests 2,379.
 
 ## Upgrade from 0.11.5 to 0.11.6
 
