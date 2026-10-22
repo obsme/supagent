@@ -100,7 +100,8 @@ def apply(auto_metrics: bool | None = None) -> dict[str, int]:
     """The links the data shows (see the module): indices' pairs proposed, metrics' pairs linked at once (or
     proposed, categories.label_links off), seen again: their date; not seen for long: their removal proposed."""
     from supagent import settings
-    from supagent.knowledge.facets import PART_OF, editable, suggest_link
+    from supagent.knowledge.catkind import serverish
+    from supagent.knowledge.facets import PART_OF, editable, host_of, suggest_link
     from supagent.models import Facet, KObject, Link
 
     least = int(settings.get("categories.relation_min_docs") or 5)
@@ -147,6 +148,10 @@ def apply(auto_metrics: bool | None = None) -> dict[str, int]:
                     kind_here, from_here = PART_OF, qcat
                 else:
                     parent, child = values.get((pcat, str(pv).lower())), values.get((ccat, str(cv).lower()))
+                    if parent is None and serverish(pcat) and host_of(pv):   # (0.11.8) "web01:9100": the server is
+                        parent = values.get((pcat, host_of(pv).lower()))     # its host (the value a component on it)
+                    if child is None and serverish(ccat) and host_of(cv):
+                        child = values.get((ccat, host_of(cv).lower()))
                 if parent is None or child is None or parent.id == child.id:
                     continue
                 kind = kind_here

@@ -110,7 +110,7 @@ Content-Security-Policy (Talisman nonces).
 ```bash
 # the Python of Superset's virtualenv
 PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-$PY -m pip install supagent-0.11.7-py3-none-any.whl         # Superset 6.1: nothing else to install
+$PY -m pip install supagent-0.11.8-py3-none-any.whl         # Superset 6.1: nothing else to install
 ```
 
 One line in `superset_config.py` registers it. It holds no logic:
@@ -152,6 +152,17 @@ row level security filters and dashboards keep them), the AI roles' users moved 
 then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with the knowledge written) and Viewer
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
+## Upgrade from 0.11.7 to 0.11.8
+
+pip install the wheel on every host and restart (tables unchanged, v20). A server's name with its port ("web01:9100",
+Prometheus' instance) is a component on that server, described by the metrics it ships (the node-exporter for node_*);
+what a part is and who owns it is read in more of the ways pages write it (sentences, Page Properties, catalog
+tables). Measured: released by the owner's decision, its gate not met. The server fix on the lab's Prometheus metrics:
+185 values written with their port were servers in 0.11.7, all 185 are components on their host now (182
+node-exporter). On a new 28-space test wiki the parts index found 36 of 45 parts (0.11.7: 17); parts said only in
+free-form sentences are missed (the overview listed 13-15 of 18 applications), their reading comes next. Unit tests
+2,405; browser tests 26.
 
 ## Upgrade from 0.11.6.1 to 0.11.7
 

@@ -1,5 +1,49 @@
 # Changes
 
+## 0.11.8 — 2026-10-22
+
+**A server's name with its port is a component on that server.** With Prometheus or Mimir data, a server category
+that reads the `instance` label filed every scrape target as a server ("web01:9100"). Now its host is the server
+(web01) and the value itself a component running on it, described by the metrics it ships: "The node-exporter of
+web01 (port 9100): it ships the node_* metrics" (pg_*, redis_*, mysql_*, kafka_*... the well-known exporters; for
+others, the prefix of its metrics), part of the exporter's own value when the map has one (node-exporter, "node
+exporter"). The values filed as servers before are moved to the components at the next learning (a value a person
+made stays); the links read from a metric's series, the AI's proposals and the Context's servers list follow the
+same rule. On the lab's metrics: 185 server values written with their port became 185 components on their host
+(182 node-exporter, 1 postgres-exporter, 1 redis-exporter, 1 Java application), none left as a server.
+
+**What a part is and who owns it, in more of the ways pages write it.** The reading of the pages (without the LLM)
+now takes a part's kind and its team from "x is the trading application, looked after by the y crew", "x, our
+billing application, is run by ...", "x (application): owned by ...", "The metering application x is maintained by
+...", "x is a platform service of the y crew", "x: a module of y, run by ...", "x — the trading app — is owned by
+...", "The x app is maintained by ...", "x belongs to the y squad"; from a page's properties (Confluence's Page
+Properties, "Key: value" lines: "Type | Application", "Owner | Payments team"); and from a catalog page's table
+("Name | Type | Owner": each row a part of the kind its Type cell says). A part so defined is known on every page
+(its relations on other pages are read), and "call the Harbor crew on duty" is a team, no part called. A part's name
+with no hyphen, digit or capital ("lakeview") now names the pages whose title has it as a whole piece ("Design:
+lakeview (53)", "Minutes 04.09.2024 - lakeview"); a module or a service of an application is one of its components.
+The upgrade reads every page again once (the next learning).
+
+**Space pages open on their parts, not their teams** (an opening line listing the teams named an owner a dated change
+had replaced next to its part; each part's owner now is in the table).
+
+Released by the owner's decision with its gate not met. The server fix, on a copy of the lab's Prometheus metrics: the
+released 0.11.7 filed 185 values written with their port as servers; 0.11.8 files none: the 185 are components on
+their host, and the 182 whose metrics are node_* are each described as the node-exporter. Gate G-0.11.8, on a new
+generated test wiki of 28 spaces and 2,541 pages (45 applications, components and services; 38 relations) written
+after the code was settled, three builds with the lab's LLM (Qwen3.6-35B-A3B; gpt-oss-120b not tested): every space
+page, the links page and both overviews written in 14 to 15 minutes, no older value stated as current, every space
+named. The parts index found the own space of 36 of the 45 parts (0.11.7: 17) and 82 % of their other spaces (0.11.7:
+38 %); the nine it missed are said only in free-form sentences ("We, the Okapi squad, run agentdesk, the actuarial
+application", "In short: riskmap = risk application") that no pattern of the reader names, so the overview's
+Applications table had 13 to 15 of the 18 applications, one space page left one of its parts out, and one links page
+of three wrote how it was made ("the first 20 relations"). The relations read with their meaning: 13 of 38 (0.11.7:
+1). The 6,000-page regression wiki: its checks met. Unit tests: 2,405 passed; browser tests: 26 passed. Reading such
+free-form sentences with the LLM is the next release's.
+
+Upgrade from 0.11.7: pip install the wheel on every host and restart the web servers (the workers and beat as usual);
+nothing to run (tables unchanged, v20). INSTALL.txt, *From 0.11.7 to 0.11.8*.
+
 ## 0.11.7 — 2026-10-22
 
 **Every space of a big wiki has its own Context page.** A Confluence wiki longer than what the overviews read whole

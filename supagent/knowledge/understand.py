@@ -1356,6 +1356,8 @@ CLOUD_SERVICE = re.compile(r"(?i)^(?:amazon|aws|azure|microsoft\s+azure|google\s
 STORE_COLUMN = re.compile(r"(?i)^\s*(?:dbs?|databases?|datastores?|data\s+stores?|stores?|bases?\s+de\s+donn[ée]es|"
                           + KEEPS_DATA + r")\s*$")
 COLUMNS = [   # what a table's column says of its row's part (its header)
+    ("is_a", re.compile(r"^\s*(?:type|kind|category|nature)\s*$", re.I)),   # (0.11.7) "Name | Type | Owner": a
+    #                         catalog of the parts, each row's kind ("Application", "Service")
     ("runs_on", re.compile(r"\b(runs?\s+on|hosts?|servers?|nodes?|machines?|vms?|platform|cluster|located|hosting|"
                            r"hosted\s+on|deployed\s+(?:to|on))\b|"
                            r"\b(?:target|host|inventory|ansible|server|deployment)\s+groups?\b|^\s*groups?\s*$", re.I)),
@@ -1407,6 +1409,9 @@ KV_HEAD = re.compile(r"(?i)^\s*(?:propert(?:y|ies)|keys?|attributes?|fields?|ite
 KV_VALUE = re.compile(r"(?i)^\s*(?:values?|details?|descriptions?|infos?|information|valeurs?|détails?|werte?|"
                       r"angaben?)\s*$")
 PROPERTIES = [
+    # (0.11.7) what the part is ("Type | Application", "Kind: service"): its kind when the value is one
+    ("is_a", "kind", re.compile(r"(?i)^(?:type|kind|category|nature|(?:component|service|application|system|asset)\s+"
+                                r"type|typ|art|catégorie)$")),
     ("part_of", "part", re.compile(r"(?i)^(?:domain|domaine|domäne|application|app|anwendung|system|système|área|area|"
                                    r"ámbito|dominio|sistema|"
                                    r"product(?:\s+line)?|produit|platform|plateforme|belongs\s+to|part\s+of|parent|"
@@ -1697,16 +1702,73 @@ def _memberships(s: str, found: list[tuple[int, str, str]], names: Any, unit_par
 
 # (0.11.7) a sentence's last words saying who owns its subject ("x is a component of y, owned by the z team"), and a
 # part's kind said alone ("x is a service", "x is an internal application")
-OWNER_TAIL = re.compile(r"(?i)(?:,\s*|\s+)(?:owned|maintained|run|operated|managed|supported)\s+by\s+(?:the\s+)?"
-                        r"(?P<team>[^,;:()]+?)\s*(?=[.;]?\s*$)")
+OWNER_TAIL = re.compile(r"(?i)(?:,\s*|\s+)(?:owned|maintained|run|operated|managed|supported|looked\s+after|"
+                        r"cared\s+for)\s+by\s+(?:the\s+)?(?P<team>[^,;:()]+?)\s*(?=[.;]?\s*$)")
 KIND_IS = re.compile(r"(?i)^\W*(?:the\s+)?(?P<a>[\w][\w.-]*(?:\s+[\w][\w.-]*){0,2}?)\s+(?:is|are)\s+(?:a|an|one)\s+"
                      r"(?:[\w-]+\s+){0,2}?(?P<kind>" + MEMBER_KIND + r")\s*[.;]?\s*$")
+# (0.11.7) a part said with its kind in the other orders pages write it ("x is the trading application, looked after by
+# the y crew", "x, our billing application, is run by ...", "x (application): owned by ...", "The metering
+# application x is maintained by ...", "x is a platform service of the y crew", "x: a module of y"): none of them was
+# read, so a part a page so defines had no fact at all (no kind, no owner, no relation: an end must be a known part)
+_DNAME = r"(?P<a>[A-Za-z0-9][\w.-]*[A-Za-z0-9])"
+_DKIND = r"(?:[\w-]+\s+){0,3}?(?P<kind>" + MEMBER_KIND + r")"
+_DET = r"(?:a|an|the|one|our|their)\s+"
+_KIND_ENDS = (r"(?=\s*(?:$|[,.;:(]|\s(?:of|for|in|at|on|that|which|who|used|behind|with|from|to|by|and|owned|run|"
+              r"operated|maintained|managed|supported|looked|cared)\b))")
+DECLARED = (re.compile(r"(?i)^\W*" + _DNAME + r"\s+(?:is|was)\s+" + _DET + _DKIND + _KIND_ENDS),
+            re.compile(r"(?i)^\W*" + _DNAME + r"(?:,|\s+[—–]|\s+--?)\s+" + _DET + _DKIND + r"\s*(?:,|[—–]|--?\s)"),
+            re.compile(r"(?i)^\W*" + _DNAME + r"\s*\(\s*(?P<kind>" + MEMBER_KIND + r")\s*\)\s*(?:[:,;.—–-]|$)"),
+            re.compile(r"(?i)^\W*(?:the|our|their)\s+" + _DKIND + r"\s+" + _DNAME + r"\s+(?:is|was)\b"),
+            re.compile(r"(?i)^\W*(?:the|our|their)\s+" + _DNAME + r"\s+(?P<kind>" + MEMBER_KIND + r")\s+(?:is|was)\b"),
+            re.compile(r"(?i)^\W*" + _DNAME + r"\s*:\s+" + _DET + _DKIND + _KIND_ENDS))
+TEAM_AFTER = re.compile(r"(?i)\s+of\s+(?:the\s+)?(?P<team>[^,;:()]{2,60}?)\s*(?=[.;,]|$)")
+# (0.11.7) a name followed by a team's word is the team ("call the Harbor crew on duty"), never a part it calls
+TEAM_NEXT = re.compile(r"(?i)[ \t]+(?:teams?|squads?|tribes?|crews?|guilds?|chapters?)\b")
+
+
+def declared(s: str) -> tuple[str, str, str | None, str | None] | None:
+    """(0.11.7) (the name as written, its kind, its team, its whole; None when not said) of a sentence saying what a
+    part is in one of DECLARED's orders ("x: a module of y, run by the z crew": y its whole, the z crew its team);
+    never a pronoun, a team or a tiny word (the caller keeps a name it knows, a name of its own shape or the page's
+    own)."""
+    def team_of(words: str | None) -> str | None:
+        return " ".join(words.split()).strip(" .") if words and TEAM_WORD.search(words) and \
+            len(words.split()) <= 5 else None
+
+    for rx in DECLARED:
+        m = rx.match(s)
+        if not m:
+            continue
+        a, kind = m.group("a"), _kind_word(m.group("kind"))
+        if not kind or PRONOUN.match(a) or a.lower() in TINY_WORDS or TEAM_WORD.search(a):
+            return None
+        tail, after = OWNER_TAIL.search(s), TEAM_AFTER.match(s, m.end())
+        team = team_of(after.group("team") if after else None) or team_of(tail.group("team") if tail else None)
+        whole = after.group("team").strip(" .") if after and not team_of(after.group("team")) else None
+        return a, kind, team, whole
+    return None
+
+
+def declared_names(text: str, title: str) -> list[str]:
+    """(0.11.7) The names a page's sentences define as parts (declared()): a name of its own shape ("fleet-track",
+    "QuokkaDB"), or the page's title, its "(...)" set apart ("archview (seen from Infrastructure)": archview)."""
+    own = norm(re.sub(r"\s*\([^)]*\)\s*$", "", " ".join((title or "").split())))
+    out = []
+    for line in (text or "").splitlines():
+        for sentence in re.split(r"(?<=[.!?])\s+", line.strip()):
+            d = declared(re.sub(r"^\s*(?:#{1,6}\s+|[-*+>]\s+)", "", sentence)) if len(sentence) > 8 else None
+            if d and (ID_TOKEN.fullmatch(d[0]) or PROSE_NAME.fullmatch(d[0]) or norm(d[0]) == own):
+                out.append(d[0])
+    return list(dict.fromkeys(out))
 # (0.10.10) who owns a part, as a sentence says it: "x is owned by the y team", "the y squad owns x and z", "x est géré
 # par l'équipe y", "x appartient à l'équipe y"; the owner is a team (its words say so), never a person
 TEAM_WORD = re.compile(r"(?i)\b(?:teams?|squads?|tribes?|crews?|guilds?|chapters?|[ée]quipes?|equipos?)\b")
 # (0.10.9.2) a team's word standing alone in the phrase, never inside a name (a "teams-chat-notifier" job)
 TEAM_ALONE = re.compile(r"(?i)(?<![\w.-])(?:teams?|squads?|tribes?|crews?|guilds?|chapters?|[ée]quipes?|equipos?)(?![\w.-])")
-OWNED_BY = re.compile(r"(?i)^\W*(?:the\s+)?(?P<a>.+?)\s+(?:is|are)\s+(?:owned|maintained|run|operated|managed)\s+by\s+"
+# (0.11.7) "x belongs to the y crew" (a team: its words say so; "belongs to the payments domain" is no owner)
+BELONGS = re.compile(r"(?i)^\W*(?:the\s+)?(?P<a>.+?)\s+belongs?\s+to\s+(?:the\s+)?(?P<b>[^,;:()]+?)\s*(?:[.;,(]|$)")
+OWNED_BY = re.compile(r"(?i)^\W*(?:the\s+)?(?P<a>.+?)\s+(?:is|are)\s+(?:owned|maintained|run|operated|managed|"
+                      r"looked\s+after|cared\s+for)\s+by\s+"
                       r"(?:the\s+)?(?P<b>[^,;:()]+?)\s*(?:[.;,(]|$)")
 OWNS = re.compile(r"(?i)^\W*(?:the\s+|l[ea]\s+|l['’]|die\s+|der\s+|das\s+)?(?P<b>[^,;:()]+?)\s+(?:also\s+)?"
                   r"(?:owns|maintains|operates|manages|runs|is\s+responsible\s+for|(?:is|are)\s+accountable\s+for|"
@@ -1756,12 +1818,18 @@ def titled_name(title: str, text: str) -> str | None:
     if any(w in VERBS for w in words) or words[0] in DETERMINERS:
         return None
     structural = ("part_of", "uses", "runs_on", "sends_to", "reads_from", "alias")
+
+    def says(key: str, value: str) -> str:              # (0.11.7) "Type: Application" says what it is (a kind,
+        verb = (_property(key) or ("", ""))[0]          # "Type: runbook" not: the page's own kind)
+        return "part_of" if verb == "is_a" and _kind_word(value) and len(value.split()) <= 3 else \
+            "" if verb == "is_a" else verb
+
     for t0, header, rows in _tables(text or ""):
         kv = _key_values(t0, header, rows)
-        if kv and any((_property(k) or ("", ""))[0] in structural for _r, k, _v in kv):
+        if kv and any(says(k, v) in structural for _r, k, v in kv):
             return t
     top = re.split(r"(?m)^[ \t]*#{1,6}[ \t]", diagram_free(text or ""), maxsplit=1)[0]   # (before any section)
-    said = [(_property(km.group("key")) or ("", ""))[0] for _at, x in list(_sentences(top))[:12]
+    said = [says(km.group("key"), km.group("value")) for _at, x in list(_sentences(top))[:12]
             for km in [KEY_LINE.match(x)] if km]       # (0.10.10) or its "Key: value" lines at its top ("Part of: x",
     if sum(1 for v in said if v) >= 2 and any(v in structural for v in said):   # "Product team: y"), two the reader
         return t                                                                  # knows, one of them structural
@@ -1876,7 +1944,7 @@ def _ownerships(s: str, found: list[tuple[int, str, str]], unit_part: str = "", 
     sentence (or the page's own part for "it"); "It owns a, b" on a team's own page (its title says a team)."""
     if NEGATED.search(s) or len(s) > 300:
         return []
-    for rx in (OWNED_BY, OWNED_FR):
+    for rx in (OWNED_BY, OWNED_FR, BELONGS):
         m = rx.match(s)
         if m and TEAM_WORD.search(m.group("b")) and len(m.group("b").split()) <= 5:
             team = " ".join(m.group("b").split()).strip(" .")
@@ -2488,6 +2556,11 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
             value = value.strip(" .;*`")
             if not value or PLACEHOLDER.fullmatch(value) or len(value) > 200:
                 return True
+            if verb == "is_a":                            # (0.11.7) "Type: Application": a kind, or nothing ("Type:
+                k = _kind_word(value)                     # runbook" is the page's own kind, no part's)
+                if k and len(value.split()) <= 3:
+                    fact(part, "is_a", k, "kind", pos, conf=0.75)
+                return True
             if verb == "owned_by":
                 team = " ".join(re.sub(r"(?i)^(?:the|l['’]|la|le|die|der)\s+", "", value).split())
                 if INFRA_VALUE["owned_by"].search(team) and len(team) <= 60:
@@ -2748,6 +2821,10 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                                      conf=0.75)
                                 if not (names.part(value) or own.get(norm(value))):   # what the column says it is
                                     fact(value, "is_a", "domain", "kind", r0, conf=0.7)
+                        elif role == "is_a":              # (0.11.7) a catalog's "Type" cell: the row's kind, or
+                            k = _kind_word(value)         # nothing ("Type | VM", "Type | counter")
+                            if k and len(value.split()) <= 3:
+                                fact(part, "is_a", k, "kind", r0, conf=0.75)
                         elif role == "owned_by" and INFRA_VALUE["owned_by"].search(value) and len(value) <= 60:
                             value = re.sub(r"(?i)^(?:the|l['’]|la|le|die|der)\s+", "", value)   # (0.10.10) "the x squad"
                             whole = whole_team.get(norm(cells[wcol].strip(" `*"))) if wcol < len(cells) else None
@@ -2828,6 +2905,7 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                                                  not (names.hosts.get(norm(y[1])) and not names.service(y[1]))
                                                  for y in found)]   # (0.10.5) a server named after its service
             #                                     ("the media relays (sfu) run on sfu-node-01") hides no part's name
+            found = [x for x in found if not TEAM_NEXT.match(s, x[0] + len(x[1]))]   # (0.11.7) "the Harbor crew"
             for m in INTRODUCED.finditer(s):              # (0.10.10) "uses the datastore orders-pg": a name its
                 at = m.start("name")                      # noun says what it is, known or not
                 if not any(a <= at < a + len(w) for a, w, _p in found) and not names.hosts.get(norm(m.group("name"))):
@@ -2856,6 +2934,19 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                 said_kinds.append((said_part, _kind_word(km.group("kind"))))
             if tail and said_part:
                 fact(said_part, "owned_by", " ".join(tail.group("team").split()).strip(" ."), "owner", start, conf=0.75)
+            dm = declared(s) if not members and not km else None   # (0.11.7) its kind and team in another order
+            dpart = (names.part(dm[0]) or own.get(norm(dm[0])) or
+                     (unit_part if unit_part and norm(dm[0]) == norm(unit_part) else None) or
+                     (dm[0] if ID_TOKEN.fullmatch(dm[0]) or PROSE_NAME.fullmatch(dm[0]) else None)) if dm else None
+            if dpart and not any(norm(w) == norm(dm[0]) for _a, w, _p in found):
+                found = sorted(found + [(s.find(dm[0]), dm[0], dpart)])   # (its owner's sentence: this name, no phrase)
+            if dpart:
+                said_kinds.append((dpart, dm[1]))
+                if dm[2]:
+                    fact(dpart, "owned_by", dm[2], "owner", start, conf=0.75)
+                whole = (names.part(dm[3]) or own.get(norm(dm[3]))) if dm[3] else None
+                if whole:                                 # ("x: a module of y", y a part the reading knows)
+                    fact(dpart, "part_of", whole, "part", start, conf=0.75)
             for x, k in said_kinds:                       # (0.10.10) and what the sentence says they are
                 fact(x, "is_a", k, "kind", start, conf=0.7)
             for part, team in _ownerships(s, found, unit_part, unit.get("title") or ""):   # (0.10.10) "x is owned
@@ -3273,6 +3364,29 @@ def grouped_rows(text: str, names: Names) -> list[str]:
     return out
 
 
+def _catalog_row(roles: list[str | None], first: str, cells: list[str], names: Names) -> bool:
+    """(0.11.7) A row of a catalog of the parts ("Name | Type | Owner"): its name a name (one word, no phrase) and its
+    "Type" cell a part's kind ("Application", "Service", "Component"); a host or a placeholder never."""
+    if PLACEHOLDER.fullmatch(first or "") or names.hosts.get(norm(first)) or \
+            not re.fullmatch(r"[A-Za-z0-9][\w.-]{1,40}", (first or "").strip(" `*")):
+        return False
+    return any(role == "is_a" and _kind_word(cell) and len(cell.split()) <= 3 for role, cell in zip(roles[1:], cells[1:]))
+
+
+def catalog_names(text: str) -> list[str]:
+    """(0.11.7) The names a page's catalog tables declare as parts ("Name | Type | Owner" rows of a part's kind)."""
+    out = []
+    for _t0, header, rows in _tables(text or ""):
+        roles = [next((v for v, rx in COLUMNS if rx.search(h)), None) for h in header]
+        if "is_a" not in roles[1:]:
+            continue
+        for _r0, cells in rows:
+            first = (cells[0] if cells else "").strip(" `*")
+            if _catalog_row(roles, first, cells, Names()):
+                out.append(first)
+    return list(dict.fromkeys(out))
+
+
 def _service_row(header: list[str], roles: list[str | None], first: str, cells: list[str], names: Names) -> bool:
     """(0.10.9) A row of a table of services ("Application | Purpose | Owner | Servers") naming a service nothing else
     declares: its first column is headed as services, its name is a name (lowercase, or with a separator or a digit:
@@ -3283,6 +3397,8 @@ def _service_row(header: list[str], roles: list[str | None], first: str, cells: 
         return True                                       # (0.10.10) a table of datastores, topics, jobs lists them
     if _named_after_its_group(first, roles, cells, names):
         return True                                       # (0.10.9.2) "Quokka | ... | quokka_backend, quokka_backend_stg"
+    if _catalog_row(roles, first, cells, names):
+        return True                                       # (0.11.7) "Name | Type | Owner": a part of the kind it says
     if not header or not SERVICE_HEAD.fullmatch(header[0].strip(" *`")) or PLACEHOLDER.fullmatch(first or "") or \
             PLATFORMS.match(first or "") or names.hosts.get(norm(first)) or not (
                 re.fullmatch(r"[a-z0-9][a-z0-9_.-]{1,40}", first or "") or
@@ -3421,6 +3537,9 @@ def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
                 addressed.extend((nm, h) for nm, h, _p in addressed_names(u["text"] or ""))   # (0.10.9.1)
                 for nm in introduced_names(u["text"] or ""):
                     if not names.hosts.get(norm(nm)):
+                        own.setdefault(norm(nm), names.part(nm) or nm)
+                for nm in declared_names(u["text"] or "", u.get("title") or "") + catalog_names(u["text"] or ""):
+                    if not names.hosts.get(norm(nm)):     # (0.11.7) what its sentences and catalogs define as parts
                         own.setdefault(norm(nm), names.part(nm) or nm)
                 nm = titled_name(u.get("title") or "", u["text"] or "")   # (0.10.10) the part a page is about,
                 if nm and not names.hosts.get(norm(nm)):                     # by its title

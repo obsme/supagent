@@ -1,16 +1,16 @@
-supagent 0.11.7 - the AI agent inside Apache Superset
+supagent 0.11.8 - the AI agent inside Apache Superset
 =====================================================
 
 What is in this folder
-  supagent-0.11.7-py3-none-any.whl   the package for Superset 6.1 (pure Python; nothing else to install)
+  supagent-0.11.8-py3-none-any.whl   the package for Superset 6.1 (pure Python; nothing else to install)
   supagent-guide.html / .pdf          the guide (install, LLM middleware, learning, screens)
   supagent-user-guide.html / .pdf     how to use it: every page, button, setting and command
   catalog.example.yaml                an example catalog, to adapt
   grafana-wheels/                     mcp and what it needs beyond Superset 6.1 (Grafana, without internet)
   SHA256SUMS                          checksums
 
-Upgrading? From 0.11.6.1: pip install this wheel on every host, restart; nothing to run: "From 0.11.6.1
-to 0.11.7" below. From 0.11.6 or 0.11.5: the same, and the sections below. From 0.11.4: the same, and "From 0.11.4 to 0.11.5" below. From 0.11.3: the same, and "From 0.11.3 to 0.11.4" below. From 0.11.1.1: the same, and "From 0.11.1.1 to 0.11.3" below. From 0.11.1: the same, and "From 0.11.1 to 0.11.1.1" below. From 0.11.0: the same, and "From 0.11.0 to 0.11.1" below. From 0.10.12.1: the same, and "From 0.10.12.1 to 0.11.0" below. From 0.10.12: the same, and "From 0.10.12 to 0.10.12.1" below. From 0.10.11.2: the same, and "From 0.10.11.2 to 0.10.12" below. From 0.10.11.1: the same, and "From 0.10.11.1 to 0.10.11.2" below. From 0.10.11: the
+Upgrading? From 0.11.7: pip install this wheel on every host, restart; nothing to run: "From 0.11.7
+to 0.11.8" below. From 0.11.6.1, 0.11.6 or 0.11.5: the same, and the sections below. From 0.11.4: the same, and "From 0.11.4 to 0.11.5" below. From 0.11.3: the same, and "From 0.11.3 to 0.11.4" below. From 0.11.1.1: the same, and "From 0.11.1.1 to 0.11.3" below. From 0.11.1: the same, and "From 0.11.1 to 0.11.1.1" below. From 0.11.0: the same, and "From 0.11.0 to 0.11.1" below. From 0.10.12.1: the same, and "From 0.10.12.1 to 0.11.0" below. From 0.10.12: the same, and "From 0.10.12 to 0.10.12.1" below. From 0.10.11.2: the same, and "From 0.10.11.2 to 0.10.12" below. From 0.10.11.1: the same, and "From 0.10.11.1 to 0.10.11.2" below. From 0.10.11: the
 same, and "From 0.10.11 to 0.10.11.1" below. From 0.10.10: the
 same, and "From 0.10.10 to 0.10.11" below. From 0.10.9.2: pip install
 this wheel on every host, run superset supagent init (tables v20), restart: "From 0.10.9.2 to 0.10.10" and
@@ -40,7 +40,7 @@ role): three packages must be pinned, or Superset itself does not start (none is
 1. Install in Superset's virtualenv (pip only)
 
    PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-   $PY -m pip install supagent-0.11.7-py3-none-any.whl
+   $PY -m pip install supagent-0.11.8-py3-none-any.whl
    Superset 6.1: nothing else is needed (offline too).
 
 2. Register it: one line in superset_config.py (no logic)
@@ -191,6 +191,19 @@ role): three packages must be pinned, or Superset itself does not start (none is
    wait: grafana.read_new, osd.read_new); a whole search at once. What is switched off leaves the Context and the
    search at once and is no longer read, explained or watched; the agent says it exists and is switched off when a
    question names it. "List now" reads the list again (no AI); every learning does too.
+
+From 0.11.7 to 0.11.8
+=====================
+  - pip install the wheel on every host and restart the web servers, the workers and beat; nothing to run (tables
+    unchanged, v20). The next learning reads every page and file again once (the reading's rules changed).
+  - A server category reading Prometheus' instance label: a value with its port ("web01:9100") is now a component
+    on its server (web01), described by the metrics it ships (the node-exporter for node_*); the values filed as
+    servers before move to the components at the next learning (a value made by hand stays).
+  - Measured: released by the owner's decision, its gate not met. The server fix on the lab's Prometheus metrics: 185
+    values written with their port were servers in 0.11.7, all 185 are components on their host now (182
+    node-exporter). On a new 28-space test wiki the parts index found 36 of 45 parts (0.11.7: 17); parts said only in
+    free-form sentences are missed (the overview listed 13-15 of 18 applications), their reading comes next. Unit
+    tests 2,405; browser tests 26.
 
 From 0.11.6.1 to 0.11.7
 =======================

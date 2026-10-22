@@ -404,6 +404,8 @@ def seed() -> dict[str, int]:
 
     named_after = qualified()                         # a disk alone names nothing: made with its server (datalinks)
     found_values = {k: v for k, v in found_values.items() if k[0] not in named_after}
+    n["moved_endpoints"] = _move_endpoints()          # (0.11.8) "web01:9100" filed as a server before: a component
+    found_values, endpoints = _split_endpoints(found_values)
     if found_values:
         cats = sorted({cat for cat, _low in found_values})
         have: dict[tuple[str, str], Any] = {}
@@ -450,13 +452,147 @@ def seed() -> dict[str, int]:
             now = (other + list(dict.fromkeys(origins)))[:ORIGINS]
             if now != list(f.origins or []):          # where it is in the data today
                 f.origins = now
+    n["endpoints"] = _place_endpoints(endpoints, found)
     n["relations"] = relations_from_data()
     db.session.commit()
     return n
 
 
+def _split_endpoints(found: dict[tuple[str, str], dict[str, Any]]
+                     ) -> tuple[dict[tuple[str, str], dict[str, Any]], list[dict[str, Any]]]:
+    """(0.11.8) The values read in a server category's fields and labels, those written with their port set apart
+    (a component each, _place_endpoints) and their hosts in their place: the server web01 for web01:9100."""
+    from supagent.knowledge.catkind import serverish
+
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    endpoints: list[dict[str, Any]] = []
+
+    def put(key: tuple[str, str], slot: dict[str, Any]) -> None:
+        prev = out.get(key)
+        out[key] = slot if prev is None else {**prev, "origins": list(dict.fromkeys(prev["origins"] + slot["origins"]))[:ORIGINS]}
+
+    for (cat, low), slot in found.items():
+        host = host_of(slot["value"]) if serverish(cat) else None
+        if host is None:
+            put((cat, low), slot)
+            continue
+        m = ENDPOINT.match(slot["value"])
+        endpoints.append({"category": cat, "value": slot["value"], "host": host, "port": m.group("port"),
+                          "origins": slot["origins"], "metrics": slot.get("metrics") or []})
+        put((cat, host.lower()), {"value": host, "origins": [f"{o} (the host of {slot['value']})"
+                                                             for o in slot["origins"][:2]]})
+    return out, endpoints
+
+
+def _exporter_value(name: str, prefix: str, status: str) -> Any:
+    """(0.11.8) The component an exporter is: the one of that name on the map (node-exporter, "node exporter",
+    node_exporter), else made."""
+    from supagent.models import Facet
+
+    key = re.sub(r"[\s_.-]+", "", name.lower())
+    for f in db.session.query(Facet).filter(Facet.facet == "component", Facet.status != "rejected"):
+        if re.sub(r"[\s_.-]+", "", (f.value or "").lower()) == key:
+            return f
+    return _ensure("component", name, status, "data", description=f"The exporter shipping the {prefix} metrics.",
+                   origin=f"what ships the metrics {prefix}")
+
+
+def _place_endpoints(endpoints: list[dict[str, Any]], status: str) -> int:
+    """(0.11.8) Each value written with its port: a component (web01:9100), what it is said by its metrics (the
+    node-exporter of web01 for node_*), running on its host (the server web01) and part of the exporter it is.
+    Linked at once like the links a metric's labels show (categories.label_links), else proposed."""
+    from supagent import settings
+    from supagent.models import Facet, Link
+
+    auto = settings.get("categories.label_links")
+    placed = 0
+    for e in endpoints:
+        exporter, prefix = shipped_by(e["metrics"])
+        what = (f"The {exporter} of {e['host']} (port {e['port']}): it ships the {prefix} metrics." if exporter else
+                f"A component on {e['host']} (port {e['port']})" + (f": it ships the {prefix} metrics." if prefix
+                                                                    else "."))
+        comp = _ensure("component", e["value"], status, "data", description=what,
+                       origin=(e["origins"] or [None])[0])
+        if comp is None:
+            continue
+        if not comp.description:
+            comp.description = what
+        placed += 1
+        host = db.session.query(Facet).filter(Facet.facet == e["category"], same_name(Facet.value, e["host"])).first()
+        pairs = [(comp, host, "runs_on", f"{e['value']} (a server's name with its port): it runs on {e['host']}")]
+        kind_value = _exporter_value(exporter, prefix, status) if exporter else None
+        pairs.append((comp, kind_value, PART_OF, f"{e['value']} ships the {prefix} metrics: the {exporter}"))
+        for a, b, kind, why in pairs:
+            if b is None or a.id == b.id or db.session.query(Link).filter(
+                    Link.a_ref == f"facet:{a.id}", Link.b_ref == f"facet:{b.id}", Link.kind == kind).first():
+                continue
+            if auto:
+                db.session.add(Link(a_ref=f"facet:{a.id}", b_ref=f"facet:{b.id}", kind=kind, status="approved",
+                                    source="data", confidence=1.0, evidence=why[:2000], seen_at=dt.datetime.utcnow()))
+            else:
+                suggest_link(a.id, b.id, kind, "data", why)
+    db.session.flush()
+    return placed
+
+
+def _move_endpoints() -> int:
+    """(0.11.8) The values the learning filed in a server category written with their port before 0.11.8
+    ("web01:9100"): components now (the user's request; their links and items go with them, merged into a component
+    of that name if there is one); a value a person made stays where it is."""
+    from supagent.knowledge.catkind import serverish
+    from supagent.models import Facet
+
+    moved = 0
+    for f in db.session.query(Facet).filter(Facet.source == "data", Facet.status != "rejected",
+                                             Facet.facet != "component"):
+        if not serverish(f.facet) or host_of(f.value) is None:
+            continue
+        twin = db.session.query(Facet).filter(Facet.facet == "component", same_name(Facet.value, f.value)).first()
+        if twin is not None:
+            merge_value(f, twin)
+        else:
+            f.origins = ((f.origins or []) + [f"(0.11.8) moved from {f.facet}: a server's name with its port is a "
+                                              "component on that server"])[-10:]
+            f.facet = "component"
+        moved += 1
+    db.session.flush()
+    return moved
+
+
 ORIGINS = 8                 # origins kept on a value
 ORIGIN_NAMES = 3            # indices or metrics named in one of them
+# (0.11.8) a value of a server category written with its port (Prometheus' instance "web01:9100") is no server (the
+# user's request): its host is the server, the value a component on it, what it is said by the metrics it ships
+ENDPOINT = re.compile(r"^(?P<host>[A-Za-z0-9](?:[\w.-]*[A-Za-z0-9])?):(?P<port>\d{2,5})$")
+SCRAPE_ONLY = re.compile(r"^(?:up|scrape_\w+|go_\w+|process_\w+|promhttp_\w+|python_\w+|net_conntrack_\w+|"
+                         r"target_info|prometheus_target_\w+)$")   # what any scrape target has: says nothing of it
+ENDPOINT_METRICS = 500      # metrics kept per value written with its port (to say what ships them)
+
+
+def host_of(value: Any) -> str | None:
+    """(0.11.8) The host of a value written host:port ("web01" for "web01:9100"), else None."""
+    m = ENDPOINT.match(str(value or ""))
+    return m.group("host") if m and 0 < int(m.group("port")) < 65536 else None
+
+
+def shipped_by(metrics: Any) -> tuple[str | None, str | None]:
+    """(0.11.8) What ships these metrics: (the well-known exporter whose prefix most of them have, "node-exporter"
+    for node_*; else None, their main prefix as "node_*" or None when no prefix has half of them). The metrics every
+    scrape target has (up, scrape_*, go_*, process_*) say nothing."""
+    from supagent.knowledge.understand import EXPORTERS
+
+    own = [str(m) for m in metrics or [] if not SCRAPE_ONLY.match(str(m))]
+    heads = Counter(m.group(0).lower() for m in (re.match(r"[A-Za-z][A-Za-z0-9]*_", x) for x in own) if m)
+    if not heads:
+        return None, None
+    prefix, n = heads.most_common(1)[0]
+    if 2 * n < len(own):
+        return None, None
+    names = sorted(k for k, ps in EXPORTERS.items() if prefix in ps)
+    name = next((k for k in names if "exporter" in k), None) or (max(names, key=len) if names else None)
+    if name and "exporter" not in name and name not in ("kube-state-metrics", "cadvisor", "kubelet"):
+        name += "-exporter"                       # "mysqld" -> mysqld-exporter (the role and the job say "mysqld")
+    return name, prefix + "*"
 
 
 def data_values() -> tuple[dict[tuple[str, str], dict[str, Any]], int]:
@@ -485,6 +621,10 @@ def data_values() -> tuple[dict[tuple[str, str], dict[str, Any]], int]:
     names = dict(db.session.query(Source.id, Source.database_name))
     places: dict[tuple[str, str], dict[tuple[str, int, str], list[Any]]] = {}
     spelled: dict[tuple[str, str], str] = {}
+    shipped: dict[tuple[str, str], set[str]] = {}         # (0.11.8) the metrics of a value written host:port
+    from supagent.knowledge.catkind import serverish
+
+    servers = {cat for cats in wanted.values() for cat in cats if serverish(cat)}
     read = 0
     rows = db.session.query(KObject.kind, KObject.name, KObject.parent, KObject.source_id, KObject.stats).filter(
         KObject.kind.in_(kinds), KObject.gone_at.is_(None), KObject.name.in_(list(wanted)))
@@ -506,6 +646,10 @@ def data_values() -> tuple[dict[tuple[str, str], dict[str, Any]], int]:
                 slot[0] += 1
                 if len(slot[1]) < ORIGIN_NAMES:
                     slot[1].append(parent or "")
+                if kind == "label" and cat in servers and parent and host_of(v):
+                    got = shipped.setdefault(key, set())
+                    if len(got) < ENDPOINT_METRICS:
+                        got.add(parent)
     out: dict[tuple[str, str], dict[str, Any]] = {}
     for key, by_place in places.items():
         lines = []
@@ -516,6 +660,8 @@ def data_values() -> tuple[dict[tuple[str, str], dict[str, Any]], int]:
                 of = f"metric {of}"
             lines.append(f"{kind} {name} of {of}" + (f" ({names[source_id]})" if source_id in names else ""))
         out[key] = {"value": spelled[key], "origins": lines[:ORIGINS]}
+        if key in shipped:
+            out[key]["metrics"] = sorted(shipped[key])
     return out, read
 
 
@@ -820,6 +966,10 @@ def apply(args: dict[str, Any], batch: list[dict[str, Any]], table_refs: dict[st
         if to is None:
             n["not proposed"] = n.get("not proposed", 0) + 1
             return None, "a library", []
+        from supagent.knowledge.catkind import serverish
+
+        if serverish(to) and host_of(value):              # (0.11.8) "web01:9100": a component on web01, no server
+            to = "component"
         from supagent.knowledge.placing import PHRASE_OF, best_category, choose, phrases
 
         own_cats = [c for c in cats if c not in ("subject", "aspect", "application", "component")]

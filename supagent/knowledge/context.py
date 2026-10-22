@@ -67,8 +67,12 @@ SPACE_BRIEF = ("Explain what this wiki space documents, for a newcomer (## Subje
                "own space when its own pages are in another space, what holds now (its owner, hosts, versions, "
                "schedules, as the most recent pages say; where a page's own text says since when something holds, "
                "what that replaced and since when, with that day); ## Where to read more: its main pages, by their "
-               "titles). Keep each table cell short, one sentence: a space of many subjects fits one page.")
-#                            (0.11.7: the parts of its pages in its table, each with its own space when another one)
+               "titles). Keep each table cell short, one sentence: a space of many subjects fits one page. In the "
+               "opening lines name the space's parts and what they do, not its teams: each part's owner now is in "
+               "the table.")
+#                            (0.11.7: the parts of its pages in its table, each with its own space when another one;
+#                            0.11.8: no team in the opening lines: "teams like the Ember crew ... idgate" kept an owner
+#                            a dated change replaced next to its part)
 #                            (0.11.5: no dated list of changes: it gave routine page updates wrong years)
 DIGEST_BRANCH = 3          # (0.11.4) pages a branch of a document's tree needs to be a subject of its digest (fewer:
 #                            with its other pages)
@@ -318,6 +322,10 @@ def collect() -> dict[str, Any]:
                 slot = out["inventory"][names[0]].setdefault(s.database_id, {"holders": [], "values": set(),
                                                                             "partial": False})
                 slot["holders"].append(f"{o.kind} {o.name} of {o.parent}")
+                if names[0] == "Servers and hosts":       # (0.11.8) "web01:9100": the server is web01
+                    from supagent.knowledge.facets import host_of
+
+                    vals = [host_of(v) or v for v in vals]
                 slot["values"].update(map(str, vals))
                 slot["partial"] = slot["partial"] or bool(st.get("partial") or st.get("sample"))
         if not counts:                                   # nothing learned there (yet): no page

@@ -23,6 +23,11 @@ FLOW_VERBS = ("calls", "reads_from", "sends_to", "uses", "runs_on", "monitors", 
 PART_ENDS = ("part", "cluster", "database")      # an object that is a part (no host, index, metric, kind nor team)
 FACT_VERBS = FLOW_VERBS + ("part_of", "is_a", "owned_by")
 MIN_NAME = 3               # characters of a part's name for a page's title to name it
+# (0.11.7) the pieces of a title, a name of no shape of its own ("lakeview") naming the page only as a whole piece
+# ("Design: lakeview (53)", "Runbook - lakeview #77", "Minutes 04.09.2024 - lakeview", "lakeview v2.18"), never
+# inside a phrase ("Lakeview reports for the board")
+TITLE_PIECES = re.compile(r"\s*(?::\s|(?<![\w])[-–—](?![\w])|[()#?]|\bv\d[\d.]*\b|\b\d{4}-\d{2}-\d{2}\b|"
+                          r"\b\d{1,2}\.\d{1,2}\.\d{4}\b)\s*")
 CHANGE_WINDOW = 1880       # characters of a page's beginning read for a dated change (the digest's first lines)
 CHANGE_CHARS = 240         # of a change's sentence
 KIND_PHRASE = {"application": "an application", "component": "a component", "service": "a service",
@@ -155,6 +160,9 @@ def index(docs: list[dict[str, Any]], facets: dict[str, str] | None = None) -> d
         found = [norm(m) for m in titles.findall(t)] if titles else []
         if norm(t) in shown and norm(t) not in found:
             found.insert(0, norm(t))
+        for piece in TITLE_PIECES.split(t):
+            if len(piece) >= MIN_NAME and norm(piece) in shown and norm(piece) not in found:
+                found.append(norm(piece))
         if found:
             title_parts[key] = sorted(set(found), key=lambda k: -len(k))
             for k in found:
@@ -173,6 +181,9 @@ def index(docs: list[dict[str, Any]], facets: dict[str, str] | None = None) -> d
         said = [(kind, conf) for (kind, conf), _n in kinds.get(k, Counter()).items() if conf >= KIND_SAID]
         kind = (facets or {}).get(k) or (Counter(x for x, _c in said).most_common(1)[0][0] if said else None)
         of = wholes[k].most_common(1)[0][0] if wholes.get(k) else None
+        if not (facets or {}).get(k) and (kind == "module" or (kind == "service" and of)):
+            kind = "component"                             # (0.11.7) "x: a module of y", "a microservice of y": a
+            #                                                component of y (a service of its own has no whole)
         parts[k] = {"name": name, "kind": kind, "of": shown.get(of, of) if of else None, "home": home,
                     "spaces": spaces, "pages": pages,
                     "change": _latest_change(name, pages, page_of, space_of, content, titles, doc_of)}

@@ -451,3 +451,121 @@ def test_the_overview_names_the_wiki_applications_its_table_leaves_out(app):
     out = write_summary(spec, LLM([page, page]))
     text = out["content"]
     assert APPS_MORE + "Orderly." in text and text.index(APPS_MORE) < text.index("## Processes and chains")
+
+
+def test_a_part_said_with_its_kind_in_the_other_orders_pages_write(ctx):
+    """(0.11.7) What a part is and its team, in the other orders pages write it ("x is the trading application, looked
+    after by the y crew", "x, our billing application, is run by ...", "x (application): owned by ...", "The metering
+    application x is maintained by ...", "x is a platform service of the y crew", "x: a module of y"): none was read,
+    so a part a page so defines had no fact at all; a pronoun, a team or a phrase is no part."""
+    for text, want in [
+            ("ledger-pro is the trading application, looked after by the Ember crew.", ("ledger-pro", "application")),
+            ("supplier-hub, our finance application, is run by the Granite crew.", ("supplier-hub", "application")),
+            ("arch-view (application): owned by the Basalt crew.", ("arch-view", "application")),
+            ("The reporting application staff-portal is maintained by the Dune crew.", ("staff-portal", "application")),
+            ("vault-keeper is a platform service of the Amber crew.", ("vault-keeper", "service")),
+            ("id-gate, a shared service, is operated by the Flint crew.", ("id-gate", "service"))]:
+        got = _facts(text, [want[0]])
+        assert (want[0], "is_a", want[1]) in got, (text, got)
+        assert [f for f in got if f[1] == "owned_by" and f[0] == want[0] and f[2].endswith(" crew")], (text, got)
+    got = _facts("meter-ingest: a module of Orderly, run by the Amber crew.", ["meter-ingest"] + PARTS)
+    assert {("meter-ingest", "part_of", "Orderly"), ("meter-ingest", "owned_by", "Amber crew")} <= set(got)
+    for text, want in [("ledger-pro — the trading app — is owned by the Ember crew.", ("ledger-pro", "application")),
+                       ("The ledger-pro app is maintained by the Ember crew.", ("ledger-pro", "application"))]:
+        got = _facts(text, [want[0]])
+        assert (want[0], "is_a", want[1]) in got and (want[0], "owned_by", "Ember crew") in got, (text, got)
+    assert ("billing-api", "owned_by", "Kite squad") in _facts("billing-api belongs to the Kite squad.", PARTS)
+    assert not [f for f in _facts("billing-api belongs to the payments domain.", PARTS) if f[1] == "owned_by"]
+    assert _facts("It is the main application, looked after by the Ember crew.", PARTS) == []
+    assert not [f for f in _facts("The reporting application staff-portal is maintained by the Dune crew.", [])
+                if "reporting" in f[0]]
+
+
+def test_a_definition_declares_its_part_for_every_page(ctx):
+    """(0.11.7) A sentence defining a part declares it for the whole reading (its relations on other pages are read):
+    a name of its own shape, or the page's own (its title, a "(seen from ...)" set apart); never a word of a
+    phrase."""
+    from supagent.knowledge import understand as U
+
+    assert U.declared_names("fleet-track is the payroll application, looked after by the Cobalt crew.",
+                            "fleet-track (seen from Field service)") == ["fleet-track"]
+    assert U.declared_names("archview (application): owned by the Basalt crew.",
+                            "archview (seen from Infrastructure)") == ["archview"]
+    assert U.declared_names("ledgerpro is the trading application, looked after by the Ember crew.",
+                            "Notes") == []                # a plain word on another page: no part by it alone
+    assert U.declared_names("Billing is the main application of the shop.", "Billing overview") == []
+
+
+def test_a_name_followed_by_a_team_word_is_the_team(ctx):
+    """(0.11.7) "call the Harbor crew on duty": the Harbor crew, not a part named harbor called."""
+    got = _facts("If crm-core is down: check the dashboard, restart one pod, call the Harbor crew on duty.",
+                 ["crm-core", "harbor"], title="Runbook - crm-core #4")
+    assert ("crm-core", "calls", "harbor") not in got
+
+
+def test_a_plain_name_names_a_page_only_as_a_whole_piece_of_its_title(ctx):
+    """(0.11.7) A part's name of no shape of its own ("lakeview") names the pages whose title has it as a whole piece
+    ("Design: lakeview (53)", "Runbook - lakeview #77", "Minutes 04.09.2024 - lakeview", "lakeview v2.18"): their
+    space is one of its spaces; never a word inside a phrase ("Lakeview reports for the board"); a module or a
+    service of a whole is a component of it."""
+    from superset.extensions import db
+
+    from supagent.knowledge import parts_index as P
+    from supagent.models import Doc, KFact, KUnit
+
+    pages = [{"id": "1", "title": "lakeview", "space": "DATA", "ancestors": []},
+             {"id": "2", "title": "Design: lakeview (53)", "space": "FIN", "ancestors": []},
+             {"id": "3", "title": "Minutes 04.09.2024 - lakeview", "space": "FIN", "ancestors": []},
+             {"id": "4", "title": "Lakeview reports for the board", "space": "RISK", "ancestors": []},
+             {"id": "5", "title": "Runbook - lakeview #77", "space": "RISK", "ancestors": []},
+             {"id": "6", "title": "lakeview-etl", "space": "DATA", "ancestors": []}]
+    d = Doc(kind="url", url="https://wiki.example.com/display/DATA", title="wiki", content="x", pages=pages,
+            enabled=True, status="ok")
+    db.session.add(d)
+    db.session.flush()
+    us = {p["id"]: KUnit(doc_id=d.id, ukey=p["id"], kind="page", title=p["title"]) for p in pages}
+    db.session.add_all(us.values())
+    db.session.flush()
+    db.session.add_all([
+        KFact(unit_id=us["1"].id, subject="lakeview", verb="is_a", obj="service", obj_kind="kind", confidence=0.7),
+        KFact(unit_id=us["6"].id, subject="lakeview-etl", verb="is_a", obj="module", obj_kind="kind", confidence=0.7),
+        KFact(unit_id=us["6"].id, subject="lakeview-etl", verb="part_of", obj="lakeview", obj_kind="part",
+              confidence=0.75)])
+    db.session.commit()
+    try:
+        ix = P.index([{"id": d.id, "url": d.url, "pages": pages}])
+        lv, etl = ix["parts"]["lakeview"], ix["parts"]["lakeview-etl"]
+        assert lv["home"] == "DATA" and P.others(lv) == ["FIN"] and lv["kind"] == "service"
+        assert etl["kind"] == "component" and etl["of"] == "lakeview"
+    finally:
+        db.session.query(Doc).filter(Doc.id == d.id).delete()
+        db.session.commit()
+
+
+def test_a_page_properties_say_what_its_part_is(ctx):
+    """(0.11.7) A page's properties (Confluence's Page Properties, "Key: value" lines) saying its type: what the part
+    the page is about is ("Type | Application", "Owner | Payments team" on the page "ledgerpro"); a type that is no
+    part's kind ("Type: Runbook") makes no page a part's."""
+    from supagent.knowledge import understand as U
+
+    table = "| Key | Value |\n| --- | --- |\n| Type | Application |\n| Owner | Payments team |\n\nIt books trades."
+    assert U.titled_name("ledgerpro", table) == "ledgerpro"
+    got = _facts(table, ["ledgerpro"], title="ledgerpro")
+    assert ("ledgerpro", "is_a", "application") in got and ("ledgerpro", "owned_by", "Payments team") in got
+    assert U.titled_name("ledgerpro", "Type: Application\nOwner: Payments team\n\nIt books trades.") == "ledgerpro"
+    assert U.titled_name("Restart steps", "Type: Runbook\nOwner: Payments team\n\nRestart it.") is None
+
+
+def test_a_catalog_table_declares_its_parts_with_their_kind(ctx):
+    """(0.11.7) A catalog of the parts ("Name | Type | Owner"): each row a part of the kind its "Type" cell says, with
+    its owner, declared for the whole reading; a "Type" that is no part's kind ("VM", "counter") declares nothing."""
+    from supagent.knowledge import understand as U
+
+    table = ("| Name | Type | Owner | Description |\n| --- | --- | --- | --- |\n"
+             "| claimsflow | Application | Otter squad | Claims handling |\n"
+             "| policy-core | Service | Heron squad | Policies |\n| docgen | Component | Otter squad | Letters |\n")
+    assert U.catalog_names(table) == ["claimsflow", "policy-core", "docgen"]
+    got = _facts(table, [], title="Systems catalog")
+    assert {("claimsflow", "is_a", "application"), ("policy-core", "is_a", "service"), ("docgen", "is_a", "component"),
+            ("claimsflow", "owned_by", "Otter squad")} <= set(got)
+    assert U.catalog_names("| Host | Type | IP |\n| --- | --- | --- |\n| web-01 | VM | 10.0.0.1 |\n") == []

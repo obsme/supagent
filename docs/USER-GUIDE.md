@@ -610,6 +610,13 @@ assume"), the LLM is asked once to write it again (one more LLM call); a made-up
 that is taken out with its sentence. A wiki read before 0.11.5 gets its space pages after its next reading (**Read
 again** on its row in Documents and sites brings them sooner).
 
+What a part is (an application, a component of one, a service) and who owns it is read from the pages without the
+LLM: from sentences ("x is the billing application, owned by the y team", "x, our billing application, is run by
+...", "x (application): owned by ...", "x: a module of y"), from a page's properties ("Type | Application", "Owner |
+the y team") and from a catalog page's table ("Name | Type | Owner") (from 0.11.8). A part your pages describe in
+another way is still found through its relations and its pages' titles, but without its kind: correct it on the
+System map, or add a line "Type: Application" to its page.
+
 With two big spaces or more, **How the wiki spaces connect** shows how the applications, components and services of
 one space call, read from, send data to, use, run on or monitor those of another (from 0.11.7: the relations the
 pages state, read without the LLM, each part in its own space, a relation of each pair of spaces in turn, each with
@@ -1354,6 +1361,13 @@ The default of `categories.fields`:
 {"application": "^(application|app|app_name|service|service_name|system|platform)$",
  "component": "^(component|components|module)$"}
 ```
+
+A category of servers (its name says server, host, node, machine, instance...) that reads Prometheus' or Mimir's
+`instance` label gets the hosts, never `web01:9100` (from 0.11.8): a value written with its port is a component on
+that server, described by the metrics it ships ("The node-exporter of web01 (port 9100): it ships the node_*
+metrics"; pg_*, redis_*, mysql_*... the well-known exporters; else the prefix of its metrics), running on it and part
+of the exporter's value when the map has one. Values filed as servers by an earlier version move to the components at
+the next learning; a value you made stays where you put it.
 
 ---
 
