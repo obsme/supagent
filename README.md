@@ -110,7 +110,7 @@ Content-Security-Policy (Talisman nonces).
 ```bash
 # the Python of Superset's virtualenv
 PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-$PY -m pip install supagent-0.11.8-py3-none-any.whl         # Superset 6.1: nothing else to install
+$PY -m pip install supagent-0.11.8.1-py3-none-any.whl         # Superset 6.1: nothing else to install
 ```
 
 One line in `superset_config.py` registers it. It holds no logic:
@@ -152,6 +152,18 @@ row level security filters and dashboards keep them), the AI roles' users moved 
 then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with the knowledge written) and Viewer
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
+## Upgrade from 0.11.8 to 0.11.8.1
+
+pip install the wheel on every host and restart (tables unchanged, v20). Every server name with a port is a component
+said by its metrics: an exporter (node, postgres, mongodb, oracledb...), a service shipping its own metrics (Loki,
+Mimir...), a target probed by the blackbox exporter; a URL in the instance label is an address, never a server. The
+server values with a port that 0.11.8 left (filed by the AI's classification or proposed from the documents) move to
+the components at the next learning; a value made by hand stays a server, with no component of its name beside it.
+Measured: gate G-0.11.8.1 met. On the lab's Prometheus metrics no server value keeps a port but those a person kept,
+with no component of their names; the AI's and the documents' values moved; each exporter or service on its own port
+said by its metrics (node, postgres, mongodb, oracledb, Loki, Mimir, blackbox) and part of it; the blackbox probes'
+URL targets are addresses, none a server. Unit tests 2,410; browser tests 26.
 
 ## Upgrade from 0.11.7 to 0.11.8
 

@@ -461,102 +461,175 @@ def seed() -> dict[str, int]:
 def _split_endpoints(found: dict[tuple[str, str], dict[str, Any]]
                      ) -> tuple[dict[tuple[str, str], dict[str, Any]], list[dict[str, Any]]]:
     """(0.11.8) The values read in a server category's fields and labels, those written with their port set apart
-    (a component each, _place_endpoints) and their hosts in their place: the server web01 for web01:9100."""
+    (a component each, _place_endpoints) and their hosts in their place: the server web01 for web01:9100.
+    (0.11.8.1) A server value with its port a person keeps (made by hand, put back after the move: what
+    _move_endpoints, run before, left) stays a server value read in the data: no component of its name."""
     from supagent.knowledge.catkind import serverish
+    from supagent.models import Facet
 
     out: dict[tuple[str, str], dict[str, Any]] = {}
     endpoints: list[dict[str, Any]] = []
+    kept = {" ".join(f.value.lower().split()) for f in db.session.query(Facet).filter(
+        Facet.status != "rejected", Facet.facet != "component", Facet.value.like("%:%"))
+        if serverish(f.facet) and endpoint(f.value)}
 
     def put(key: tuple[str, str], slot: dict[str, Any]) -> None:
         prev = out.get(key)
         out[key] = slot if prev is None else {**prev, "origins": list(dict.fromkeys(prev["origins"] + slot["origins"]))[:ORIGINS]}
 
     for (cat, low), slot in found.items():
-        host = host_of(slot["value"]) if serverish(cat) else None
-        if host is None:
+        ep = endpoint(slot["value"]) if serverish(cat) and low not in kept else None
+        if ep is None:
             put((cat, low), slot)
             continue
-        m = ENDPOINT.match(slot["value"])
-        endpoints.append({"category": cat, "value": slot["value"], "host": host, "port": m.group("port"),
+        host, port, url = ep
+        endpoints.append({"category": cat, "value": slot["value"], "host": host, "port": port, "url": url,
                           "origins": slot["origins"], "metrics": slot.get("metrics") or []})
-        put((cat, host.lower()), {"value": host, "origins": [f"{o} (the host of {slot['value']})"
-                                                             for o in slot["origins"][:2]]})
+        if not url:                                   # (0.11.8.1) a URL's host is a site's name, no server it makes
+            put((cat, host.lower()), {"value": host, "origins": [f"{o} (the host of {slot['value']})"
+                                                                 for o in slot["origins"][:2]]})
     return out, endpoints
 
 
-def _exporter_value(name: str, prefix: str, status: str) -> Any:
+def _shipper_value(name: str, prefix: str, role: str, status: str) -> Any:
     """(0.11.8) The component an exporter is: the one of that name on the map (node-exporter, "node exporter",
-    node_exporter), else made."""
+    node_exporter), else made. (0.11.8.1) Or the service shipping its own metrics (loki, mimir); a component or an
+    application of that name."""
     from supagent.models import Facet
 
     key = re.sub(r"[\s_.-]+", "", name.lower())
-    for f in db.session.query(Facet).filter(Facet.facet == "component", Facet.status != "rejected"):
-        if re.sub(r"[\s_.-]+", "", (f.value or "").lower()) == key:
-            return f
-    return _ensure("component", name, status, "data", description=f"The exporter shipping the {prefix} metrics.",
-                   origin=f"what ships the metrics {prefix}")
+    for cat in ("component", "application"):
+        for f in db.session.query(Facet).filter(Facet.facet == cat, Facet.status != "rejected"):
+            if re.sub(r"[\s_.-]+", "", (f.value or "").lower()) == key:
+                return f
+    what = (f"The service shipping its own {prefix} metrics." if role == "own" else
+            f"The exporter shipping the {prefix} metrics.")
+    return _ensure("component", name, status, "data", description=what, origin=f"what ships the metrics {prefix}")
+
+
+def _endpoint_words(e: dict[str, Any], name: str | None, prefix: str | None, role: str | None) -> str:
+    """(0.11.8.1) What an address the data reads is, said by the metrics it ships: an exporter of its host, a service
+    shipping its own metrics, a target the blackbox exporter probes (its instance: the target, not the exporter)."""
+    if e.get("url"):
+        if role == "probe":
+            return f"An address probed by the {name}: its {prefix} metrics."
+        return "An address" + (f" of the {name}" if name else "") + (f": it ships the {prefix} metrics." if prefix
+                                                                     else ".")
+    at = f"{e['host']} (port {e['port']})"
+    if role == "probe":
+        return f"A component on {at}, probed by the {name}: its {prefix} metrics."
+    if role == "own":
+        return f"{name} on {at}: it ships its own {prefix} metrics."
+    if name:
+        return f"The {name} of {at}: it ships the {prefix} metrics."
+    return f"A component on {at}" + (f": it ships the {prefix} metrics." if prefix else ".")
+
+
+def _words_0118(e: dict[str, Any]) -> str | None:
+    """(0.11.8.1) What 0.11.8 wrote of this address (its own words, to put right where no person reviewed them)."""
+    if e.get("url"):
+        return None
+    name, prefix = _known_exporter(e["metrics"])
+    return (f"The {name} of {e['host']} (port {e['port']}): it ships the {prefix} metrics." if name else
+            f"A component on {e['host']} (port {e['port']})" + (f": it ships the {prefix} metrics." if prefix
+                                                                else "."))
 
 
 def _place_endpoints(endpoints: list[dict[str, Any]], status: str) -> int:
     """(0.11.8) Each value written with its port: a component (web01:9100), what it is said by its metrics (the
     node-exporter of web01 for node_*), running on its host (the server web01) and part of the exporter it is.
-    Linked at once like the links a metric's labels show (categories.label_links), else proposed."""
+    Linked at once like the links a metric's labels show (categories.label_links), else proposed. (0.11.8.1) A
+    service shipping its own metrics is part of that service (loki), a target the blackbox exporter probes of nothing;
+    a URL is an address, on a server of its host's name only when the map has one. What 0.11.8 wrote of it otherwise
+    (no person reviewed it) is put right: its words, a probed target's part_of the blackbox exporter."""
     from supagent import settings
     from supagent.models import Facet, Link
 
     auto = settings.get("categories.label_links")
     placed = 0
     for e in endpoints:
-        exporter, prefix = shipped_by(e["metrics"])
-        what = (f"The {exporter} of {e['host']} (port {e['port']}): it ships the {prefix} metrics." if exporter else
-                f"A component on {e['host']} (port {e['port']})" + (f": it ships the {prefix} metrics." if prefix
-                                                                    else "."))
+        name, prefix, role = what_ships(e["metrics"])
+        what = _endpoint_words(e, name, prefix, role)
         comp = _ensure("component", e["value"], status, "data", description=what,
                        origin=(e["origins"] or [None])[0])
         if comp is None:
             continue
-        if not comp.description:
+        if not comp.description or (comp.reviewed_by is None and comp.description == _words_0118(e)):
             comp.description = what
         placed += 1
         host = db.session.query(Facet).filter(Facet.facet == e["category"], same_name(Facet.value, e["host"])).first()
-        pairs = [(comp, host, "runs_on", f"{e['value']} (a server's name with its port): it runs on {e['host']}")]
-        kind_value = _exporter_value(exporter, prefix, status) if exporter else None
-        pairs.append((comp, kind_value, PART_OF, f"{e['value']} ships the {prefix} metrics: the {exporter}"))
+        on = "an address" if e.get("url") else "a server's name with its port"
+        pairs = [(comp, host, "runs_on", f"{e['value']} ({on}): it runs on {e['host']}")]
+        if role in ("exporter", "own"):
+            pairs.append((comp, _shipper_value(name, prefix, role, status), PART_OF,
+                          f"{e['value']} ships {'its own' if role == 'own' else 'the'} {prefix} metrics: the {name}"))
+        elif role == "probe":                         # 0.11.8 made the target part of the blackbox exporter
+            db.session.query(Link).filter(
+                Link.a_ref == f"facet:{comp.id}", Link.kind == PART_OF, Link.source == "data",
+                Link.reviewed_by.is_(None), Link.evidence == f"{e['value']} ships the {prefix} metrics: the {name}",
+            ).delete(synchronize_session=False)
         for a, b, kind, why in pairs:
-            if b is None or a.id == b.id or db.session.query(Link).filter(
-                    Link.a_ref == f"facet:{a.id}", Link.b_ref == f"facet:{b.id}", Link.kind == kind).first():
-                continue
-            if auto:
-                db.session.add(Link(a_ref=f"facet:{a.id}", b_ref=f"facet:{b.id}", kind=kind, status="approved",
-                                    source="data", confidence=1.0, evidence=why[:2000], seen_at=dt.datetime.utcnow()))
-            else:
-                suggest_link(a.id, b.id, kind, "data", why)
+            _link_once(a, b, kind, why, auto)
     db.session.flush()
     return placed
+
+
+def _link_once(a: Any, b: Any, kind: str, why: str, auto: Any) -> None:
+    """(0.11.8) A link of an endpoint's (runs on its host, part of its exporter), once: made at once like the links
+    a metric's labels show (categories.label_links), else proposed."""
+    from supagent.models import Link
+
+    if b is None or a.id == b.id or db.session.query(Link).filter(
+            Link.a_ref == f"facet:{a.id}", Link.b_ref == f"facet:{b.id}", Link.kind == kind).first():
+        return
+    if auto:
+        db.session.add(Link(a_ref=f"facet:{a.id}", b_ref=f"facet:{b.id}", kind=kind, status="approved",
+                            source="data", confidence=1.0, evidence=why[:2000], seen_at=dt.datetime.utcnow()))
+    else:
+        suggest_link(a.id, b.id, kind, "data", why)
 
 
 def _move_endpoints() -> int:
     """(0.11.8) The values the learning filed in a server category written with their port before 0.11.8
     ("web01:9100"): components now (the user's request; their links and items go with them, merged into a component
-    of that name if there is one); a value a person made stays where it is."""
+    of that name if there is one); a value a person made stays where it is. (0.11.8.1) Whatever the learning read
+    them from (the data, the AI's classification, the documents: LEARNED); once each, a value a person put back in a
+    server category stays there (its origins keep the move); a moved value runs on its host's server value. What the
+    learning wrote of it as a server goes (no person reviewed it): the metrics it ships say what it is
+    (_place_endpoints)."""
+    from supagent import settings
     from supagent.knowledge.catkind import serverish
     from supagent.models import Facet
 
+    auto = settings.get("categories.label_links")
     moved = 0
-    for f in db.session.query(Facet).filter(Facet.source == "data", Facet.status != "rejected",
+    for f in db.session.query(Facet).filter(Facet.source.in_(LEARNED), Facet.status != "rejected",
                                              Facet.facet != "component"):
-        if not serverish(f.facet) or host_of(f.value) is None:
+        if not serverish(f.facet) or endpoint(f.value) is None or was_moved(f):
             continue
+        was, (host, _port, url) = f.facet, endpoint(f.value)
+        if f.reviewed_by is None:
+            f.description = None
         twin = db.session.query(Facet).filter(Facet.facet == "component", same_name(Facet.value, f.value)).first()
         if twin is not None:
             merge_value(f, twin)
+            f = twin
         else:
-            f.origins = ((f.origins or []) + [f"(0.11.8) moved from {f.facet}: a server's name with its port is a "
-                                              "component on that server"])[-10:]
             f.facet = "component"
+        if not was_moved(f):
+            f.origins = ((f.origins or []) + [f"(0.11.8) moved from {was}: {MOVED_URL if url else MOVED}"])[-10:]
+        server = db.session.query(Facet).filter(Facet.facet == was, Facet.status != "rejected",
+                                                same_name(Facet.value, host)).first()
+        on = "an address" if url else "a server's name with its port"
+        _link_once(f, server, "runs_on", f"{f.value} ({on}): it runs on {host}", auto)
         moved += 1
     db.session.flush()
     return moved
+
+
+def was_moved(f: Any) -> bool:
+    """(0.11.8.1) Whether the learning moved this value out of a server category once (its origins say so)."""
+    return any(MOVED in str(o) or MOVED_URL in str(o) for o in f.origins or [])
 
 
 ORIGINS = 8                 # origins kept on a value
@@ -567,32 +640,97 @@ ENDPOINT = re.compile(r"^(?P<host>[A-Za-z0-9](?:[\w.-]*[A-Za-z0-9])?):(?P<port>\
 SCRAPE_ONLY = re.compile(r"^(?:up|scrape_\w+|go_\w+|process_\w+|promhttp_\w+|python_\w+|net_conntrack_\w+|"
                          r"target_info|prometheus_target_\w+)$")   # what any scrape target has: says nothing of it
 ENDPOINT_METRICS = 500      # metrics kept per value written with its port (to say what ships them)
+MOVED = "a server's name with its port is a component on that server"   # (0.11.8) a moved value's origin says it
+MOVED_URL = "an address (a URL) is a component, no server"               # (0.11.8.1) the same for a URL
+LEARNED = ("data", "llm", "docs")   # (0.11.8.1) the learning's values: the data's, the AI's, the documents' reader's
+# (0.11.8.1) an address written as a URL ("https://shop.example/health": a blackbox probe's target in Prometheus'
+# instance) is no server either: an address the data reads, a component
+URL_ENDPOINT = re.compile(r"^https?://(?P<host>[A-Za-z0-9](?:[\w.-]*[A-Za-z0-9])?)(?::(?P<port>\d{2,5}))?(?:[/?#]\S*)?$",
+                          re.I)
+# (0.11.8.1) what ships a family of metrics, beyond understand.EXPORTERS (the owner's: "not only web01:9100"): more
+# exporters; the services shipping their own metrics, named as themselves (Loki's loki_*, Mimir's cortex_*); the
+# probes, whose instance is the target probed, not the exporter (the blackbox exporter's probe_*)
+MORE_EXPORTERS = {"oracledb_": "oracledb-exporter", "blackbox_": "blackbox-exporter", "mssql_": "mssql-exporter",
+                  "memcached_": "memcached-exporter", "windows_": "windows-exporter", "snmp_": "snmp-exporter"}
+OWN_METRICS = {"loki_": "loki", "promtail_": "promtail", "cortex_": "mimir", "mimir_": "mimir",
+               "prometheus_": "prometheus", "alertmanager_": "alertmanager", "grafana_": "grafana", "tempo_": "tempo",
+               "thanos_": "thanos", "otelcol_": "otel-collector", "etcd_": "etcd", "coredns_": "coredns",
+               "traefik_": "traefik", "envoy_": "envoy", "consul_": "consul", "vault_": "vault", "minio_": "minio"}
+PROBES = {"probe_": "blackbox-exporter"}
+OWN_OVER = {"cortex_": ("loki_", "tempo_", "promtail_")}   # a family that says the service whatever the main one
+
+
+def endpoint(value: Any) -> tuple[str, str | None, bool] | None:
+    """(0.11.8.1) A value that is an address, no server's name: (its host, its port, whether a URL), as
+    ("web01", "9100", False) for "web01:9100" and ("shop.example", None, True) for "https://shop.example/health";
+    else None."""
+    v = str(value or "")
+    m = ENDPOINT.match(v)
+    if m and 0 < int(m.group("port")) < 65536:
+        return m.group("host"), m.group("port"), False
+    m = URL_ENDPOINT.match(v)
+    if m and (m.group("port") is None or 0 < int(m.group("port")) < 65536):
+        return m.group("host"), m.group("port"), True
+    return None
 
 
 def host_of(value: Any) -> str | None:
-    """(0.11.8) The host of a value written host:port ("web01" for "web01:9100"), else None."""
-    m = ENDPOINT.match(str(value or ""))
-    return m.group("host") if m and 0 < int(m.group("port")) < 65536 else None
+    """(0.11.8) The host of a value written host:port ("web01" for "web01:9100"); (0.11.8.1) or a URL's
+    ("shop.example" for "https://shop.example/health"); else None."""
+    e = endpoint(value)
+    return e[0] if e else None
 
 
-def shipped_by(metrics: Any) -> tuple[str | None, str | None]:
-    """(0.11.8) What ships these metrics: (the well-known exporter whose prefix most of them have, "node-exporter"
-    for node_*; else None, their main prefix as "node_*" or None when no prefix has half of them). The metrics every
-    scrape target has (up, scrape_*, go_*, process_*) say nothing."""
-    from supagent.knowledge.understand import EXPORTERS
-
+def _main_prefix(metrics: Any) -> str | None:
+    """The prefix most of these metrics have ("node_"), when one has half of them; the metrics every scrape target
+    has (up, scrape_*, go_*, process_*) say nothing."""
     own = [str(m) for m in metrics or [] if not SCRAPE_ONLY.match(str(m))]
     heads = Counter(m.group(0).lower() for m in (re.match(r"[A-Za-z][A-Za-z0-9]*_", x) for x in own) if m)
     if not heads:
-        return None, None
+        return None
     prefix, n = heads.most_common(1)[0]
-    if 2 * n < len(own):
+    return None if 2 * n < len(own) else prefix
+
+
+def _known_exporter(metrics: Any) -> tuple[str | None, str | None]:
+    """(0.11.8) The well-known exporter (understand.EXPORTERS) whose prefix most of these metrics have
+    ("node-exporter" for node_*), with that prefix ("node_*"); (None, the prefix) or (None, None)."""
+    from supagent.knowledge.understand import EXPORTERS
+
+    prefix = _main_prefix(metrics)
+    if prefix is None:
         return None, None
     names = sorted(k for k, ps in EXPORTERS.items() if prefix in ps)
     name = next((k for k in names if "exporter" in k), None) or (max(names, key=len) if names else None)
     if name and "exporter" not in name and name not in ("kube-state-metrics", "cadvisor", "kubelet"):
         name += "-exporter"                       # "mysqld" -> mysqld-exporter (the role and the job say "mysqld")
     return name, prefix + "*"
+
+
+def what_ships(metrics: Any) -> tuple[str | None, str | None, str | None]:
+    """(0.11.8.1) What ships these metrics, by the family most of them belong to: (its name, the prefix as
+    "node_*", its role): "exporter" (node-exporter for node_*, oracledb-exporter, mongodb-exporter...), "own" (a
+    service shipping its own metrics: loki for loki_*, mimir for cortex_*), "probe" (the blackbox exporter's probe_*:
+    the value is the target it probes); (None, the prefix, None) for a family not known; (None, None, None)."""
+    prefix = _main_prefix(metrics)
+    if prefix is None:
+        return None, None, None
+    if prefix in OWN_OVER:                        # Loki and Tempo ship cortex_* too (their libraries): Mimir no loki_*
+        prefix = next((p for p in OWN_OVER[prefix] if any(str(m).lower().startswith(p) for m in metrics)), prefix)
+    if prefix in PROBES:
+        return PROBES[prefix], prefix + "*", "probe"
+    if prefix in OWN_METRICS:
+        return OWN_METRICS[prefix], prefix + "*", "own"
+    if prefix in MORE_EXPORTERS:
+        return MORE_EXPORTERS[prefix], prefix + "*", "exporter"
+    name, shown = _known_exporter(metrics)
+    return name, shown, "exporter" if name else None
+
+
+def shipped_by(metrics: Any) -> tuple[str | None, str | None]:
+    """(0.11.8) What ships these metrics: (its name, their main prefix as "node_*"), as what_ships says."""
+    name, prefix, _role = what_ships(metrics)
+    return name, prefix
 
 
 def data_values() -> tuple[dict[tuple[str, str], dict[str, Any]], int]:

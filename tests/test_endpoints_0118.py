@@ -11,7 +11,8 @@ def test_the_host_and_what_ships_the_metrics():
 
     assert host_of("web01:9100") == "web01" and host_of("web01.corp.example:9187") == "web01.corp.example"
     assert host_of("10.0.0.5:9100") == "10.0.0.5"
-    assert host_of("web01") is None and host_of("http://web01:80") is None and host_of("web01:99999") is None
+    assert host_of("web01") is None and host_of("web01:99999") is None
+    assert host_of("http://web01:80") == "web01"                     # (0.11.8.1) a URL is an address too
     assert shipped_by(["node_cpu_seconds_total", "node_load1", "up", "go_goroutines"]) == ("node-exporter", "node_*")
     assert shipped_by(["pg_up", "pg_stat_activity_count", "process_cpu_seconds_total"]) == ("postgres-exporter", "pg_*")
     assert shipped_by(["mysql_up", "mysql_global_status_threads_connected"]) == ("mysqld-exporter", "mysql_*")

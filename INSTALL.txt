@@ -1,16 +1,16 @@
-supagent 0.11.8 - the AI agent inside Apache Superset
-=====================================================
+supagent 0.11.8.1 - the AI agent inside Apache Superset
+=======================================================
 
 What is in this folder
-  supagent-0.11.8-py3-none-any.whl   the package for Superset 6.1 (pure Python; nothing else to install)
+  supagent-0.11.8.1-py3-none-any.whl   the package for Superset 6.1 (pure Python; nothing else to install)
   supagent-guide.html / .pdf          the guide (install, LLM middleware, learning, screens)
   supagent-user-guide.html / .pdf     how to use it: every page, button, setting and command
   catalog.example.yaml                an example catalog, to adapt
   grafana-wheels/                     mcp and what it needs beyond Superset 6.1 (Grafana, without internet)
   SHA256SUMS                          checksums
 
-Upgrading? From 0.11.7: pip install this wheel on every host, restart; nothing to run: "From 0.11.7
-to 0.11.8" below. From 0.11.6.1, 0.11.6 or 0.11.5: the same, and the sections below. From 0.11.4: the same, and "From 0.11.4 to 0.11.5" below. From 0.11.3: the same, and "From 0.11.3 to 0.11.4" below. From 0.11.1.1: the same, and "From 0.11.1.1 to 0.11.3" below. From 0.11.1: the same, and "From 0.11.1 to 0.11.1.1" below. From 0.11.0: the same, and "From 0.11.0 to 0.11.1" below. From 0.10.12.1: the same, and "From 0.10.12.1 to 0.11.0" below. From 0.10.12: the same, and "From 0.10.12 to 0.10.12.1" below. From 0.10.11.2: the same, and "From 0.10.11.2 to 0.10.12" below. From 0.10.11.1: the same, and "From 0.10.11.1 to 0.10.11.2" below. From 0.10.11: the
+Upgrading? From 0.11.8: pip install this wheel on every host, restart; nothing to run: "From 0.11.8
+to 0.11.8.1" below. From 0.11.7, 0.11.6.1, 0.11.6 or 0.11.5: the same, and the sections below. From 0.11.4: the same, and "From 0.11.4 to 0.11.5" below. From 0.11.3: the same, and "From 0.11.3 to 0.11.4" below. From 0.11.1.1: the same, and "From 0.11.1.1 to 0.11.3" below. From 0.11.1: the same, and "From 0.11.1 to 0.11.1.1" below. From 0.11.0: the same, and "From 0.11.0 to 0.11.1" below. From 0.10.12.1: the same, and "From 0.10.12.1 to 0.11.0" below. From 0.10.12: the same, and "From 0.10.12 to 0.10.12.1" below. From 0.10.11.2: the same, and "From 0.10.11.2 to 0.10.12" below. From 0.10.11.1: the same, and "From 0.10.11.1 to 0.10.11.2" below. From 0.10.11: the
 same, and "From 0.10.11 to 0.10.11.1" below. From 0.10.10: the
 same, and "From 0.10.10 to 0.10.11" below. From 0.10.9.2: pip install
 this wheel on every host, run superset supagent init (tables v20), restart: "From 0.10.9.2 to 0.10.10" and
@@ -40,7 +40,7 @@ role): three packages must be pinned, or Superset itself does not start (none is
 1. Install in Superset's virtualenv (pip only)
 
    PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-   $PY -m pip install supagent-0.11.8-py3-none-any.whl
+   $PY -m pip install supagent-0.11.8.1-py3-none-any.whl
    Superset 6.1: nothing else is needed (offline too).
 
 2. Register it: one line in superset_config.py (no logic)
@@ -191,6 +191,21 @@ role): three packages must be pinned, or Superset itself does not start (none is
    wait: grafana.read_new, osd.read_new); a whole search at once. What is switched off leaves the Context and the
    search at once and is no longer read, explained or watched; the agent says it exists and is switched off when a
    question names it. "List now" reads the list again (no AI); every learning does too.
+
+From 0.11.8 to 0.11.8.1
+=======================
+  - pip install the wheel on every host and restart the web servers, the workers and beat; nothing to run (tables
+    unchanged, v20).
+  - At the next learning (Learn now, or the scheduled one): every server name with a port, whatever the port, is a
+    component said by its metrics (an exporter, a service shipping its own metrics such as Loki or Mimir, a target
+    probed by the blackbox exporter); a URL in the instance label is an address, never a server; the server values
+    with a port that 0.11.8 left (filed by the AI's classification or proposed by the documents' reader) move to the
+    components. A value made by hand stays a server with no component of its name beside it, and so does a moved one
+    put back by hand. An approved value keeps its description: edit it if it still says server.
+  - Measured: gate G-0.11.8.1 met. On the lab's Prometheus metrics no server value keeps a port but those a person
+    kept, with no component of their names; the AI's and the documents' values moved; each exporter or service on its
+    own port said by its metrics (node, postgres, mongodb, oracledb, Loki, Mimir, blackbox) and part of it; the
+    blackbox probes' URL targets are addresses, none a server. Unit tests 2,410; browser tests 26.
 
 From 0.11.7 to 0.11.8
 =====================

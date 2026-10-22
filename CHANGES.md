@@ -1,5 +1,40 @@
 # Changes
 
+## 0.11.8.1 — 2026-10-22
+
+**A server's name with any port is a component, said by the family of metrics it ships.** Not only web01:9100 (the
+owner's warning): an exporter is named and part of that exporter ("The node-exporter of web01 (port 9100)", "The
+oracledb-exporter of db01 (port 9161)": node, postgres, mongodb, oracledb, mysql, redis, the blackbox exporter's own
+metrics...); a service that ships its own metrics is named as itself and part of it ("loki on logs01 (port 3100): it
+ships its own loki_* metrics"; cortex_* is Mimir; prometheus_*, tempo_*, grafana_*...); the instance of a blackbox
+probe is the target probed, "A component on db01 (port 5432), probed by the blackbox-exporter", part of nothing. A URL
+in the instance label (an HTTP probe's target, "https://shop.example/health") is an address, a component, never a
+server, and its host makes no server value. What 0.11.8 wrote of a probed target ("The blackbox-exporter of db01")
+and its part of the blackbox exporter are put right where no person approved them.
+
+**The server values 0.11.8 left are moved too.** 0.11.8 moved only the values with a port it had read in the data;
+one the AI's classification had filed as a server (approved, or waiting in To review) or the documents' reader had
+proposed stayed a server. The next learning (Learn now, or the scheduled one) moves each of them, once, and each runs
+on its host's server value (linked at once with categories.label_links, else proposed). A value a person made stays a
+server, and so does a moved value a person puts back in a server category; no component of its name is made beside
+it while the data still reads it (0.11.8 made one). A value still waiting in To review loses what the learning wrote
+of it as a server and its metrics describe it; an approved value keeps its description (edit it if it still says
+server).
+
+Gate G-0.11.8.1 met (exact clauses, no LLM). On a copy of the lab's Prometheus metrics, with the server values earlier
+versions and people leave put in first: no server value keeps a port but the two a person kept (one made by hand, one
+moved and put back), and no component of their names was made; the AI's values (approved and waiting) and the
+documents' moved, each on its host; 182 of 182 other addresses on their host, 179 of 179 node_* endpoints described as
+the node-exporter; the lab's 6 blackbox URL targets are addresses probed by the blackbox-exporter, none a server. On a
+test server with a port per exporter or service, the 8 addresses are each said by their metrics (the node, postgres,
+mongodb and oracledb exporters, Loki, Mimir, the blackbox exporter, a probed target) and part of their exporter or
+service, the probed target of nothing, with 0.11.8's words of it put right. The released 0.11.8 on the same copy shows
+each gap. The six learning development sets: unchanged (mean share 0.9585). Unit tests: 2,410 passed; browser tests:
+26 passed.
+
+Upgrade from 0.11.8: pip install the wheel on every host and restart the web servers (the workers and beat as usual);
+nothing to run (tables unchanged, v20). INSTALL.txt, *From 0.11.8 to 0.11.8.1*.
+
 ## 0.11.8 — 2026-10-22
 
 **A server's name with its port is a component on that server.** With Prometheus or Mimir data, a server category

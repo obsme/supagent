@@ -1363,11 +1363,26 @@ The default of `categories.fields`:
 ```
 
 A category of servers (its name says server, host, node, machine, instance...) that reads Prometheus' or Mimir's
-`instance` label gets the hosts, never `web01:9100` (from 0.11.8): a value written with its port is a component on
-that server, described by the metrics it ships ("The node-exporter of web01 (port 9100): it ships the node_*
-metrics"; pg_*, redis_*, mysql_*... the well-known exporters; else the prefix of its metrics), running on it and part
-of the exporter's value when the map has one. Values filed as servers by an earlier version move to the components at
-the next learning; a value you made stays where you put it.
+`instance` label gets the hosts, never `web01:9100` (from 0.11.8): a value written with its port, whatever the port,
+is a component on that server, described by the metrics it ships, running on it:
+
+| Its metrics | What it is said to be | Part of |
+|---|---|---|
+| node_*, pg_*, mongodb_*, oracledb_*, mysql_*, redis_*, blackbox_*... | "The node-exporter of web01 (port 9100)", "The oracledb-exporter of db01 (port 9161)" | the exporter's value |
+| loki_*, cortex_* (Mimir), prometheus_*, tempo_*, grafana_*... (from 0.11.8.1) | "loki on logs01 (port 3100): it ships its own loki_* metrics" | the service's value (loki, mimir) |
+| probe_* (from 0.11.8.1) | "A component on db01 (port 5432), probed by the blackbox-exporter": the instance of a probe is its target | nothing |
+| others | "A component on web01 (port 8080): it ships the orders_* metrics" | nothing |
+
+A URL in the `instance` label (a blackbox probe's target, `https://shop.example/health`) is no server either (from
+0.11.8.1): a component, "An address probed by the blackbox-exporter"; its host makes no server value. The words 0.11.8
+wrote of a probe's target ("The blackbox-exporter of db01") and its part of the blackbox exporter are put right at the
+next learning, unless a person approved them. Values filed as servers by an earlier version move to the components at
+the next learning (Learn now, or the scheduled one), whatever the learning read them from: the data, the AI's
+classification (approved or waiting in To review), the documents (from 0.11.8.1); each runs on its host's server
+value when the map has one. A value still waiting in To review loses what the learning wrote of it as a server: its
+metrics describe it. An approved value keeps its description (edit it if it still says server). A value you made
+stays where you put it, and so does a moved value you put back in a server category: no component of its name is made
+while the data reads it.
 
 ---
 
