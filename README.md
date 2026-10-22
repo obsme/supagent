@@ -110,7 +110,7 @@ Content-Security-Policy (Talisman nonces).
 ```bash
 # the Python of Superset's virtualenv
 PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-$PY -m pip install supagent-0.11.8.1-py3-none-any.whl         # Superset 6.1: nothing else to install
+$PY -m pip install supagent-0.11.8.2-py3-none-any.whl         # Superset 6.1: nothing else to install
 ```
 
 One line in `superset_config.py` registers it. It holds no logic:
@@ -152,6 +152,15 @@ row level security filters and dashboards keep them), the AI roles' users moved 
 then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with the knowledge written) and Viewer
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
+## Upgrade from 0.11.8.1 to 0.11.8.2
+
+pip install the wheel on every host and restart (tables unchanged, v20). A Confluence wiki with removed pages reads
+faster: removed pages are not fetched again (their links still followed), links by title to pages already met cost no
+request, and a document deleted while it is read stops its reading. Measured: gate G-0.11.8.2 met. On a 5,001-page
+test wiki with 2,000 pages removed: the same 3,001 pages read with 4,340 requests instead of 9,812 (98 s instead of
+218 s at 20 ms per request; the first reading after the upgrade 5,582 requests), no removed page fetched; a wiki
+deleted while it was read stopped 10 s after, no error. Unit tests 2,415; browser tests 26.
 
 ## Upgrade from 0.11.8 to 0.11.8.1
 

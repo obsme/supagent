@@ -1,16 +1,16 @@
-supagent 0.11.8.1 - the AI agent inside Apache Superset
+supagent 0.11.8.2 - the AI agent inside Apache Superset
 =======================================================
 
 What is in this folder
-  supagent-0.11.8.1-py3-none-any.whl   the package for Superset 6.1 (pure Python; nothing else to install)
+  supagent-0.11.8.2-py3-none-any.whl   the package for Superset 6.1 (pure Python; nothing else to install)
   supagent-guide.html / .pdf          the guide (install, LLM middleware, learning, screens)
   supagent-user-guide.html / .pdf     how to use it: every page, button, setting and command
   catalog.example.yaml                an example catalog, to adapt
   grafana-wheels/                     mcp and what it needs beyond Superset 6.1 (Grafana, without internet)
   SHA256SUMS                          checksums
 
-Upgrading? From 0.11.8: pip install this wheel on every host, restart; nothing to run: "From 0.11.8
-to 0.11.8.1" below. From 0.11.7, 0.11.6.1, 0.11.6 or 0.11.5: the same, and the sections below. From 0.11.4: the same, and "From 0.11.4 to 0.11.5" below. From 0.11.3: the same, and "From 0.11.3 to 0.11.4" below. From 0.11.1.1: the same, and "From 0.11.1.1 to 0.11.3" below. From 0.11.1: the same, and "From 0.11.1 to 0.11.1.1" below. From 0.11.0: the same, and "From 0.11.0 to 0.11.1" below. From 0.10.12.1: the same, and "From 0.10.12.1 to 0.11.0" below. From 0.10.12: the same, and "From 0.10.12 to 0.10.12.1" below. From 0.10.11.2: the same, and "From 0.10.11.2 to 0.10.12" below. From 0.10.11.1: the same, and "From 0.10.11.1 to 0.10.11.2" below. From 0.10.11: the
+Upgrading? From 0.11.8.1: pip install this wheel on every host, restart; nothing to run: "From 0.11.8.1
+to 0.11.8.2" below. From 0.11.8, 0.11.7, 0.11.6.1, 0.11.6 or 0.11.5: the same, and the sections below. From 0.11.4: the same, and "From 0.11.4 to 0.11.5" below. From 0.11.3: the same, and "From 0.11.3 to 0.11.4" below. From 0.11.1.1: the same, and "From 0.11.1.1 to 0.11.3" below. From 0.11.1: the same, and "From 0.11.1 to 0.11.1.1" below. From 0.11.0: the same, and "From 0.11.0 to 0.11.1" below. From 0.10.12.1: the same, and "From 0.10.12.1 to 0.11.0" below. From 0.10.12: the same, and "From 0.10.12 to 0.10.12.1" below. From 0.10.11.2: the same, and "From 0.10.11.2 to 0.10.12" below. From 0.10.11.1: the same, and "From 0.10.11.1 to 0.10.11.2" below. From 0.10.11: the
 same, and "From 0.10.11 to 0.10.11.1" below. From 0.10.10: the
 same, and "From 0.10.10 to 0.10.11" below. From 0.10.9.2: pip install
 this wheel on every host, run superset supagent init (tables v20), restart: "From 0.10.9.2 to 0.10.10" and
@@ -40,7 +40,7 @@ role): three packages must be pinned, or Superset itself does not start (none is
 1. Install in Superset's virtualenv (pip only)
 
    PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-   $PY -m pip install supagent-0.11.8.1-py3-none-any.whl
+   $PY -m pip install supagent-0.11.8.2-py3-none-any.whl
    Superset 6.1: nothing else is needed (offline too).
 
 2. Register it: one line in superset_config.py (no logic)
@@ -191,6 +191,18 @@ role): three packages must be pinned, or Superset itself does not start (none is
    wait: grafana.read_new, osd.read_new); a whole search at once. What is switched off leaves the Context and the
    search at once and is no longer read, explained or watched; the agent says it exists and is switched off when a
    question names it. "List now" reads the list again (no AI); every learning does too.
+
+From 0.11.8.1 to 0.11.8.2
+=========================
+  - pip install the wheel on every host and restart the web servers, the workers and beat; nothing to run (tables
+    unchanged, v20).
+  - A Confluence wiki's removed pages are not fetched again (their links still followed); the next reading fetches
+    the pages removed before once more, to keep their links. Links by title to pages already met cost no request. A
+    document deleted while it is read stops its reading.
+  - Measured: gate G-0.11.8.2 met. On a 5,001-page test wiki with 2,000 pages removed: the same 3,001 pages read with
+    4,340 requests instead of 9,812 (98 s instead of 218 s at 20 ms per request; the first reading after the upgrade
+    5,582 requests), no removed page fetched; a wiki deleted while it was read stopped 10 s after, no error. Unit
+    tests 2,415; browser tests 26.
 
 From 0.11.8 to 0.11.8.1
 =======================

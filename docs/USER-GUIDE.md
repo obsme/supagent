@@ -529,7 +529,10 @@ Actions:
   by another document); and a warning when the number of pages was reached ("Raise Pages (Edit) to read more of
   the site");
   * **Remove** on a page (Admins): the page is not read again; its text, its search pieces and what was learned
-    from it are deleted at once;
+    from it are deleted at once. On a Confluence wiki a removed page is not even asked for again (from 0.11.8.2):
+    the pages under it and the pages it linked to when it was removed are still read, so removing many pages makes
+    the reading shorter. A page removed before 0.11.8.2 is asked for once more at the next reading (its links are
+    kept then), never after;
   * The list draws 500 pages at a time: **Show 500 more (N not shown)** draws the next ones ("No page matches."
     when the filter finds none);
   * **Removing several pages at once** (Admins): type in *Filter the pages (title, address, space)*, tick the pages
@@ -537,7 +540,8 @@ Actions:
   * **Removed (not read again)** lists them, each with **Read again** (read at the document's next reading);
 * **Edit**: category, pages, days, how it is read, its sign-in (an empty secret keeps the saved one), certificate,
   CA file, and for a repository what to read. Saving reads it again;
-* **Delete** (Admins): its pages leave the agent's search (and its saved sign-in is deleted).
+* **Delete** (Admins): its pages leave the agent's search (and its saved sign-in is deleted). A reading of it under
+  way stops within a few seconds (from 0.11.8.2; it used to read every page for nothing).
 
 A repository is read again only as far as it changed (the files changed since the last commit read). Files that
 hold keys (`.env`, `*.pem`, `*.key`...) and vendored or built files are never read; passwords, tokens and keys

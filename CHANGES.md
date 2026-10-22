@@ -1,5 +1,30 @@
 # Changes
 
+## 0.11.8.2 — 2026-10-22
+
+**A wiki with many removed pages reads faster; a deleted wiki's reading stops.** The owner's report: a wiki with
+2,000 pages removed and 3,000 active, "the reading takes so much time". A Confluence page removed from a document's
+pages was still fetched at every reading and only then left out, so removing pages saved no time. Now a removed page
+keeps, with its removal, the pages it links to and its space: the readings after list the pages under it and follow
+those links without fetching it, so the pages read stay the same. A page removed before 0.11.8.2 is fetched once
+more at the next reading, to keep its links. A link written by a page's title no longer costs a request when that
+page was already met (fetched, or listed under its parent or in its space). A document deleted while it is read
+stops its reading within seconds; it used to read every page for nothing and fail at the end. Deleted at the very
+end, nothing is saved and no error is logged.
+
+Gate G-0.11.8.2 met (exact clauses, no LLM). On a generated test wiki of 5,001 pages with 2,000 removed (the removal
+made by 0.11.8.1), its Confluence answering in 20 ms: 0.11.8.1 read it in 218 s with 9,812 requests and fetched 1,992
+of the removed pages again; 0.11.8.2 reads the same 3,001 pages, identical and in the same order, in 125 s and 5,582
+requests the first time (the removed pages fetched once more, their links kept) and in 98 s and 4,340 requests after,
+no removed page fetched. A Confluence answering in 150 ms would take about 11 minutes instead of 25. Deleted while it
+was read, the wiki's reading stopped 10 s after the delete with no error, the delete answering in 0.06 s; nothing of
+the wiki was left. The six learning development sets: unchanged. Unit tests: 2,415 passed; browser tests: 26 passed.
+The failure to delete the wiki the owner reported was not reproduced in the lab (the delete answered in 0.06 s idle,
+during a reading and during the learning's understanding).
+
+Upgrade from 0.11.8.1: pip install the wheel on every host and restart the web servers (the workers and beat as
+usual); nothing to run (tables unchanged, v20). INSTALL.txt, *From 0.11.8.1 to 0.11.8.2*.
+
 ## 0.11.8.1 — 2026-10-22
 
 **A server's name with any port is a component, said by the family of metrics it ships.** Not only web01:9100 (the

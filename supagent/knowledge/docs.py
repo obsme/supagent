@@ -45,6 +45,7 @@ import logging
 import os
 import re
 import socket
+import time
 from collections import deque
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -321,6 +322,40 @@ class DocError(Exception):
 
 class _OutOfCalls(Exception):
     """A reader made as many API requests as it may: it keeps what it read."""
+
+
+class _DocGone(Exception):
+    """(0.11.8.2) The document was deleted while it was read: the reading stops there."""
+
+
+WATCH_SECONDS = 10      # (0.11.8.2) how often a reading looks whether its document is still there
+
+
+class _Watch:
+    """(0.11.8.2) A reading's look at its document every WATCH_SECONDS: deleted while it is read (Documents and
+    sites, Delete), the reading stops instead of reading every page for nothing and failing at the end."""
+
+    def __init__(self, doc: Doc) -> None:
+        self.doc_id, self.at = doc.id, time.monotonic()
+
+    def check(self) -> None:
+        if self.doc_id is None or time.monotonic() - self.at < WATCH_SECONDS:
+            return
+        self.at = time.monotonic()
+        if _gone(self.doc_id):
+            raise _DocGone()
+
+
+def _gone(doc_id: int) -> bool:
+    """(0.11.8.2) Whether a document's row is no more: a query of its id (the session's object never says it)."""
+    try:
+        return db.session.query(Doc.id).filter(Doc.id == doc_id).scalar() is None
+    except Exception:  # pylint: disable=broad-except   (the database cannot say: read on)
+        db.session.rollback()
+        return False
+
+
+REMOVED_WHY = "removed by a person from the document's pages (Read again in its list brings it back)"
 
 
 # --------------------------------------------------------------------------------------------- #
@@ -696,21 +731,41 @@ def _excluded_elsewhere(doc: Doc) -> set[str]:
 
 def _without_excluded(doc: Doc, found: list) -> tuple[list, int]:
     """(0.10.9.1) The pages read, without the ones a person removed (this document's: by id, path or address; the
-    other documents': by address); each said in the reading's log. Their links were followed: only the page goes."""
-    mine = {e["key"] for e in excluded_pages(doc)} | {f"url:{e['url']}" for e in excluded_pages(doc) if e.get("url")}
+    other documents': by address); each said in the reading's log. Their links were followed: only the page goes.
+    (0.11.8.2) A wiki page removed and read (removed before 0.11.8.2) keeps the pages it links to and its space in
+    its removal: the next readings follow them without fetching it again (_read_confluence)."""
+    entries = excluded_pages(doc)
+    mine = {e["key"] for e in entries} | {f"url:{e['url']}" for e in entries if e.get("url")}
     elsewhere = _excluded_elsewhere(doc) if doc.kind == "url" else set()
     if not mine and not elsewhere:
         return found, 0
-    kept, gone = [], 0
+    by_key = {e["key"]: e for e in entries}
+    kept, gone, noted = [], 0, {}
     for f in found:
         url, title, meta = f[0], f[1], (f[3] if len(f) > 3 and isinstance(f[3], dict) else {})
         keys = {page_key({**meta, "url": url}), f"url:{url}"}
         if keys & mine or (url and url in elsewhere):
             gone += 1
-            _not_read(url, title, "removed by a person from the document's pages (Read again in its list brings it back)")
+            _not_read(url, title, REMOVED_WHY)
+            key = page_key({**meta, "url": url})
+            if key in by_key and meta.get("id") and "links" not in by_key[key]:
+                noted[key] = _removed_links(meta)
             continue
         kept.append(f)
+    if noted:                                         # (new entries: the saved ones are never changed in place)
+        doc.auth = {**_auth(doc), "excluded": [{**e, **noted[e["key"]]} if e["key"] in noted else e
+                                               for e in entries]}
     return kept, gone
+
+
+def _removed_links(page: dict[str, Any]) -> dict[str, Any]:
+    """(0.11.8.2) What a removed wiki page leads to, kept with its removal: the pages it links to (ids, or
+    "SPACE:Title") and its space (the pages under it are listed in it)."""
+    return {"links": [str(x) for x in page.get("links") or []][:LINKS_KEPT],
+            **({"space": str(page["space"])} if page.get("space") else {})}
+
+
+LINKS_KEPT = 200        # (0.11.8.2) the links of a removed wiki page kept with its removal (as a page's own meta)
 
 
 def exclude_page(doc: Doc, by: str, url: str = "", page_id: str = "", path: str = "") -> dict[str, Any]:
@@ -751,7 +806,7 @@ def exclude_pages(doc: Doc, by: str, refs: list[dict[str, Any]]) -> dict[str, An
     keys = [page_key(h) for h in hits]
     kept_ex = [e for e in excluded_pages(doc) if e["key"] not in set(keys)]
     kept_ex += [{"key": k, "url": str(h.get("url") or "")[:2000], "title": str(h.get("title") or "")[:300], "by": by,
-                 "at": now} for k, h in zip(keys, hits)]
+                 "at": now, **(_removed_links(h) if h.get("id") else {})} for k, h in zip(keys, hits)]
     doc.auth = {**_auth(doc), "excluded": kept_ex[-EXCLUDED_KEPT:]}
     gone = {id(h) for h in hits}
     rest = [p for p in pages if id(p) not in gone]
@@ -1125,7 +1180,9 @@ def _read_web(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
     folder = urlparse(start).path.rsplit("/", 1)[0] + "/"
     todo, seen, pages = [start], set(), []
     skipped, skip = 0, _skip_title()
+    watch = _Watch(doc)                                 # (0.11.8.2) deleted while it is read: stopped
     while todo and len(pages) < _max_pages(doc):
+        watch.check()
         url = todo.pop(0).split("#")[0]
         if url in seen:
             continue
@@ -1280,6 +1337,17 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
 
     by_title: dict[tuple[str, str], str] = {}        # (space, title) -> id, of the pages met
     items: dict[str, tuple[dict[str, Any], str | None]] = {}
+    # (0.11.8.2) the pages a person removed (by their id): never fetched again, the pages under them still listed and
+    # read; a reading of a document deleted meanwhile stops (watch)
+    removed = {str(e["key"])[3:]: e for e in excluded_pages(doc) if str(e["key"]).startswith("id:")}
+    watch = _Watch(doc)
+
+    def met(item: dict[str, Any], space: str = "") -> None:
+        """(0.11.8.2) A page met (fetched, listed): its title in its space names it, so that a link by that title
+        costs no request."""
+        sp = str((item.get("space") or {}).get("key") or space or "")
+        if sp and item.get("title") and item.get("id"):
+            by_title.setdefault((sp, str(item["title"])), str(item["id"]))
 
     def fetch(key: tuple[str, ...]) -> str | None:
         """A page by its id or by its title and space: its id (its body kept in items), None when there is none."""
@@ -1287,10 +1355,11 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
             if key[1] not in items:
                 item = get(f"/content/{q(key[1])}?{expand}")
                 items[key[1]] = (item, (item.get("_links") or {}).get("base"))
+                met(item)
             return key[1]
         title, space = key[1], key[2]
         if (space, title) in by_title:
-            return by_title[(space, title)]
+            return fetch(("id", by_title[(space, title)]))   # (0.11.8.2) met by its id or listed: fetched by it
         data = get(f"/content?spaceKey={q(space)}&title={q(title)}&{expand}")
         results = [r for r in data.get("results") or [] if isinstance(r, dict) and r.get("id")]
         if not results:
@@ -1346,11 +1415,30 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
             base = (data.get("_links") or {}).get("base")
             for item in results:
                 items[str(item["id"])] = (item, base)
+                met(item, t["space"])
                 own.append(("id", str(item["id"])))
             listing["listed"] += len(results)
             if len(results) < CONFLUENCE_LIST or not (data.get("_links") or {}).get("next"):
                 listing["more"] = False
             listing["start"] += len(results)
+
+    def list_children(pid: str, space: str) -> None:
+        """The pages under a page (a space's are all listed), each named by its title in the page's space."""
+        start = 0
+        while t["kind"] != "space" and len(pages) + len(queue) < want:
+            try:
+                data = get(f"/content/{q(pid)}/child/page?limit={CHILDREN_LIST}&start={start}")
+            except DocError as ex:                   # (0.10.6.1) its children not listed: the page and the rest kept
+                log.info("supagent: document %s: the pages under Confluence page %s not listed: %s", doc.id, pid,
+                         str(ex)[:200])
+                break
+            results = [r for r in data.get("results") or [] if isinstance(r, dict)]
+            for r in results:
+                met(r, space)                        # (0.11.8.2) a page under it is in its space
+            queue.extend(("id", str(r["id"])) for r in results if r.get("id") and str(r["id"]) not in seen)
+            if len(results) < CHILDREN_LIST or not (data.get("_links") or {}).get("next"):
+                break
+            start += len(results)
 
     try:
         if t["kind"] == "space":
@@ -1363,11 +1451,25 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
         else:
             queue.append(("id", str(t["id"])))
         while (own or queue or listing["more"]) and len(pages) < want:
+            watch.check()
             if not own:
                 list_more()
             if not own and not queue:
                 break
             key = own.popleft() if own else queue.popleft()
+            if key[0] == "title" and (key[2], key[1]) in by_title:
+                key = ("id", by_title[(key[2], key[1])])     # (0.11.8.2) a page met: by its id, no request
+            if key[0] == "id" and key[1] in removed and "links" in removed[key[1]]:   # (0.11.8.2) removed by a
+                if key[1] not in seen:                 # person, its links kept with its removal: not fetched again;
+                    seen.add(key[1])                   # the pages under it and the pages it links to still read
+                    skipped += 1
+                    gone = removed[key[1]]
+                    _not_read(gone.get("url") or f"page {key[1]}", gone.get("title") or "", REMOVED_WHY)
+                    list_children(key[1], str(gone.get("space") or ""))
+                    queue.extend(k for k in (("id", x) if x.isdigit() else ("title", *reversed(x.split(":", 1)))
+                                             for x in gone.get("links") or [] if x and (x.isdigit() or ":" in x))
+                                 if not (k[0] == "id" and k[1] in seen))
+                continue
             try:
                 pid = fetch(key)
             except DocError as ex:                   # (0.10.6.1) a page under it or linked from it that this
@@ -1420,19 +1522,7 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
             else:
                 pages.append((url, str(item.get("title") or f"page {pid}"), text, meta))
             title = title or str(item.get("title") or "")
-            start = 0
-            while t["kind"] != "space" and len(pages) + len(queue) < want:   # the pages under it (a space's are all
-                try:                                                             # listed), then its links
-                    data = get(f"/content/{q(pid)}/child/page?limit={CHILDREN_LIST}&start={start}")
-                except DocError as ex:               # (0.10.6.1) its children not listed: the page and the rest kept
-                    log.info("supagent: document %s: the pages under Confluence page %s not listed: %s", doc.id, pid,
-                             str(ex)[:200])
-                    break
-                results = [r for r in data.get("results") or [] if isinstance(r, dict)]
-                queue.extend(("id", str(r["id"])) for r in results if r.get("id") and str(r["id"]) not in seen)
-                if len(results) < CHILDREN_LIST or not (data.get("_links") or {}).get("next"):
-                    break
-                start += len(results)
+            list_children(pid, space)                  # the pages under it, then its links
             queue.extend(x for x in linked if not (x[0] == "id" and x[1] in seen))
     except _OutOfCalls:
         log.info("supagent: document %s: Confluence requests used up, %d page(s) read", doc.id, len(pages))
@@ -1788,12 +1878,14 @@ def _read_bitbucket(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
                                                               and "" not in stale) else None
     pages: list[tuple[str, str, str, dict[str, Any]]] = []
     skipped, last, masked = 0, "", 0
+    watch = _Watch(doc)                                 # (0.11.8.2) deleted while it is read: stopped
     if touched is not None:                             # only the files that changed are read again
         prefix = t["path"] + "/" if t["path"] else ""
         keep = {p: v for p, v in before.items() if p not in touched}
         todo = sorted((p for p in touched if p.startswith(prefix) and wanted_file(p, files)), key=doc_rank)
         pages = [(u, ti, tx, meta(p)) for p, (u, ti, tx, _m) in keep.items()]
         for path in todo:
+            watch.check()
             if len(pages) >= want:
                 break
             f = _file_at(t, path, head)
@@ -1836,6 +1928,7 @@ def _read_bitbucket(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
         raise DocError(f"{t['name']}: no {kinds} file{where}")
     pages, partial = [], False
     for f in chosen:
+        watch.check()
         if len(pages) >= want:
             break
         if isinstance(f.get("size"), int) and f["size"] > limit:
@@ -1939,6 +2032,7 @@ def refresh(doc: Doc) -> dict[str, Any]:
     skipped, changed, shared = 0, False, 0
     token = None
     got: dict[str, Any] = {"skipped": [], "not_read": 0, "left": 0}
+    doc_id = doc.id
     if doc.id is not None and doc in db.session:       # (a document of this session: claimed, saved now)
         doc.status, doc.fetched_at = READING, dt.datetime.utcnow()
         db.session.commit()
@@ -1967,6 +2061,11 @@ def refresh(doc: Doc) -> dict[str, Any]:
             db.session.rollback()                      # out: not the document's fault; read again at the next tick
             _unclaim(doc)
             raise
+        if isinstance(ex, _DocGone) or type(ex).__name__ in ("ObjectDeletedError", "StaleDataError"):
+            db.session.rollback()                      # (0.11.8.2) deleted while it was read: nothing to save
+            if doc_id is not None and _gone(doc_id):
+                log.info("supagent: document %s deleted while it was read: its reading stopped", doc_id)
+                return _deleted(doc_id, reader, skipped)
         said = str(ex) if isinstance(ex, DocError) else f"{type(ex).__name__}: {ex}"
         doc.status, doc.error = "error", scrub(said, doc)[:500]
         log.info("supagent: document %s (%s) not read: %s", doc.id, reader, doc.error)
@@ -1974,14 +2073,17 @@ def refresh(doc: Doc) -> dict[str, Any]:
         if token is not None:
             _VERIFY.reset(token)
         _READ_LOG.reset(log_token)
-    doc.fetched_at = dt.datetime.utcnow()
-    _keep_read_log(doc, reader, got)
     try:
+        doc.fetched_at = dt.datetime.utcnow()
+        _keep_read_log(doc, reader, got)
         db.session.commit()
     except Exception as ex:  # pylint: disable=broad-except   (0.11.0) what was read cannot be saved: said, not retried
         db.session.rollback()                          # every hour (the tick goes on with the other documents)
-        log.warning("supagent: document %s read but not saved: %s", doc.id, ex)
-        d = db.session.get(Doc, doc.id) if doc.id is not None else None
+        if doc_id is not None and _gone(doc_id):       # (0.11.8.2) deleted at the end of its reading: nothing to save
+            log.info("supagent: document %s deleted while it was read: what was read is not kept", doc_id)
+            return _deleted(doc_id, reader, skipped)
+        log.warning("supagent: document %s read but not saved: %s", doc_id, ex)
+        d = db.session.get(Doc, doc_id) if doc_id is not None else None
         if d is not None:
             d.status, d.error, d.fetched_at = "error", f"read but not saved: {type(ex).__name__}: {str(ex)[:300]}", \
                 dt.datetime.utcnow()
@@ -1989,6 +2091,12 @@ def refresh(doc: Doc) -> dict[str, Any]:
             doc = d
     return {"id": doc.id, "status": doc.status, "reader": reader, "pages": len(doc.pages or []), "skipped": skipped,
             "changed": changed, "error": doc.error, **({"read_by_another": shared} if shared else {})}
+
+
+def _deleted(doc_id: int, reader: str, skipped: int) -> dict[str, Any]:
+    """(0.11.8.2) What a reading says of a document deleted while it was read."""
+    return {"id": doc_id, "status": "deleted", "reader": reader, "pages": 0, "skipped": skipped, "changed": False,
+            "error": None}
 
 
 def _unclaim(doc: Doc) -> None:
