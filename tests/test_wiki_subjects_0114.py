@@ -300,13 +300,13 @@ def test_a_big_wiki_space_has_its_own_summary_page(app):
     after the overviews: its subjects in turns, dated; a smaller space, or a wiki read before, has none."""
     from supagent.knowledge.context import SPACE_MIN_PAGES, _space_specs
 
-    big = _wiki(n_subjects=3, per=SPACE_MIN_PAGES // 3 + 1)
+    big = _wiki(n_subjects=3, per=max(SPACE_MIN_PAGES, 200) // 3 + 1)
     specs = _space_specs({"docs": [big]})
     assert [s["slug"] for s in specs] == ["space-ops"] and specs[0]["title"] == "Wiki space Operations home"
     text = specs[0]["evidence"][0]["text"]
     assert "Its subjects" in text and all(f"Subject {k}" in text for k in range(3))
     assert _space_specs({"docs": [_wiki(n_subjects=1, per=10)]}) == []
-    old = _wiki(n_subjects=3, per=SPACE_MIN_PAGES // 3 + 1)
+    old = _wiki(n_subjects=3, per=max(SPACE_MIN_PAGES, 200) // 3 + 1)
     for p in old["pages"]:
         p.pop("ancestors")
     assert _space_specs({"docs": [old]}) == []
@@ -331,7 +331,7 @@ def test_a_space_page_names_its_subjects_and_is_asked_again_once(app):
     not asked again."""
     from supagent.knowledge.context import SPACE_MIN_PAGES, _space_specs, _subject_names, write_summary
 
-    big = _wiki(n_subjects=3, per=SPACE_MIN_PAGES // 3 + 1)
+    big = _wiki(n_subjects=3, per=max(SPACE_MIN_PAGES, 200) // 3 + 1)
     assert _subject_names([p for p in big["pages"]]) == ["Subject 0", "Subject 1", "Subject 2"]
     spec = _space_specs({"docs": [big]})[0]
     assert spec["guard"] == {"subjects": ["Subject 0", "Subject 1", "Subject 2"]}
@@ -373,7 +373,7 @@ def test_what_a_space_page_still_invents_after_it_was_asked_again_is_left_out(ap
     answer worse than the first (more subjects left out, more names invented) is not kept."""
     from supagent.knowledge.context import SPACE_MIN_PAGES, _space_specs, _without_names, write_summary
 
-    spec = _space_specs({"docs": [_wiki(n_subjects=3, per=SPACE_MIN_PAGES // 3 + 1)]})[0]
+    spec = _space_specs({"docs": [_wiki(n_subjects=3, per=max(SPACE_MIN_PAGES, 200) // 3 + 1)]})[0]
 
     class LLM:
         last_usage, last_finish = {"prompt_tokens": 10, "completion_tokens": 5}, "stop"
@@ -412,7 +412,7 @@ def test_a_space_page_that_guesses_between_its_pages_is_asked_again_and_the_gues
     from supagent.knowledge.context import RECENCY, SPACE_MIN_PAGES, _space_specs, guesses, write_summary
 
     assert "Never guess from what is usual or likely" in " ".join(RECENCY.split())
-    spec = _space_specs({"docs": [_wiki(n_subjects=3, per=SPACE_MIN_PAGES // 3 + 1)]})[0]
+    spec = _space_specs({"docs": [_wiki(n_subjects=3, per=max(SPACE_MIN_PAGES, 200) // 3 + 1)]})[0]
     assert guesses("Subject 0 typically runs on host-0-new; we assume so.", ["Subject 0 runs on host-0-new."]) == \
         ["typically", "assume"]
     assert guesses("It usually runs at night.", ["The job usually runs at night."]) == []

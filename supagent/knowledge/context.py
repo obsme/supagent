@@ -55,12 +55,20 @@ DIGEST_LEAD = 160          #   central pages (the most linked to) with their fir
 DIGEST_DOCS = 6            # documents in a summary page's evidence (the ones with the most pages first)
 DATED_HEAD = " and the day it was last changed"     # (0.11.5) a digest whose pages say their day (the writer's
 #                                                     RECENCY rule given with it)
-SPACE_MIN_PAGES = 200      # (0.11.5) a wiki space this big (read since 0.11.4: its pages say their parents) has a summary
-SPACE_PAGES_MAX = 6        #   page of its own, its subjects in turns (the biggest spaces first, so many at most)
+SPACE_MIN_PAGES = 20       # (0.11.5) a wiki space this big (read since 0.11.4: its pages say their parents) has a summary
+SPACE_PAGES_MAX = 40       #   page of its own, its subjects in turns (the biggest spaces first, so many at most);
+#                            (0.11.7: were 200 and 6: a wiki of 30 spaces of ~100 pages had none)
+SPACE_RESERVE = 3          # (0.11.7) LLM calls the space pages leave to the links page and the two overviews
+SPACE_PARTS = 30           # (0.11.7) the applications, components and services of a space given to its page at most
+SPACE_RELATIONS = 30       #   and the relations its pages state
+OVERVIEW_PARTS = 60        # (0.11.7) the parts of the documents given to the overviews at most (the most written first)
 SPACE_BRIEF = ("Explain what this wiki space documents, for a newcomer (## Subjects: one table, a row per subject of "
-               "the space: subject, what it is, what holds now (its owner, hosts, versions, schedules, as the most "
-               "recent pages say; where a page's own text says since when something holds, what that replaced and "
-               "since when, with that day); ## Where to read more: its main pages, by their titles).")
+               "the space and per application, component or service its pages are about: subject, what it is, its "
+               "own space when its own pages are in another space, what holds now (its owner, hosts, versions, "
+               "schedules, as the most recent pages say; where a page's own text says since when something holds, "
+               "what that replaced and since when, with that day); ## Where to read more: its main pages, by their "
+               "titles). Keep each table cell short, one sentence: a space of many subjects fits one page.")
+#                            (0.11.7: the parts of its pages in its table, each with its own space when another one)
 #                            (0.11.5: no dated list of changes: it gave routine page updates wrong years)
 DIGEST_BRANCH = 3          # (0.11.4) pages a branch of a document's tree needs to be a subject of its digest (fewer:
 #                            with its other pages)
@@ -348,6 +356,12 @@ def collect() -> dict[str, Any]:
                             "content": d.content or "",
                             "pages": [p for p in (d.pages or []) if isinstance(p, dict)]})   # (0.10.12) its digest
     out["part_relations"] = _part_relations()
+    from supagent.knowledge import parts_index as P
+
+    out["parts"] = P.index(out["docs"], P.facets())    # (0.11.7) the parts of the documents and their wiki spaces
+    known = out["parts"]["parts"]                      # (0.11.7) a host or an owner a part's latest dated change says
+    out["part_relations"] = [r for r in out["part_relations"] if not (   # it replaced: no longer stated as holding
+        r["verb"] in ("runs_on", "owned_by") and P.superseded(known.get(P.norm(r["a"])), r["b"]))]
     for m in db.session.query(Memory).filter(Memory.scope == "team", Memory.status == "active").order_by(Memory.id):
         out["memory"].append({"id": m.id, "kind": m.kind, "text": m.text})
     for r in (db.session.query(Recipe).filter(Recipe.status.in_(("helpful", "confirmed")))
@@ -586,6 +600,18 @@ def _branches(pages: list[dict[str, Any]]) -> list[tuple[tuple[str, ...] | None,
     return ([((), top)] if top else []) + out + ([(None, rest)] if rest else [])
 
 
+def _cut(text: str, chars: int) -> str:
+    """(0.11.7) A page's first characters cut at a word's end, never ending on a bare number ("... after 5" read "after 5
+    minutes" by the writer): "..." when cut."""
+    if len(text) <= chars:
+        return text
+    cut = text[:chars]
+    if not text[chars].isspace() and " " in cut:
+        cut = cut[:cut.rfind(" ")]
+    cut = re.sub(r"(?:\s+[\d.,:/%-]+)+$", "", cut.rstrip(" ,;:")).rstrip(" ,;:")
+    return cut + " ..."
+
+
 def _central(pages: list[dict[str, Any]]) -> Any:
     """A document's pages in order of weight (the sort key): the ones its other pages link to most first, then the
     shallowest, then the shortest titles (0.11.6.1: out of _digest, for the pages of a wiki no space page holds)."""
@@ -602,7 +628,8 @@ def _central(pages: list[dict[str, Any]]) -> Any:
     return lambda p: (-inbound[key(p)], str(p.get("path") or "").count("/"), len(str(p.get("title") or "")))
 
 
-def _digest(d: dict[str, Any], chars: int, by_branch: bool = False) -> str:
+def _digest(d: dict[str, Any], chars: int, by_branch: bool = False,
+            groups: list[tuple[str, list[dict[str, Any]]]] | None = None) -> str:
     """(0.10.12) What a summary page reads of a document: a small one, its beginning; one of many pages (a wiki, a
     repository), each with its first lines, up to `chars`: what thousands of pages are about, not their first page.
     (0.11.4) Each of its subjects (_branches: the branches of its tree, a wiki's page trees, a repository's folders)
@@ -614,7 +641,9 @@ def _digest(d: dict[str, Any], chars: int, by_branch: bool = False) -> str:
     parents yet), a site of one folder: its central pages first (the ones its other pages link to most), as before,
     dated when known.
     (0.11.5) By subject (by_branch) only for a wiki space's own summary page (_space_specs); the overviews read every
-    document as up to 0.11.4 (_flat)."""
+    document as up to 0.11.4 (_flat). (0.11.7) A space whose tree gives no subject (its pages all under its home, or
+    all at its top): its `groups` (the applications, components and services its pages are about, each with its
+    pages; its other pages last) in place of the branches."""
     content = d.get("content") or ""
     pages = _top_first([p for p in d.get("pages") or []
                         if isinstance(p.get("at"), int) and isinstance(p.get("chars"), int)])
@@ -630,7 +659,7 @@ def _digest(d: dict[str, Any], chars: int, by_branch: bool = False) -> str:
             block = content[p["at"]:p["at"] + min(p["chars"], 600 + 8 * DIGEST_LEAD)]     # its first lines only
             first, _, body = block.partition("\n")
             title = str(p.get("title") or first.lstrip("# ").strip())
-            lead = " ".join((body if first.startswith("# ") else block).split())[:DIGEST_LEAD]
+            lead = _cut(" ".join((body if first.startswith("# ") else block).split()), DIGEST_LEAD)
             day = p.get("modified")
             made[id(p)] = (f"- {title}{f' [last changed {day}]' if day else ''}: {lead}\n",   # (0.11.5: said: a
             #                                    title of a day of its own, "2025-06-18 weekly sync", was mixed with it)
@@ -645,11 +674,17 @@ def _digest(d: dict[str, Any], chars: int, by_branch: bool = False) -> str:
     # its central pages first, as before
     branches = _branches(pages) if any(isinstance(p.get("ancestors"), list) for p in pages) else [(None, pages)]
     subjects = any(place for place, _mine in branches)
-    if not subjects:                                  # no subject (a wiki read before 0.11.4, a flat site): one list
+    named: dict[tuple[str, ...], str] = {}
+    if not subjects and groups:                       # (0.11.7) no page tree: the parts its pages are about
+        branches = [(("", str(i)), mine) for i, (_name, mine) in enumerate(groups)]
+        named = {("", str(i)): name for i, (name, _mine) in enumerate(groups)}
+        subjects = True
+    elif not subjects:                                # no subject (a wiki read before 0.11.4, a flat site): one list
         branches = [(None, pages)]
     groups: list[tuple[str, list[str]]] = []          # (its name, its lines in the order they are given room)
     for place, mine in branches:
-        own = [p for p in mine if place and _place(p) == place[1:]]
+        own = [p for p in mine if place and (_place(p) == place[1:] if place not in named else
+                                             " ".join(str(p.get("title") or "").split()) == named[place])]
         lines = [line(p) for p in own]
         rest = sorted((p for p in mine if not any(p is o for o in own)), key=central)
         latest = sorted((p for p in rest if p.get("modified")),       # the latest: the ones that say since when
@@ -667,13 +702,16 @@ def _digest(d: dict[str, Any], chars: int, by_branch: bool = False) -> str:
             lines += [line(p) for p in ordered if not line(p)[1]] + [line(p) for p in ordered if line(p)[1]]
         else:                                         # read before 0.11.4, no day nor parent: its pages as before)
             lines += [line(p) for p in ordered]
-        name = lines[0][2] if own else ("/".join(place[1:]) if place and not mine[0].get("id") else
-                                        lines[0][2] if place else "Top pages" if place == () else "Other pages")
+        name = named.get(place) or (lines[0][2] if own else ("/".join(place[1:]) if place and not mine[0].get("id")
+                                                             else lines[0][2] if place else "Top pages" if place == ()
+                                                             else "Other pages"))
         groups.append((name, [x[0] for x in lines]))
     spaces = sorted({str(p["space"]) for p in pages if p.get("space")})
     dated = DATED_HEAD if any(p.get("modified") for p in pages) else ""
     # (0.11.1) no count of its pages, nor of the pages linking to each (the summaries said "the wiki has 5,000 pages")
     head = (f"Spaces: {', '.join(spaces[:10])}. " if spaces else "") + (
+        f"Its applications, components and services (the pages about each, its own page first), then its other "
+        f"pages, each page with its first lines{dated}:\n" if named else
         f"Its subjects (the branches of its tree), each with its own page first, then its most linked and its latest "
         f"pages, each page with its first lines{dated}:\n" if subjects else
         f"Its central pages first (the ones its other pages link to most), each with its first lines{dated}:\n")
@@ -747,21 +785,82 @@ def _subject_names(pages: list[dict[str, Any]]) -> list[str]:
 def _big_spaces(ev: dict[str, Any]) -> list[dict[str, Any]]:
     """(0.11.5) The big spaces of the wikis read since 0.11.5 (their pages say their parents; SPACE_MIN_PAGES pages or
     more; the biggest first, SPACE_PAGES_MAX at most): [{"space": its key, "name": its home page's title, "doc": its
-    document, "pages": its pages}]."""
+    document, "pages": its pages}]. (0.11.7) Only of a wiki longer than what the overviews read of all documents
+    (DOCS_CHARS: a smaller one they read whole); one page a space whatever the documents reading its pages (two links
+    of one wiki reaching it: the document holding the most of them; was a page each, of one slug, written in turn at
+    every build); named by its home, the top page holding the most pages (its key when none does: pages imported at
+    the top of a space)."""
+    from supagent.knowledge.parts_index import space_ids, space_name
+
     least, most = ev.get("space_limits") or (SPACE_MIN_PAGES, SPACE_PAGES_MAX)   # (0.11.6.1) settings
-    found = []
+    ids = space_ids(ev["docs"])                       # (0.11.7) two sites' spaces of one key: two spaces
+    found: dict[str, tuple[int, str, dict[str, Any], list[dict[str, Any]]]] = {}
     for d in ev["docs"]:
+        if len(d.get("content") or "") <= DOCS_CHARS:
+            continue
         mine: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for p in d.get("pages") or []:
             if p.get("space") and isinstance(p.get("ancestors"), list):
-                mine[str(p["space"])].append(p)
-        found += [(len(v), str(k), d, v) for k, v in mine.items() if len(v) >= max(1, least)]
+                mine[ids.get((int(d["id"]), str(p["space"]))) or str(p["space"])].append(p)
+        for k, v in mine.items():
+            if len(v) >= max(1, least) and (k not in found or len(v) > found[k][0]):
+                found[k] = (len(v), str(k), d, v)
     out = []
-    for _n, space, d, pages in sorted(found, key=lambda x: (-x[0], x[1]))[:max(0, most)]:
-        home = next((p for p in pages if not p.get("ancestors")), None)      # the space's home: no parent
-        out.append({"space": space, "name": str(home.get("title") or space) if home else space, "doc": d,
-                    "pages": pages})
+    for _n, space, d, pages in sorted(found.values(), key=lambda x: (-x[0], x[1]))[:max(0, most)]:
+        out.append({"space": space, "name": space_name(space.split("@")[0], pages), "doc": d, "pages": pages})
     return out
+
+
+def _space_parts(ev: dict[str, Any], space: str) -> tuple[list[str], list[str], list[str]]:
+    """(0.11.7) What a space's page is given of its applications, components and services (ev["parts"]: the parts
+    index): (its parts' names, the most written about here first; a line each: what it is, its own space when
+    another one, the other spaces documenting it; the relations its pages state)."""
+    from supagent.knowledge import parts_index as P
+
+    ix = ev.get("parts") or {}
+    names = ix.get("space_names") or {}
+    here = sorted(((k, p) for k, p in (ix.get("parts") or {}).items() if p["spaces"].get(space)),
+                  key=lambda kp: (-kp[1]["spaces"][space], kp[1]["name"].lower()))[:SPACE_PARTS]
+    shown, lines = [], []
+    for _k, p in here:
+        what = P.kind_phrase(p)
+        line = p["name"] + (f" ({what})" if what else "")
+        if p.get("home") and p["home"] != space:
+            line += f": its own pages are in the space {names.get(p['home'], p['home'])}"
+        elif p.get("home"):                         # (said, else "pages about it in X too" was read as its own space)
+            line += ": its own pages are in this space"
+        more = [names.get(x, x) for x in P.others(p) if x != space][:6]
+        if more:
+            line += ("; " if ":" in line else ": ") + "pages about it in " + ", ".join(more) + " too"
+        change = P.change_phrase(p, names)          # (what its own space changed lately holds here too)
+        if change:
+            line += ("; " if ":" in line else ": ") + change
+        shown.append(p["name"])
+        lines.append(line)
+    on = ix.get("page_space") or {}
+    rels = [f"{r['a']} {RELATION_VERBS.get(r['verb'], r['verb'])} {r['b']}" for r in ix.get("relations") or []
+            if any(on.get(tuple(x)) == space for x in r["pages"])][:SPACE_RELATIONS]
+    return shown, lines, rels
+
+
+def _space_groups(ev: dict[str, Any], pages: list[dict[str, Any]], doc_id: int
+                  ) -> list[tuple[str, list[dict[str, Any]]]]:
+    """(0.11.7) A space with no page tree as its parts: each part with the pages about it (its title names it, else it
+    is the part the page states most of), DIGEST_BRANCH pages at least; the other pages last ("Other pages")."""
+    ix = ev.get("parts") or {}
+    parts, of_page = ix.get("parts") or {}, ix.get("page_parts") or {}
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    rest = []
+    for p in pages:
+        keys = [k for k in of_page.get((int(doc_id), str(p.get("id")))) or [] if k in parts]
+        (groups[keys[0]] if keys else rest).append(p)
+    out = []
+    for k, mine in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        if len(mine) >= DIGEST_BRANCH:
+            out.append((parts[k]["name"], mine))
+        else:
+            rest += mine
+    return out + ([("Other pages", rest)] if rest and out else [])
 
 
 def _space_specs(ev: dict[str, Any], spaces: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -770,14 +869,34 @@ def _space_specs(ev: dict[str, Any], spaces: list[dict[str, Any]] | None = None)
     specs = []
     for s in _big_spaces(ev) if spaces is None else spaces:
         d, space, pages = s["doc"], s["space"], s["pages"]
-        subjects = _subject_names(pages)[:SPACE_SUBJECTS]
+        tree = _subject_names(pages)[:SPACE_SUBJECTS]
+        parts, lines, rels = _space_parts(ev, space)  # (0.11.7) its applications, components and services
+        groups = [] if tree else _space_groups(ev, pages, d["id"])     # no page tree: its parts are its subjects
+        mine = [n for n, ps in groups if n != "Other pages"]
+        subjects = tree + [n for n in parts if n not in tree and not any(
+            re.search(r"(?<![\w-])" + re.escape(n) + r"(?![\w-])", t) for t in tree) and
+            (n in mine or _pages_about(ev, n, space) >= 2)]
+        subjects = list(dict.fromkeys(subjects))[:SPACE_SUBJECTS]
+        evidence = [{"ref": f"doc:{d['id']}", "title": f"{d['title']}: space {space}",
+                     "text": _digest({"content": d.get("content") or "", "pages": pages}, DOCS_CHARS, by_branch=True,
+                                     groups=groups)}]
+        if lines:
+            evidence.append({"ref": f"doc:{d['id']}", "title": f"the applications, components and services the pages "
+                                                               f"of the space {s['name']} are about",
+                             "parts": lines, **({"relations": rels} if rels else {})})
         specs.append({"section": "functional", "slug": f"space-{slugify(space)}", "title": f"Wiki space {s['name']}",
-                      "database_ids": [], "diagram": [], "guard": {"subjects": subjects},
+                      "database_ids": [], "diagram": [], "guard": {"subjects": subjects}, "space": True,
                       "brief": SPACE_BRIEF + (f" Its subjects (a row each): {', '.join(subjects)}." if subjects else ""),
-                      "evidence": [{"ref": f"doc:{d['id']}", "title": f"{d['title']}: space {space}",
-                                    "text": _digest({"content": d.get("content") or "", "pages": pages}, DOCS_CHARS,
-                                                    by_branch=True)}]})
+                      "evidence": evidence})
     return specs
+
+
+def _pages_about(ev: dict[str, Any], name: str, space: str) -> int:
+    """(0.11.7) The pages of a space about a part (the parts index)."""
+    from supagent.knowledge.parts_index import norm
+
+    p = ((ev.get("parts") or {}).get("parts") or {}).get(norm(name))
+    return int(p["spaces"].get(space, 0)) if p else 0
 
 
 LINKS_SLUG = "spaces-links"    # (0.11.6) the page of the links between the big spaces' subjects (no space's slug:
@@ -786,6 +905,19 @@ LINKS_MIN_PAGES = 2        # (0.11.6) pages of a subject that must name another 
 LINKS_GIVEN = 40           #   links given to the links page at most (across spaces first, the most named first)
 LINKS_ROWS = 20            #   the first ones across spaces: a row each on the page (asked again once when one is left out)
 LINK_EXAMPLE = 240         #   characters of a link's example sentence
+LINK_VERBS = ("calls", "reads_from", "sends_to", "uses", "runs_on", "monitors", "scrapes", "collects", "routes_to")
+PART_LINKS_GIVEN = 60      # (0.11.7) relations between the parts of the spaces given to the links page at most
+SPACE_LINE_PARTS = 8       #   the parts named on each space's line of its evidence
+LINKS_PARTS_BRIEF = ("Explain how the spaces of the wiki connect through their applications, components and services, "
+                     "for a newcomer: which parts of a space call, read from, send data to, use, run on or monitor "
+                     "which parts of another space, as the pages say (## Between the spaces: one table, a row per pair "
+                     "of spaces the relations join (the two spaces, the parts that join them, how); ## Main links: one "
+                     "table, a row per relation between the spaces, in the order given (part, its space, what it "
+                     "does, the other part, its space); ## Inside the spaces: the main relations inside one space, in "
+                     "a few sentences). Write only the relations given: a relation the evidence does not give is never "
+                     "written; and no sentence about the evidence or its list itself.")
+LINKS_PARTS_NOTE = ("Which parts use which (between the spaces first; read each line as: the part on the left calls, "
+                    "reads from, sends data to, uses, runs on or monitors the part on the right).")
 LINKS_BRIEF = ("Explain how the spaces of the wiki connect, for a newcomer: which subjects of a space the pages of "
                "another space name, and what for, as their example sentences say (## Between the spaces: one table, "
                "a row per pair of spaces the links join (the two spaces, the subjects that join them, what for); "
@@ -856,10 +988,43 @@ def subject_links(spaces: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return links
 
 
-def _links_spec(spaces: list[dict[str, Any]], links: list[dict[str, Any]]) -> dict[str, Any] | None:
+def part_links(ev: dict[str, Any]) -> list[dict[str, Any]]:
+    """(0.11.7) The relations the understanding read between the parts of the wiki's spaces (calls, sends data to,
+    reads from, uses, runs on, monitors...), each end with its own space (the parts index) and the sentence of the
+    latest page saying it; between two spaces first, a relation of each pair of spaces in turn (the pair whose
+    relation is the most stated first: a few pairs stated on many pages leave room to the others), then the ones
+    inside a space: [{"a", "a_space", "verb", "b", "b_space", "pages", "example", "page"}]."""
+    ix = ev.get("parts") or {}
+    parts, names = ix.get("parts") or {}, ix.get("space_names") or {}
+    found = []
+    for r in ix.get("relations") or []:
+        a, b = parts.get(r["a_key"]), parts.get(r["b_key"])
+        if r["verb"] not in LINK_VERBS or not a or not b or not a.get("home") or not b.get("home"):
+            continue
+        found.append({"a": r["a"], "a_space": names.get(a["home"], a["home"]), "verb": r["verb"], "b": r["b"],
+                      "b_space": names.get(b["home"], b["home"]), "pages": len(r["pages"]),
+                      "example": clip(r.get("quote") or "", LINK_EXAMPLE), "page": r.get("where") or ""})
+    found.sort(key=lambda x: (-x["pages"], x["a"].lower(), x["verb"], x["b"].lower()))
+    pairs: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for x in found:
+        if x["a_space"] != x["b_space"]:
+            pairs[tuple(sorted((x["a_space"], x["b_space"])))].append(x)
+    across = []
+    for i in range(max((len(v) for v in pairs.values()), default=0)):
+        across += [v[i] for v in pairs.values() if i < len(v)]    # (the pairs in the order of their first relation)
+    return across + [x for x in found if x["a_space"] == x["b_space"]]
+
+
+def _links_spec(spaces: list[dict[str, Any]], links: list[dict[str, Any]],
+                rels: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
     """(0.11.6) The page of how the big spaces connect (two big spaces or more, linked): each space's subjects with
     their own page's first lines, then the links (subject_links: across spaces first, LINKS_GIVEN at most), each with
-    its example sentence; the first LINKS_ROWS across spaces a row each (its guard), the links drawn."""
+    its example sentence; the first LINKS_ROWS across spaces a row each (its guard), the links drawn.
+    (0.11.7) When the pages state relations between the parts of two spaces (part_links): the spaces with the parts
+    the relations name, then those relations (PART_LINKS_GIVEN at most), the first LINKS_ROWS across spaces a row each,
+    the relations drawn with their verbs; the subjects' links after them (no row asked)."""
+    if len(spaces) >= 2 and any(x["a_space"] != x["b_space"] for x in rels or []):
+        return _part_links_spec(spaces, links, rels or [])
     across = [x for x in links if x["a_space"] != x["b_space"]]
     if len(spaces) < 2 or not across:
         return None
@@ -885,6 +1050,36 @@ def _links_spec(spaces: list[dict[str, Any]], links: list[dict[str, Any]]) -> di
             "guard": {"pairs": [(x["a"], x["b"]) for x in rows], "missing": "these links",
                       "ask": f"a row for each of the first {len(rows)} links given"},
             "diagram": [{"a": x["a"], "b": x["b"], "verb": "names"} for x in given], "diagram_note": LINKS_NOTE}
+
+
+def _part_links_spec(spaces: list[dict[str, Any]], links: list[dict[str, Any]], rels: list[dict[str, Any]]
+                     ) -> dict[str, Any]:
+    """(0.11.7) The links page from the relations between the parts of the spaces (_links_spec)."""
+    given = rels[:PART_LINKS_GIVEN]
+    rows = [x for x in given if x["a_space"] != x["b_space"]][:LINKS_ROWS]
+    named: dict[str, list[str]] = defaultdict(list)
+    for x in given:
+        for part, space in ((x["a"], x["a_space"]), (x["b"], x["b_space"])):
+            if part not in named[space]:
+                named[space].append(part)
+    evidence = [{"ref": f"doc:{spaces[0]['doc']['id']}", "title": "the spaces of the wiki and their applications, "
+                                                                   "components and services the relations name",
+                 "spaces": [f"{space}: {', '.join(ps[:SPACE_LINE_PARTS])}" for space, ps in named.items()]},
+                {"ref": "facts", "title": "the relations between the parts of the spaces (between two spaces first)",
+                 "links": [f"{x['a']} ({x['a_space']}) {RELATION_VERBS.get(x['verb'], x['verb'])} {x['b']} "
+                           f"({x['b_space']}): \"{x['example']}\"" + (f" (page \"{x['page']}\")" if x["page"] else "")
+                           for x in given]}]
+    other = [x for x in links if x["a_space"] != x["b_space"] and not re.search(   # (a subject of one part in two
+        r"(?<![\w-])" + re.escape(x["b"]) + r"(?![\w-])", x["a"])][:max(0, LINKS_GIVEN - LINKS_ROWS)]   # spaces: no link)
+    if other:                                         # the subjects' pages naming another's: after them, no row asked
+        evidence.append({"ref": f"doc:{other[0]['doc']}", "title": "the subjects whose pages name another subject of "
+                                                                    "another space",
+                         "links": [f"{x['a']} ({x['a_space']}) -> {x['b']} ({x['b_space']})" for x in other]})
+    return {"section": "functional", "slug": LINKS_SLUG, "title": LINKS_TITLE, "database_ids": [],
+            "brief": LINKS_PARTS_BRIEF, "evidence": evidence,
+            "guard": {"pairs": [(x["a"], x["b"]) for x in rows], "missing": "these relations",
+                      "ask": f"a row for each of the first {len(rows)} relations given"},
+            "diagram": [{"a": x["a"], "b": x["b"], "verb": x["verb"]} for x in given], "diagram_note": LINKS_PARTS_NOTE}
 
 
 # (0.11.6) the overviews read a big wiki through its spaces' own pages and their links' page, once they are written
@@ -979,6 +1174,51 @@ def _numbered(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[d
     return prompt, sources
 
 
+def _parts_item(ev: dict[str, Any]) -> list[dict[str, Any]]:
+    """(0.11.7) The applications, components and services the wiki pages describe, for the overviews: each whole with
+    its parts, then the others, each with what it is, its own space and the other spaces with pages about it (the
+    most written about first, OVERVIEW_PARTS at most); [] when no wiki space has any."""
+    from supagent.knowledge import parts_index as P
+
+    ix = ev.get("parts") or {}
+    parts, names = ix.get("parts") or {}, ix.get("space_names") or {}
+    members: dict[str, list[str]] = defaultdict(list)
+    for p in parts.values():
+        if p.get("of") and p.get("home"):
+            members[P.norm(p["of"])].append(p["name"])
+    lines = []
+    for p in sorted((p for p in parts.values() if p.get("home")), key=lambda p: (-len(p["pages"]), p["name"].lower())):
+        if p.get("of") and P.norm(p["of"]) in parts and parts[P.norm(p["of"])].get("home"):
+            continue                                  # (said with its whole)
+        what = P.kind_phrase(p)
+        line = p["name"] + (f" ({what})" if what else "")
+        mine = sorted(members.get(P.norm(p["name"])) or [], key=str.lower)
+        line += (f": made of {', '.join(mine[:8])}" if mine else "") + \
+            f"; its own space {names.get(p['home'], p['home'])}"
+        more = [names.get(x, x) for x in P.others(p)][:4]
+        change = P.change_phrase(p, names)
+        lines.append(line + (f"; pages about it in {', '.join(more)} too" if more else "") +
+                     (f"; {change}" if change else ""))
+        if len(lines) >= OVERVIEW_PARTS:
+            break
+    return [{"ref": "parts", "title": "the applications, components and services the wiki pages describe",
+             "parts": lines}] if lines else []
+
+
+OVERVIEW_APPS = 40         # (0.11.7) the wiki's applications its overview is asked a row for at most (most written first)
+APPS_SECTION = re.compile(r"(?ims)^#{2,3}[ \t]*applications\b[^\n]*\n(.*?)(?=^#{1,3}[ \t]|\Z)")   # its table's section
+APPS_MORE = "Also described in the wiki pages (see Applications, components and services): "
+
+
+def _wiki_apps(ev: dict[str, Any]) -> list[str]:
+    """(0.11.7) The applications the wiki pages describe (the parts index: an application, its own space known), the
+    most written about first: the overview's Applications table has a row for each (asked again once otherwise)."""
+    parts = ((ev.get("parts") or {}).get("parts") or {}).values()
+    apps = sorted((p for p in parts if p.get("kind") == "application" and p.get("home")),
+                  key=lambda p: (-len(p["pages"]), p["name"].lower()))
+    return [p["name"] for p in apps][:OVERVIEW_APPS]
+
+
 def _apps(ev: dict[str, Any]) -> list[str]:
     """The main applications: the values of the application labels and fields, most mentioned first."""
     found: set[str] = set()
@@ -1028,6 +1268,8 @@ def summary_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
                  for a in ev["answers"]][:40]
     relations = [{"ref": "relations", "title": "relations between the data sources",
                   "links": [f"{r['a']} = {r['b']}" for r in ev["relations"][:40]]}] if ev["relations"] else []
+    parts = _parts_item(ev)                          # (0.11.7) the wiki's applications, components and services
+    apps = _wiki_apps(ev)
     specs = [
         {"section": "functional", "slug": "overview", "title": "How the system works", "database_ids": all_dbs,
          "brief": "Explain what the system does for its users, its applications and their roles, the main processes "
@@ -1036,25 +1278,30 @@ def summary_specs(ev: dict[str, Any]) -> list[dict[str, Any]]:
                   "does; ## Applications: one table, a row per application (application, what it does, its data), "
                   "never a list per domain; ## Processes and chains; ## Where the data is: the data sources and what "
                   "each holds, without repeating the table).",
-         "evidence": docs + stated + entries + questions + databases + inventory, "diagram": pool},
+         "evidence": docs + stated + parts + entries + questions + databases + inventory, "diagram": pool,
+         **({"guard": {"subjects": apps, "only_subjects": True, "missing": "these applications the wiki pages "
+                       "describe", "ask": "a row in the Applications table for each application given"}}
+            if apps else {})},
         {"section": "technical", "slug": "architecture", "title": "Technical overview", "database_ids": all_dbs,
          "brief": "Describe the data sources, the infrastructure (servers, services, clusters, environments, regions), "
                   "how the data sources and the parts relate (the relations the documents state: what calls, runs on, "
                   "connects to what) and what is not known (## Data sources: one table, a row per data source "
                   "(data source, engine, what it holds); ## Infrastructure; ## Links; ## Not known yet: at most five "
                   "points, the gaps a newcomer would hit first).",
-         "evidence": databases + inventory + relations + stated + docs,
+         "evidence": databases + inventory + relations + stated + parts + docs,
          "diagram": [r for r in pool if r["verb"] in INFRA_VERBS]},
     ]
     spaces = _big_spaces(ev)                          # (0.11.5) a big wiki's spaces: a page each; (0.11.6) written
     first = _space_specs(ev, spaces)                  # before the overviews, with the page of how they connect, which
-    links = _links_spec(spaces, subject_links(spaces)) if len(spaces) > 1 else None    # the overviews then read
+    links = _links_spec(spaces, subject_links(spaces), part_links(ev)) if len(spaces) > 1 else None   # (the
+    #                                                   overviews then read it)
     covered: dict[str, dict[str, Any]] = {}
     for s, spec in zip(spaces, first):
         info = covered.setdefault(str(s["doc"]["id"]), {"slugs": [], "spaces": {}, "doc": s["doc"],
                                                        "chars": shares.get(s["doc"]["id"], DOCS_CHARS)})
         info["slugs"].append(spec["slug"])
-        info["spaces"][spec["slug"]] = s["space"]           # (0.11.6.1) the space each page holds
+        info["spaces"][spec["slug"]] = s["space"].split("@")[0]   # (0.11.6.1) the space each page holds (its key
+        #                                                                in its document)
     if covered:                                       # (in place of the wiki's digest, when written: _late)
         for spec, brief, before in zip(specs, (WIKI_OVERVIEW, WIKI_TECHNICAL), (WIKI_OVERVIEW_BEFORE, None)):
             spec["late"] = {"docs": covered, "links": links["slug"] if links else None, "brief": brief,
@@ -1389,27 +1636,80 @@ def guesses(page: str, evidence: Any, spec: dict[str, Any] | None = None) -> lis
     return out
 
 
-def _faults(text: str, prompt_items: Any, spec: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
+def unjoined(text: str, spec: dict[str, Any]) -> list[str]:
+    """(0.11.7) The links page's table rows naming two parts of its relations that no relation given joins (either
+    way): a relation it made up ("beacon-mailer | sends data to | pg-orderbook" where no page says so). A row naming
+    three parts or more (a pair of spaces and its parts) is not one relation: never counted."""
+    rels = {(part_key(d["a"]), part_key(d["b"])) for d in spec.get("diagram") or [] if d.get("verb")}
+    if not rels or not (spec.get("guard") or {}).get("pairs"):
+        return []
+    joined = rels | {(b, a) for a, b in rels}
+    known = sorted({x for p in rels for x in p}, key=len, reverse=True)
+    out = []
+    for line in text.splitlines():
+        if not line.strip().startswith("|"):
+            continue
+        low = re.sub(r"[_\-\s]+", " ", line.lower())
+        hit: list[str] = []
+        for n in known:
+            if re.search(r"(?<![\w])" + re.escape(n) + r"(?![\w])", low) and not any(n in h for h in hit):
+                hit.append(n)
+        if len(hit) == 2 and (hit[0], hit[1]) not in joined:
+            out.append(line.strip())
+    return out
+
+
+def _with_apps(page: str, missing: list[str]) -> str:
+    """(0.11.7) The overview with the wiki's applications its Applications section still leaves out after it was asked
+    again named at that section's end (a line of their names; each has its Part page and a row in Applications,
+    components and services); no such section: the page as it is."""
+    m = APPS_SECTION.search(page) if missing else None
+    if not m:
+        return page
+    end = m.end(1)
+    body = page[m.start(1):end].rstrip("\n")
+    return page[:m.start(1)] + body + "\n\n" + APPS_MORE + ", ".join(missing) + ".\n\n" + page[end:].lstrip("\n")
+
+
+def _without_rows(page: str, rows: list[str]) -> tuple[str, list[str]]:
+    """(0.11.7) A page without the table rows given (a relation it made up, still there after it was asked again)."""
+    if not rows:
+        return page, []
+    drop = set(rows)
+    kept = [line for line in page.splitlines() if line.strip() not in drop]
+    return "\n".join(kept), [r for r in rows]
+
+
+def _faults(text: str, prompt_items: Any, spec: dict[str, Any]
+            ) -> tuple[list[str], list[str], list[str], list[str]]:
     """(0.11.5) What a wiki space's page must be written again for: (the subjects of the space it leaves out, the
     names its evidence never gives, bare host names too, the words it guesses with where its pages do not say).
-    (0.11.6) The links' page: the links it leaves out (no line names both of their subjects)."""
+    (0.11.6) The links' page: the links it leaves out (no line names both of their subjects). (0.11.7) And its rows
+    joining two parts no relation given joins."""
     guard = spec.get("guard") or {}
     named = lambda n, t: re.search(r"(?<![\w-])" + re.escape(n) + r"(?![\w-])", t, re.I)  # noqa: E731
     missing = [n for n in guard.get("subjects") or [] if not named(n, text)]
+    if guard.get("only_subjects"):                    # (0.11.7) the overview: its applications only, else as before,
+        m = APPS_SECTION.search(text)                 # in its Applications section (named elsewhere on the page: no
+        part = m.group(1) if m else text              # row of the table)
+        return [n for n in guard.get("subjects") or [] if not named(n, part)], [], [], []
     lines = text.splitlines()
     missing += [f"{a} -> {b}" for a, b in guard.get("pairs") or []
                 if not any(named(a, line) and named(b, line) for line in lines)]
-    return missing, unknown_names(text, prompt_items, spec, hosts=True), guesses(text, prompt_items, spec)
+    return missing, unknown_names(text, prompt_items, spec, hosts=True), guesses(text, prompt_items, spec), \
+        unjoined(text, spec)
 
 
 def _guard(text: str, prompt_items: Any, spec: dict[str, Any]) -> str:
     """(0.11.5) _faults said to the LLM; "" when nothing."""
-    missing, unknown, guessed = _faults(text, prompt_items, spec)
+    missing, unknown, guessed, joined = _faults(text, prompt_items, spec)
     left = (spec.get("guard") or {}).get("missing") or "these subjects of the space"
     what = ([f"leaves out {left}: {', '.join(missing[:20])}"] if missing else []) + \
         ([f"names these that the evidence never gives: {', '.join(unknown[:20])}"] if unknown else []) + \
         ([f"guesses from what is usual where the pages do not say ({', '.join(guessed[:10])}): write what the pages "
-          f"say, or that they disagree, each statement with its day"] if guessed else [])
+          f"say, or that they disagree, each statement with its day"] if guessed else []) + \
+        ([f"joins in one row two parts that no relation given joins ({' / '.join(clip(r, 120) for r in joined[:5])}): "
+          f"write each relation as given, its two parts in one row"] if joined else [])
     return "; and ".join(what)
 
 
@@ -1494,8 +1794,12 @@ def write_summary(spec: dict[str, Any], llm: Any) -> dict[str, Any]:
                     sum(map(len, _faults(again, prompt_items, spec))) <= \
                     sum(map(len, _faults(text, prompt_items, spec))):
                 text = again                          # what comes back, unless it is worse (no second turn)
-            text, left_out = _without_names(text, sum(_faults(text, prompt_items, spec)[1:], []))   # still invented
+            text, left_out = _without_names(text, sum(_faults(text, prompt_items, spec)[1:3], []))   # still invented
     #                                                   (a host completed from another: atl-sso-11) is left out
+            text, rows_out = _without_rows(text, unjoined(text, spec))   # (0.11.7) a made-up relation's row too
+            left_out += rows_out
+            if (spec.get("guard") or {}).get("only_subjects"):
+                text = _with_apps(text, _faults(text, prompt_items, spec)[0])   # (0.11.7) still missing: named
     checks: list[str] = []
     try:                                          # (0.11.1) checked before it is saved; a check that fails never
         text, checks = check_page(text, prompt_items, spec) if text else (text, [])     # costs the page
@@ -1921,8 +2225,9 @@ def build_context(reason: str = "manual", llm: bool = True, force: bool = False)
                         continue
                     if not spec["evidence"]:
                         continue
-                    if res["llm_calls"] >= budget:
-                        res["left"] += 1
+                    if res["llm_calls"] >= budget or (spec.get("space") and res["llm_calls"] >= max(
+                            budget - SPACE_RESERVE, budget // 2)):   # (0.11.7) a wiki of 30 spaces: its links page
+                        res["left"] += 1                             # and the overviews in the same build
                         continue
                     if client is None:
                         from supagent.llm import LLM

@@ -345,13 +345,16 @@ SPECS: list[Spec] = [
     Spec("context.system_pages", True, "bool", "(0.10.10) A Context page for each system of the System map (a value made "
          "of parts, with where they run, their data, what they use and what uses them, their owner), for each domain, "
          "team and environment holding them: written from the approved map without the LLM, again when it changes"),
-    Spec("context.max_llm_calls", 12, "int", "LLM calls of a Context build at most (its summary pages: only the ones "
-         "whose sources changed are written again; the facts pages need no LLM)"),
-    Spec("context.space_min_pages", 200, "int", "(0.11.6.1) A space of a Confluence wiki with this many pages or more "
-         "gets a Context page of its own (\"Wiki space ...\": its subjects and what holds now, the most recent page "
-         "followed); a wiki of many small spaces: lower it"),
-    Spec("context.space_pages_max", 6, "int", "(0.11.6.1) Wiki space pages at most (the biggest spaces first); each is "
-         "an LLM call (two when it is asked again) when its space changes, within context.max_llm_calls"),
+    Spec("context.max_llm_calls", 60, "int", "LLM calls of a Context build at most (its summary pages: only the ones "
+         "whose sources changed are written again; the facts pages need no LLM). (0.11.7: was 12) A wiki of 30 "
+         "spaces: a page each, the links page and the overviews in the first build (the space pages leave 3 calls)"),
+    Spec("context.space_min_pages", 20, "int", "(0.11.6.1) A space of a Confluence wiki with this many pages or more "
+         "gets a Context page of its own (\"Wiki space ...\": its subjects, its applications, components and services "
+         "with their own space, what holds now, the most recent page followed); (0.11.7: was 200) only in a wiki "
+         "longer than what the overviews read whole"),
+    Spec("context.space_pages_max", 40, "int", "(0.11.6.1) Wiki space pages at most (the biggest spaces first); each is "
+         "an LLM call (two when it is asked again) when its space changes, within context.max_llm_calls (0.11.7: was "
+         "6)"),
     Spec("context.fields_shown", 30, "int", "The fields (or labels) listed on a data source's Context page for each of "
          "its first three main indices (or metrics), the described ones first, then the most filled (0: none; the "
          "Data dictionary has them all)"),

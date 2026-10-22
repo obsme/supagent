@@ -1,5 +1,53 @@
 # Changes
 
+## 0.11.7 — 2026-10-22
+
+**Every space of a big wiki has its own Context page.** A Confluence wiki longer than what the overviews read whole
+now gets a *Wiki space …* page for each space of 20 pages or more (40 spaces at most, the biggest first; were 200
+pages and 6 spaces). A space whose pages have no tree of subjects (every page under its home, or pages imported at
+its top) is summarized by its applications, components and services: the pages about each together. Two links of one
+wiki reaching the same space give it one page (they gave two pages of one name, written in turn at every build); two
+wikis on two sites with a space of the same key ("OPS") give two.
+
+**Applications, components and services across the spaces.** For each part the pages describe, the learning now
+keeps what it is (an application, a component of an application, a service), what it is part of, its own space (where
+its own page is), the other spaces whose pages are about it and its latest dated change ("As of March, X runs on Y"
+over an older page saying otherwise). Each space page gives its parts with their own space and what holds now;
+*How the wiki spaces connect* is written from the relations the pages state between the parts of two spaces (calls,
+reads from, sends data to, uses, runs on, monitors), each with the sentence of the latest page saying it; the
+overviews are given the wiki's parts, and their Applications table is asked a row for each application the wiki
+pages describe (40 at most, the most written about first; one still missing is named under the table); a new page
+written without the LLM, **Applications, components and services**, lists them all, and each part's own page says
+its kind and its spaces.
+
+**The reading of the pages** (without the LLM): a table row naming the page's own part in another cell ("conveyor-ci
+| tarn-cp | uses" on tarn-cp's page) is no longer read as one of its components; "X calls Y for the customer data" no
+longer makes "customer data" (or a dashboard of that name) a second end; "X runs on Y" with Y a platform the pages
+describe is read; "X is a service owned by the Y team" and "X is a component of Y owned by the Z team" give X's kind,
+its whole and its owner. The upgrade reads every page again once (the next learning).
+
+**One build writes them all.** `context.max_llm_calls` is 60 by default (was 12); the space pages leave 3 calls to
+the links page and the two overviews. The first build of a wiki of 30 spaces asks the LLM about 40 times (39 on the
+lab's 30-space test wiki, in 15 minutes); the next ones only for the spaces that changed.
+
+Released by the owner's decision with its last gate not met. Gate G-0.11.7b, on a new generated test wiki of 27 spaces
+and 2,615 pages (44 applications, components and services; 36 relations, 27 across spaces), three builds with the
+lab's LLM (Qwen3.6-35B-A3B; gpt-oss-120b not tested): every space page, the links page and both overviews written in
+14 to 17 minutes, nothing left or failed; the links page gave all 20 relations across spaces it was given and invented
+none; the overview named every space. Not met: the parts index found the own space of 38 of the 44 parts (bar 90 %)
+and 76 % of their other spaces (bar 80 %): six applications are said to be one in phrasings the reader does not read
+yet ("x is the trading application, looked after by the y crew", "x (application): owned by ...", "The reporting
+application x is maintained by ...") and a part's name with no hyphen, digit or capital ("lakeview") was not looked
+for in page titles; so the overview's Applications table had 12 or 13 of the 19 applications, space pages missed one
+to three of their parts, and two of them still gave an owner or a version that a dated change had replaced. On the
+first test wiki (28 spaces) the parts index found every part's own space (45/45) and its other spaces (precision and
+recall 1.0), and the reader found more of the relations than 0.11.6.1 with fewer wrong ones. The 6,000-page regression
+wiki: its summary checks met. Unit tests: 2,396 passed; browser tests: 26 passed. The reading of those phrasings, of
+Page Properties and of catalog tables ("Name | Type | Owner") is the next release's.
+
+Upgrade from 0.11.6.1: pip install the wheel on every host and restart the web servers (the workers and beat as
+usual); nothing to run (tables unchanged, v20). INSTALL.txt, *From 0.11.6.1 to 0.11.7*.
+
 ## 0.11.6.1 — 2026-10-21
 
 **A wiki of many spaces stays whole in the overviews.** *How the system works* and *Technical overview* now read a

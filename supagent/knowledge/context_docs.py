@@ -8,6 +8,8 @@ the repositories' code and files understood, a better Context from them, well pl
                diagram) and how (code, configuration, page, diagram)
   a repository its files by language, its folders, the services it is the code of, what its files state
   a wiki space its pages, the pages they link to, the parts they describe, their diagrams
+  the parts    (0.11.7) every application, component and service of the documents in one table: what it is, what it
+               is part of, its own wiki space and the other spaces whose pages are about it
 
 Facts pages, written without the LLM, again only when what they say changes; they are searched like every Context
 page. A page that names the data of a database is shown to who may query that database (as every Context page).
@@ -84,8 +86,12 @@ def pages() -> list[dict[str, Any]]:
     from supagent.knowledge.understand import _repo_name, export
     from supagent.models import Doc, Facet, KObject, KUnit, Source
 
+    from supagent.knowledge import parts_index as P
+
     g = export()
     docs = {d.id: d for d in db.session.query(Doc).filter(Doc.enabled.is_(True))}
+    ix = P.index([{"id": d.id, "url": d.url, "pages": [p for p in d.pages or [] if isinstance(p, dict)]}   # (0.11.7)
+                  for d in docs.values()], P.facets())
     units = [u for u in db.session.query(KUnit) if u.doc_id in docs]
     values = {}
     for f in db.session.query(Facet).filter(Facet.status == "approved"):
@@ -147,10 +153,18 @@ def pages() -> list[dict[str, Any]]:
         group = key.startswith(GROUP)
         f = None if group else values.get(key)
         lines = [f"# {name}" + (" (a group of servers)" if group else ""), ""]
+        said = ix["parts"].get(key) if not group else None    # (0.11.7) what the pages say it is, its wiki spaces
+        what = P.kind_phrase(said) if said else ""
         kind = f"{'An application' if f.facet == 'application' else 'A ' + f.facet} of the categories" if f else \
             "A group of servers of an inventory: its servers and what runs on them" if group else \
+            f"{what[:1].upper() + what[1:]} the documents describe" if what else \
             "A part the documents and the code describe"
         lines.append(kind + ".")
+        if said and said.get("home"):
+            names = ix["space_names"]
+            more = [names.get(x, x) for x in P.others(said)][:8]
+            lines += ["", f"Its own wiki space: {names.get(said['home'], said['home'])}" +
+                      (f"; pages about it in {', '.join(more)} too." if more else ".")]
         if f is not None and f.description:
             lines += ["", f.description]
         other = sorted(a for a in aliases.get(key, ()) if _norm(a) != key)
@@ -244,7 +258,39 @@ def pages() -> list[dict[str, Any]]:
                         "content": "\n".join(lines), "database_ids": [],
                         "sources": [{"ref": f"doc:{doc_id}", "title": title}]})
     out.extend(_space_pages(docs, units, pages_about, shown))
+    table = _parts_table(ix)
+    if table:
+        out.append(table)
     return out
+
+
+PARTS_TABLE_ROWS = 300     # (0.11.7) the parts listed on the page of the documents' parts (the most written about first)
+PARTS_SLUG = "applications-components-services"
+
+
+def _parts_table(ix: dict[str, Any]) -> dict[str, Any] | None:
+    """(0.11.7) The page of every application, component and service the wiki pages describe: what it is, what it is
+    part of, its own wiki space, the other spaces with pages about it; None when no wiki space has any."""
+    from supagent.knowledge import parts_index as P
+
+    names = ix.get("space_names") or {}
+    ranked = sorted((p for p in (ix.get("parts") or {}).values() if p.get("home")),
+                    key=lambda p: (-len(p["pages"]), p["name"].lower()))
+    if not ranked:
+        return None
+    lines = ["# Applications, components and services", "",
+             "The applications, components and services the wiki pages describe: what each is, its own space (where "
+             "its own page is) and the other spaces whose pages are about it, the most written about first. Each has "
+             "a page of its own (Part: its name).", "",
+             "| Part | What it is | Its own space | Pages about it also in |", "|---|---|---|---|"]
+    for p in ranked[:PARTS_TABLE_ROWS]:
+        cells = [p["name"], P.kind_phrase(p) or "not said", names.get(p["home"], p["home"]),
+                 ", ".join(names.get(x, x) for x in P.others(p)[:8]) or "-"]
+        lines.append("| " + " | ".join(c.replace("|", "/") for c in cells) + " |")
+    if len(ranked) > PARTS_TABLE_ROWS:
+        lines += ["", "... and others (their own pages: Part: the name)."]
+    return {"section": "functional", "slug": PARTS_SLUG, "title": "Applications, components and services",
+            "content": "\n".join(lines), "database_ids": [], "sources": []}
 
 
 WIKI_PAGES = 40            # (0.11.1) the pages listed on a wiki space's page (the central ones first)
@@ -303,9 +349,12 @@ def _space_pages(docs: dict[int, Any], units: list[Any], pages_about: dict[str, 
                 if key not in seen:                        # (a document's own address another one reads too)
                     seen.add(key)
                     items[str(p["space"])].append((d, p))
+    from supagent.knowledge.parts_index import space_name
+
     out: list[dict[str, Any]] = []
     for space, these in sorted(items.items()):
-        title = named_by.get(space) or space
+        home = space_name(space, [p for _d, p in these])   # (0.11.7) its home's title (was the document's for the
+        title = home if home != space else named_by.get(space) or space   # first space, the key for the others)
         lines = [f"# {title}", "", f"A wiki space ({space}): its main pages and the parts they describe.", ""]
         mine = {unit_ids.get((d.id, str(p.get(k)))) for d, p in these for k in ("id", "url")} - {None}
         lines += _wiki_lines([p for _d, p in these], _described(pages_about, shown, mine))

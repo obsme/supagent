@@ -110,7 +110,7 @@ Content-Security-Policy (Talisman nonces).
 ```bash
 # the Python of Superset's virtualenv
 PY=$(head -1 "$(command -v superset)" | sed 's/^#!//')
-$PY -m pip install supagent-0.11.6.1-py3-none-any.whl         # Superset 6.1: nothing else to install
+$PY -m pip install supagent-0.11.7-py3-none-any.whl         # Superset 6.1: nothing else to install
 ```
 
 One line in `superset_config.py` registers it. It holds no logic:
@@ -152,6 +152,17 @@ row level security filters and dashboards keep them), the AI roles' users moved 
 then on `superset init` makes Editor (Alpha and SQL Lab without deleting, with the knowledge written) and Viewer
 (Gamma without anything that changes something, with the chat) where it made Alpha and Gamma. `--undo` gives Alpha,
 Gamma and the AI roles back, every user's roles as they were. INSTALL.txt, *From 0.9.6.5 to 0.9.6.6*.
+
+## Upgrade from 0.11.6.1 to 0.11.7
+
+pip install the wheel on every host and restart (tables unchanged, v20). Every space of a big wiki gets its Context
+page (20 pages or more), each with its applications, components and services and their own space; How the wiki spaces
+connect is written from the relations between the parts of two spaces; a page lists every part with its spaces.
+Measured: released by the owner's decision, its last gate not met. On a new 27-space test wiki every space page, the
+links page (20/20 relations, none invented) and the overviews were written in 14-17 min; the parts index found 38 of
+44 parts: applications said in phrasings the reader does not read yet ("x is the trading application, looked after by
+...", "x (application): owned by ...") are missing from the parts page and the overview's Applications table (12-13 of
+19), their reading comes in the next release. Unit tests 2,396; browser tests 26.
 
 ## Upgrade from 0.11.6 to 0.11.6.1
 

@@ -591,12 +591,17 @@ a book: the contents on the left (*Functional* and *Technical* parts, numbered c
   the agent never writes over it. **Give it back to the agent** (on a page you edited): the next build writes it
   again from its sources.
 
-The pages: *How the system works*, *Technical overview*, (new in 0.11.5) one page per big wiki space, **Wiki space
+The pages: *How the system works*, *Technical overview*, (new in 0.11.5) one page per wiki space, **Wiki space
 <name>**, (new in 0.11.6) **How the wiki spaces connect**, and one page per main application (AI-written, at most
-`context.max_llm_calls` LLM calls a build, written again only when their sources changed). A wiki space page is
-written for each space of 200 pages or more of a Confluence wiki read with 0.11.5 or later (six at most, the biggest
-first): its subjects in a table (what each is and what holds now, as the most recent pages say; where a page says
-since when something holds, what that replaced and since when), and its main pages. Where two pages disagree, it
+`context.max_llm_calls` LLM calls a build, 60 by default, written again only when their sources changed). A wiki
+space page is written for each space of 20 pages or more (from 0.11.7; 200 before) of a Confluence wiki read with
+0.11.5 or later and longer than what the overviews read whole (40 spaces at most, the biggest first): its subjects
+and the applications, components and services its pages are about in a table (what each is, its own space when its
+own pages are in another space, and what holds now, as the most recent pages say; where a page says since when
+something holds, what that replaced and since when), and its main pages. A space whose pages have no tree of
+subjects (every page under its home, or pages imported at its top) is summarized by its parts: the pages about each
+application, component or service together. Two links of one wiki that reach the same space give it one page; two
+wikis (two sites) each with a space of the same key ("OPS") give two. Where two pages disagree, it
 follows the one changed last (the reader keeps the day each wiki page was last changed and its place in the wiki's
 tree); where the newest page does not settle it, the page says that the pages disagree and gives each statement with
 its day, never a guess. Before it is saved, a space page is checked: when it leaves out a subject of its space, names
@@ -605,18 +610,24 @@ assume"), the LLM is asked once to write it again (one more LLM call); a made-up
 that is taken out with its sentence. A wiki read before 0.11.5 gets its space pages after its next reading (**Read
 again** on its row in Documents and sites brings them sooner).
 
-With two big spaces or more, **How the wiki spaces connect** shows which subjects of one space the pages of another
-name, and what for: the links are counted from the pages themselves, without the LLM (a subject's pages that name
-another subject, two pages at least), each with the sentence of the latest page that says it; the page has a row for
-each of the main links between the spaces (checked as a space page is) and draws them. The space pages and this page
+With two big spaces or more, **How the wiki spaces connect** shows how the applications, components and services of
+one space call, read from, send data to, use, run on or monitor those of another (from 0.11.7: the relations the
+pages state, read without the LLM, each part in its own space, a relation of each pair of spaces in turn, each with
+the sentence of the latest page saying it); where the pages state no such relation, which subjects of one space the
+pages of another name (0.11.6). The page has a row for each of the main links between the spaces (checked as a space
+page is) and draws them with their verbs. The space pages and this page
 are written first in a build, then the two overviews: from 0.11.6 they read a big wiki through its spaces' pages as
 they are then (your corrected version of a space page counts), so that *How the system works* gives the spaces, how
 they connect and their current values; from 0.11.6.1 space by space: a space with its own page from that page, every
 other space of the wiki from its own pages as before, so that none is left out. A wiki without such spaces is read as
-before. Which spaces get a page of their own: `context.space_min_pages` (200 pages by default) and
-`context.space_pages_max` (6 by default, the biggest spaces first) in Settings; a wiki of many small spaces: lower the
-first, raise the second (each space page is one or two LLM calls when its space changes, within
-`context.max_llm_calls`). Facts pages written
+before. Which spaces get a page of their own: `context.space_min_pages` (20 pages by default) and
+`context.space_pages_max` (40 by default, the biggest spaces first) in Settings (each space page is one or two LLM
+calls when its space changes, within `context.max_llm_calls`; the space pages leave 3 calls to the links page and the
+two overviews, so that one build writes them all). The first build of a wiki of 30 spaces asks the LLM about 35 times
+(about 17 minutes on the test lab's LLM; how long depends on your LLM); the next ones only for the spaces that changed. The overviews are also given
+the wiki's applications, components and services with their own space, and **Applications, components and
+services** (written without the LLM) lists every part the wiki pages describe: what it is, what it is part of, its
+own space and the other spaces whose pages are about it; each part's own page says the same. Facts pages written
 without the LLM: each data source, each inventory (servers, services, applications, environments...), the links
 between databases, the glossary, the rules and facts, the dashboards and their charts, Grafana and OpenSearch
 Dashboards pages, the parts, repositories, wiki spaces and server groups the documents describe, a page per system

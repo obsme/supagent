@@ -1095,6 +1095,10 @@ VERB_OBJECT = re.compile(r"\s+[a-z]{3,}s\s+(?:the|a|an|it|its|them|their|everyth
 # responsible for reading from the DB" runs on the app group, not on the DB's
 RUNS_ON_END = re.compile(r"\b(?:is|are|was|were|has|have|does|do|did|will|would|can|could|must|should|may|might)\b|"
                          r"\b[a-z]{3,}ing\s+(?:from|to|into|with|the|a|an|its|their)\b", re.I)
+# (0.11.7) what a flow is for, after its end: "calls Y for the customer data", "uses Y for its secrets", "reads X
+# from Y in order to ..."
+PURPOSE = re.compile(r"(?i)\s(?:for|in\s+order\s+to|so\s+that)\s")
+PURPOSE_END = re.compile(r"(?i),|;|\bthen\b")
 CLAUSE_END = re.compile(r",?\s+and\s+(?:is|are|was|were|has|have|it|its|they|their)\b|;|\bwhich\b|"
                         r",?\s+and\s+[a-z]+s\s+(?:the|a|an|its|their|all|every|each)\b", re.I)   # (0.10.4) "... and
 #                                                         charges the cards through ...": a second predicate
@@ -1691,6 +1695,12 @@ def _memberships(s: str, found: list[tuple[int, str, str]], names: Any, unit_par
     return out
 
 
+# (0.11.7) a sentence's last words saying who owns its subject ("x is a component of y, owned by the z team"), and a
+# part's kind said alone ("x is a service", "x is an internal application")
+OWNER_TAIL = re.compile(r"(?i)(?:,\s*|\s+)(?:owned|maintained|run|operated|managed|supported)\s+by\s+(?:the\s+)?"
+                        r"(?P<team>[^,;:()]+?)\s*(?=[.;]?\s*$)")
+KIND_IS = re.compile(r"(?i)^\W*(?:the\s+)?(?P<a>[\w][\w.-]*(?:\s+[\w][\w.-]*){0,2}?)\s+(?:is|are)\s+(?:a|an|one)\s+"
+                     r"(?:[\w-]+\s+){0,2}?(?P<kind>" + MEMBER_KIND + r")\s*[.;]?\s*$")
 # (0.10.10) who owns a part, as a sentence says it: "x is owned by the y team", "the y squad owns x and z", "x est géré
 # par l'équipe y", "x appartient à l'équipe y"; the owner is a team (its words say so), never a person
 TEAM_WORD = re.compile(r"(?i)\b(?:teams?|squads?|tribes?|crews?|guilds?|chapters?|[ée]quipes?|equipos?)\b")
@@ -2644,8 +2654,11 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                     part, new_part = first.strip(" `*"), True   # (0.10.10) a table of external systems lists them
                 if not part:
                     continue
-                if caption and norm(caption) != norm(part):   # (0.10.10) the whole its caption names
-                    fact(part, "part_of", caption, "part", r0, conf=0.7)
+                if caption and norm(caption) != norm(part) and not any(   # (0.10.10) the whole its caption names;
+                        norm(caption) in (norm(v), norm(names.part(v) or own.get(norm(v)) or v))   # (0.11.7) not a
+                        for c in cells[1:] for v in _cell_values(c)[:12]):   # row naming it in another cell: one
+                    fact(part, "part_of", caption, "part", r0, conf=0.7)    # relating to it ("conveyor-ci | tarn-cp |
+                    #                                                         uses" on tarn-cp's page), no member
                 head_kind = caption_kind or _kind_word(first_head)
                 if head_kind and not new_part:            # (0.10.10) a table of applications, of components: what
                     fact(part, "is_a", head_kind, "kind", r0, conf=0.65)   # its rows are
@@ -2829,9 +2842,20 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                     found.append((at, nm, names.part(nm) or nm))
             found.sort(key=lambda x: x[0])
             said_kinds: list[tuple[str, str]] = []
-            members = _memberships(s, found, names, unit_part, said_kinds)
+            tail = OWNER_TAIL.search(s)                   # (0.11.7) "x is a component of y owned by the z team", "x is
+            if tail and not (TEAM_WORD.search(tail.group("team")) and len(tail.group("team").split()) <= 5):   # a
+                tail = None                               # service owned by the z team": what it is, its owner apart
+            core = s[:tail.start()] + "." if tail else s
+            members = _memberships(core, found, names, unit_part, said_kinds)
             for part, whole in members:                   # (0.10.10) a system and its parts
                 fact(part, "part_of", whole, "part", start, conf=0.75)
+            km = KIND_IS.match(core) if not members else None
+            said_part = members[0][0] if members else next(
+                (p for at, w, p in found if km and at == km.start("a") and norm(w) == norm(km.group("a"))), None)
+            if km and said_part and _kind_word(km.group("kind")):
+                said_kinds.append((said_part, _kind_word(km.group("kind"))))
+            if tail and said_part:
+                fact(said_part, "owned_by", " ".join(tail.group("team").split()).strip(" ."), "owner", start, conf=0.75)
             for x, k in said_kinds:                       # (0.10.10) and what the sentence says they are
                 fact(x, "is_a", k, "kind", start, conf=0.7)
             for part, team in _ownerships(s, found, unit_part, unit.get("title") or ""):   # (0.10.10) "x is owned
@@ -2937,6 +2961,11 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                         [w for at, w, p in found if c0 < at < stop and re.search(r"\d", w)][:1]
                     if not hosts and not s[c0:c1].lstrip().startswith("("):   # (0.10.4) hosts no inventory names
                         hosts = _host_tokens(s[c1:stop])
+                    platform = None if hosts else next(   # (0.11.7) "X runs on tarn-cp", a platform the documents
+                        (p for at, w, p in found if c1 <= at <= c1 + 6 and   # declare (a part, no host): right after
+                         re.fullmatch(r"\s*(?:the\s+)?", s[c1:at], re.I) and (own.get(norm(w)) or names.part(w)) and
+                         not names.hosts.get(norm(w)) and norm(w) not in names.inventory_groups and
+                         norm(w) not in names.groups and not PLATFORMS.match(w)), None)
                     whos = []
                     if s[c0:c1].lstrip().startswith("("):        # "X (... on host)": X is the name just before
                         who = next((p for at, w, p in found if at + len(w) >= c0 - 2 and at < c0), None)
@@ -2971,13 +3000,28 @@ def facts_of(unit: dict[str, Any], owner: str | None, names: Names, own: dict[st
                     for host in hosts[:12]:                       # "runs on web1, web2 and web3": each of them
                         for w0 in ([who] if who else []) + whos:
                             fact(w0, "runs_on", names.hosts.get(norm(host)) or host, "host", start + c0, conf=0.7)
+                    for w0 in (([who] if who else []) + whos) if platform else []:
+                        if norm(w0) != norm(platform):
+                            fact(w0, "runs_on", platform, "cluster", start + c0, conf=0.65)
                     continue
                 if subj and names.hosts.get(norm(subj)) and not names.service(subj) and not own.get(norm(subj)):
                     continue                                      # (0.10.5) a server, a group: where parts run, no
                     #                                               flow's subject ("Backup store is MinIO")
                 if verb == "monitors" and not (lead and lead[0] < c0) and not said:
                     continue                                      # "Check the ...": a step of a runbook, no subject
-                objs = [p for at, w, p in found if c1 <= at < stop and (depth[at] == depth[c0])
+                first = next(((at, w) for at, w, p in found if c1 <= at < stop and depth[at] == depth[c0] and
+                              norm(p) != norm(subj or "") and not names.hosts.get(norm(w))), None)
+                aims = []                                         # (0.11.7) "calls Y for the customer data": what for,
+                at_ = first[0] + len(first[1]) if first else stop  # no second end (a dashboard "Customer"), up to a
+                while at_ < stop:                                 # comma or a "then" ("for every order, then Z": Z is)
+                    pm = PURPOSE.search(s, at_, stop)
+                    if not pm:
+                        break
+                    end = PURPOSE_END.search(s, pm.end(), stop)
+                    aims.append((pm.start(), end.start() if end else stop))
+                    at_ = end.end() if end else stop
+                objs = [p for at, w, p in found if c1 <= at < stop and not any(a0 <= at < a1 for a0, a1 in aims) and
+                        (depth[at] == depth[c0])
                         and norm(p) != norm(subj or "") and not names.hosts.get(norm(w)) and not (
                             (norm(w) in names.inventory_groups or norm(w) in names.groups) and
                             re.search(r"\S\s+on\s+(?:the\s+)?$", s[c1:at]))]   # (0.11.1) "routes to X on grp-a":

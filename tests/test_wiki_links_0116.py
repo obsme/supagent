@@ -24,7 +24,9 @@ def _space(key, home, subjects, per, start):
         add(sid, title, f"{title} is a part of the {home}.", [f"{key}-home"], "2024-02-01")
         for j in range(per):
             n += 1
-            text, day = texts[j] if j < len(texts) else (f"Notes {j} about {title}.", "2024-03-01")
+            text, day = texts[j] if j < len(texts) else (f"Notes {j} about {title}. " + "Kept for the records. " * 6,
+                                                         "2024-03-01")   # (0.11.7: a wiki longer than the overviews'
+            #                                                               room, the only one with space pages)
             add(f"{key}-p{n}", f"{title} page {j}", text, [f"{key}-home", sid], day)
     return out
 
@@ -35,7 +37,7 @@ def _wiki():
     Billing's name Orders once (fewer than LINKS_MIN_PAGES: no link)."""
     from supagent.knowledge.context import SPACE_MIN_PAGES
 
-    per = SPACE_MIN_PAGES // 2
+    per = max(SPACE_MIN_PAGES, 200) // 2
     prd = _space("PRD", "Product home", [
         ("Orders", [("Orders calls Gateway for every payment.", "2025-01-10"),
                     ("Orders retries through Gateway.", "2025-02-10"),
@@ -211,8 +213,8 @@ def test_a_wiki_of_many_spaces_keeps_every_space_in_the_overview(ctx):
     from supagent.models import ContextPage
 
     wiki = _many_spaces()
-    assert [s["space"] for s in _big_spaces(_ev(wiki))] == ["S00", "S01"]          # 200 pages, 6 spaces: defaults
-    assert len(_big_spaces({**_ev(wiki), "space_limits": (20, 40)})) == 12          # the settings, lowered
+    assert len(_big_spaces(_ev(wiki))) == 12                                        # (0.11.7) 20 pages, 40 spaces
+    assert [s["space"] for s in _big_spaces({**_ev(wiki), "space_limits": (200, 6)})] == ["S00", "S01"]   # 0.11.6.1's
     spec = {s["slug"]: s for s in summary_specs(_ev(wiki))}["overview"]
     rows = {"space-s00": "In short, space 0 [E1].", "space-s01": "In short, space 1 [E1]."}
     try:
