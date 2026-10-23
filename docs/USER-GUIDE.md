@@ -531,8 +531,10 @@ Actions:
   * **Remove** on a page (Admins): the page is not read again; its text, its search pieces and what was learned
     from it are deleted at once. On a Confluence wiki a removed page is not even asked for again (from 0.11.8.2):
     the pages under it and the pages it linked to when it was removed are still read, so removing many pages makes
-    the reading shorter. A page removed before 0.11.8.2 is asked for once more at the next reading (its links are
-    kept then), never after;
+    the reading shorter. A page that links to more than 200 pages (a hub, an index) is still asked for at every
+    reading, so that the pages behind its later links are read too (from 0.11.8.3; 0.11.8.2 kept only its first
+    200 links). A page removed before 0.11.8.3 is asked for once more at the next reading (its links are kept
+    then), never after;
   * The list draws 500 pages at a time: **Show 500 more (N not shown)** draws the next ones ("No page matches."
     when the filter finds none);
   * **Removing several pages at once** (Admins): type in *Filter the pages (title, address, space)*, tick the pages
@@ -541,7 +543,12 @@ Actions:
 * **Edit**: category, pages, days, how it is read, its sign-in (an empty secret keeps the saved one), certificate,
   CA file, and for a repository what to read. Saving reads it again;
 * **Delete** (Admins): its pages leave the agent's search (and its saved sign-in is deleted). A reading of it under
-  way stops within a few seconds (from 0.11.8.2; it used to read every page for nothing).
+  way stops within a few seconds (from 0.11.8.2; it used to read every page for nothing). From 0.11.8.3 a Delete,
+  and a page's **Remove**, no longer wait for a learning that is understanding the document (that wait lasted until
+  the whole document was understood: minutes, hours with `knowledge.understand_llm` on, and the browser gave up
+  with nothing said): they are done within a second or two. Should the database still be busy with the document
+  after 15 seconds, nothing is deleted and the row says *Not deleted: a learning is writing what this document
+  states right now ... try again in a minute*.
 
 A repository is read again only as far as it changed (the files changed since the last commit read). Files that
 hold keys (`.env`, `*.pem`, `*.key`...) and vendored or built files are never read; passwords, tokens and keys
@@ -1292,7 +1299,7 @@ everything is also kept in the knowledge store (schema `supagent_store`).
 | `embed.model` | (empty) | The embedding model (e.g. `bge-m3`, named as the server lists it); empty: search by words only |
 | `embed.base_url` | (empty) | The embedding API base (empty: the LLM's, with the LLM's authentication) |
 | `embed.batch` | 16 | Texts per embedding request |
-| `embed.per_run` | 2000 | Pieces embedded per indexing run at most (the next run continues) |
+| `embed.per_run` | 2000 | Pieces embedded per round: a reading goes round after round until its time (`embed.max_minutes`) is up (0.11.8.3; before: per reading) |
 | `embed.max_minutes` | 45 | Minutes one reading of the documents and the search's pieces may take (hourly, after a document is read, the learning's step): its embeddings stop there, the next reading continues |
 | `embed.query_instruction` | (empty) | A text put before a question when it is embedded, for models trained with one |
 | `qdrant.url` | (empty) | The Qdrant server (`search.vector_store` = qdrant) |
@@ -1819,6 +1826,14 @@ superset supagent conversations --delete 1234 --yes
   the hourly readings embed the pieces left; until then they are found by their words. A big backlog (a new wiki or
   repository, a reader change): `superset supagent index --minutes 240` on a worker host. An embedding model on CPUs
   that times out: a smaller `embed.batch`.
+* From 0.11.8.3 a reading's pass writes the search's pieces of the documents read since their pieces were made first
+  (a new wiki is found by its words within a minute or two, before it is understood); the understanding then has half
+  of the pass's time at most and says how far it is (*what the documents state: 2,400 of 9,107 units*): the pages left
+  are read by the next pass, which goes on where it stopped. Before 0.11.8.3 a big wiki was written into the search
+  only after every page was understood and proposed (all of them again whenever a learning added metrics, and with
+  `knowledge.understand_llm` on, up to 200 pages of LLM calls): *In the search: not yet* for hours. On such a version,
+  `superset supagent settings --set knowledge.understand=false` then `superset supagent index --minutes 60` writes
+  the pieces at once (turn it on again after the upgrade).
 
 **7. The Context is not rebuilt, or a page did not change.**
 * `context.enabled` and `context.hour`; the build runs after the day's learning and never next to another run: look

@@ -1585,11 +1585,19 @@
           onclick: function () { docPages(x, row, this); } }));
         acts.appendChild(el("button", { type: "button", class: "linkish", text: "Edit", title: "Category, pages, how it is read, its sign-in",
           onclick: function () { docEditor(x, row); } }));
-        if (canDelete) acts.appendChild(sureButton("Delete", function () { S.admin("DELETE", "docs/" + x.id).then(function (r) { if (!r.error) saved(); docsLoad(); }); },
-          "Delete “" + (x.title || x.url || "this document") + "”?",
-          (pageCount(x) > 1 ? "Its " + S.num(pageCount(x)) + " pages leave" : "It leaves") + " the agent's search" +
-          (x.kind === "url" ? (x.auth && x.auth.type ? ", and its saved sign-in is deleted" : "") + "; the site can be added again." :
-            "; upload it again to get it back.")));
+        if (canDelete) {
+          var gone = el("span", { class: "result", role: "status" });   // (0.11.8.3) said while it runs, and why it did not
+          acts.appendChild(sureButton("Delete", function (b) {
+            b.disabled = true; gone.textContent = "Deleting…"; gone.className = "result";
+            S.admin("DELETE", "docs/" + x.id).then(function (r) {
+              if (r.error) { b.disabled = false; gone.textContent = "Not deleted: " + r.error; gone.className = "result bad"; return; }
+              saved(); docsLoad(); }); },
+            "Delete “" + (x.title || x.url || "this document") + "”?",
+            (pageCount(x) > 1 ? "Its " + S.num(pageCount(x)) + " pages leave" : "It leaves") + " the agent's search" +
+            (x.kind === "url" ? (x.auth && x.auth.type ? ", and its saved sign-in is deleted" : "") + "; the site can be added again." :
+              "; upload it again to get it back.")));
+          acts.appendChild(gone);
+        }
         var how = x.kind === "url" ? (READS[x.reads_as] || x.reads_as) + (x.auth && x.auth.type ? " · signed in with a " +
           (SIGNIN[x.auth.type] || x.auth.type) + (x.auth.user ? " (" + x.auth.user + ")" : "") : "") +
           (x.auth && x.auth.verify_tls === false ? " · certificate not checked" : x.auth && x.auth.ca_bundle ? " · CA file " + x.auth.ca_bundle : "") +

@@ -1,12 +1,82 @@
 # Changes
 
+## 0.11.8.3 — 2026-10-23
+
+**A document read is in the search at once; a learning no longer holds the search's pieces back for hours; a wiki's
+Delete and Remove no longer wait.** The owner's reports of 22 October: an 8,390-page wiki (56 MB) read at 19:27 was
+still "not yet" in the search at 23:00, its learning's step "search index and embeddings" running with nothing shown;
+and a wiki with 2,000 removed pages and 3,000 active that could not be deleted.
+
+The search and the embeddings
+* **A document read is written into the search first.** A reading's pass understood every page, proposed what they
+  state, and only then wrote the search's pieces: a big wiki waited for all of it (the understanding of every page
+  again whenever the names known changed, which each learning adding metrics does; with the LLM's reading of the pages
+  on, up to 200 pages of LLM calls). The pieces of every document read since its pieces were made are now written
+  before the understanding, and found by their words at once; their vectors follow.
+* **The understanding has its share of the pass's time.** Half of the reading's time at most (5 minutes at least): the
+  pages left are read by the next pass, which goes on where this one stopped (each page keeps the names it was read
+  with). Its step says how far it is ("what the documents state: 2,400 of 9,107 units"), and an admin's Stop is seen
+  while it runs.
+* **Embeddings go on until the pass's time is up.** A pass embedded `embed.per_run` pieces (2,000) and stopped: a wiki of
+  43,000 pieces needed 22 hourly passes. Now it embeds round after round (`embed.per_run` a round) until its time
+  (`embed.max_minutes`, or the learning step's) is up.
+* **A flush no longer walks the whole session.** SQLAlchemy-Utils, which Superset imports, walked every object of the
+  session after each flush for its aggregated attributes; neither Superset nor supagent declares one. A learning that
+  proposes what a big wiki states flushed once per link proposed: the walk is skipped while no aggregated attribute is
+  declared (and made as before as soon as one is). This changes every flush of the process, not only supagent's.
+
+Deleting and removing
+* **A document's Delete and a page's Remove no longer wait for the understanding.** The understanding held a whole
+  document's units in one transaction until the document was understood; its Delete waited for it (14 s for a test
+  wiki of 3,001 pages in the lab; with the LLM's reading on, as long as up to 200 questions to the LLM take), the
+  browser gave up first, and the list said nothing.
+  Reproduced on a test copy; not confirmed in the owner's installation. The units are now committed every 200 and
+  before each question to the LLM; a document deleted meanwhile is left (its run goes on with the others, no error),
+  a page removed meanwhile is skipped. A Delete or a Remove still blocked by the database 15 s answers what happened
+  (nothing deleted, try again in a minute); the list shows "Deleting…" and why a Delete did not go through.
+* **A removed wiki page with more than 200 links is still followed.** 0.11.8.2 kept at most 200 links of a removed page
+  and never fetched it again, so a removed hub page lost the pages behind its later links (0.11.8.2's notes said the
+  pages read stay the same: not for such a page). A page's links are now kept once each, with whether more than 200
+  were left out; such a page is fetched at every reading, as before 0.11.8.2. Removals kept by 0.11.8.2 are fetched
+  once more and kept again. The list of a document's pages no longer sends the links its removals keep.
+
+Gate G-0.11.8.3 met under one amendment, written before the results of its runs were read (one of its conditions, that
+two runs print the same query plan, could never hold and was replaced after its first check by a stricter one: the
+same sequence of rows read): the lab's PostgreSQL text search extension (pg_textsearch 0.5.0) crashed while two copies
+of the test database were open at once, because it keeps its in-memory index state by index, not by database (the
+search clauses ran again, each copy with its own index); and one clause had compared rows the database returned in
+another order (compared again in one order). On a generated test wiki of 8,390 pages (43,329 search pieces), the LLM's
+reading of the pages on (a stand-in answering in 5 s a page), a 30-minute pass: 0.11.8.2 found a page of it by its
+words 1,571 s after the pass started and embedded 2,000 of its pieces; 0.11.8.3 found it after 31 s (all its pieces
+written in 59 s, before the understanding) and embedded all 43,329 in the same pass, which ended at 1,991 s; the rules
+read every page, and the LLM's questions went on at the next pass where they had stopped. Without the LLM, a pass
+gives the same units, facts and values as 0.11.8.2, and its proposals the same links when the database returns the
+rows in the same order (0.11.8.2 itself changes one link in 40,845 with the order of the rows on disk; a fixed order
+is for 0.11.9). During the understanding of a 3,001-page test wiki, a Delete answered in 0.5 to 1.1 s and a Remove of
+500 pages in 0.6 s, the understanding's longest row lock lasting 1.2 s (in earlier lab runs on that wiki, 0.11.8.2's
+Delete waited for the understanding, its row locks lasting up to 126 s); held 40 s by another transaction, they
+answered 409 after 15 s, nothing deleted. The 5,001-page wiki of 0.11.8.2's notes reads the same 3,001 pages, its
+2,000 removed pages fetched once more (their links kept again) then never. The six learning development sets:
+unchanged (mean share 0.9585). Unit tests: 2,435 passed; browser tests: 26 passed. Both reports of the owner were
+reproduced on test copies, not in the owner's installation.
+
+For operators: pg_textsearch keeps its in-memory search state by index OID, not by database (seen in the lab with
+0.5.0; 1.4.0's code does the same). A copy of the Superset database on the same PostgreSQL server, made with
+`CREATE DATABASE ... TEMPLATE`, shares it while both are used: give the copy its own bm25 indexes (INSTALL.txt).
+
+Upgrade from 0.11.8.2 or 0.11.8.1: pip install the wheel on every host and restart the web servers, the workers and
+beat; nothing to run (tables unchanged, v20). The first reading pass writes every document's pieces once more before
+its understanding (their marks are new). If `knowledge.understand` was turned off as a workaround, turn it on again:
+`superset supagent settings --set knowledge.understand=true`. INSTALL.txt, *From 0.11.8.2 to 0.11.8.3*.
+
 ## 0.11.8.2 — 2026-10-22
 
 **A wiki with many removed pages reads faster; a deleted wiki's reading stops.** The owner's report: a wiki with
 2,000 pages removed and 3,000 active, "the reading takes so much time". A Confluence page removed from a document's
 pages was still fetched at every reading and only then left out, so removing pages saved no time. Now a removed page
 keeps, with its removal, the pages it links to and its space: the readings after list the pages under it and follow
-those links without fetching it, so the pages read stay the same. A page removed before 0.11.8.2 is fetched once
+those links without fetching it, so the pages read stay the same (not for a page linking to more than
+200 pages: see 0.11.8.3). A page removed before 0.11.8.2 is fetched once
 more at the next reading, to keep its links. A link written by a page's title no longer costs a request when that
 page was already met (fetched, or listed under its parent or in its space). A document deleted while it is read
 stops its reading within seconds; it used to read every page for nothing and fail at the end. Deleted at the very

@@ -748,8 +748,8 @@ def _without_excluded(doc: Doc, found: list) -> tuple[list, int]:
             gone += 1
             _not_read(url, title, REMOVED_WHY)
             key = page_key({**meta, "url": url})
-            if key in by_key and meta.get("id") and "links" not in by_key[key]:
-                noted[key] = _removed_links(meta)
+            if key in by_key and meta.get("id") and by_key[key].get("links_v") != LINKS_V:
+                noted[key] = _removed_links(meta, sure=True)      # (read now: links_more says if cut)
             continue
         kept.append(f)
     if noted:                                         # (new entries: the saved ones are never changed in place)
@@ -758,14 +758,23 @@ def _without_excluded(doc: Doc, found: list) -> tuple[list, int]:
     return kept, gone
 
 
-def _removed_links(page: dict[str, Any]) -> dict[str, Any]:
+def _removed_links(page: dict[str, Any], sure: bool) -> dict[str, Any]:
     """(0.11.8.2) What a removed wiki page leads to, kept with its removal: the pages it links to (ids, or
-    "SPACE:Title") and its space (the pages under it are listed in it)."""
+    "SPACE:Title") and its space (the pages under it are listed in it). (0.11.8.3) `sure`: the page was read by a
+    version that says when its links were more than it keeps (links_more): only then, and only when they are all
+    kept, is the page left unfetched (_read_confluence); else it is fetched as before 0.11.8.2."""
     return {"links": [str(x) for x in page.get("links") or []][:LINKS_KEPT],
-            **({"space": str(page["space"])} if page.get("space") else {})}
+            **({"space": str(page["space"])} if page.get("space") else {}),
+            **({"links_v": LINKS_V} if sure else {}), **({"links_more": True} if page.get("links_more") else {})}
 
 
 LINKS_KEPT = 200        # (0.11.8.2) the links of a removed wiki page kept with its removal (as a page's own meta)
+LINKS_V = 2             # (0.11.8.3) links kept by a version that marks a page's links cut at LINKS_KEPT (links_more)
+
+
+def links_whole(entry: dict[str, Any]) -> bool:
+    """(0.11.8.3) Whether a removal keeps every link of its page: then the page is not fetched again."""
+    return "links" in entry and entry.get("links_v") == LINKS_V and not entry.get("links_more")
 
 
 def exclude_page(doc: Doc, by: str, url: str = "", page_id: str = "", path: str = "") -> dict[str, Any]:
@@ -804,9 +813,10 @@ def exclude_pages(doc: Doc, by: str, refs: list[dict[str, Any]]) -> dict[str, An
         return {"removed": [], "missing": missing, "pages": len(pages), "units": 0, "facts": 0}
     now = dt.datetime.utcnow().isoformat(timespec="seconds")
     keys = [page_key(h) for h in hits]
+    sure = read_log(doc.id).get("links_v") == LINKS_V if doc.id is not None else False   # (0.11.8.3)
     kept_ex = [e for e in excluded_pages(doc) if e["key"] not in set(keys)]
     kept_ex += [{"key": k, "url": str(h.get("url") or "")[:2000], "title": str(h.get("title") or "")[:300], "by": by,
-                 "at": now, **(_removed_links(h) if h.get("id") else {})} for k, h in zip(keys, hits)]
+                 "at": now, **(_removed_links(h, sure) if h.get("id") else {})} for k, h in zip(keys, hits)]
     doc.auth = {**_auth(doc), "excluded": kept_ex[-EXCLUDED_KEPT:]}
     gone = {id(h) for h in hits}
     rest = [p for p in pages if id(p) not in gone]
@@ -1459,7 +1469,7 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
             key = own.popleft() if own else queue.popleft()
             if key[0] == "title" and (key[2], key[1]) in by_title:
                 key = ("id", by_title[(key[2], key[1])])     # (0.11.8.2) a page met: by its id, no request
-            if key[0] == "id" and key[1] in removed and "links" in removed[key[1]]:   # (0.11.8.2) removed by a
+            if key[0] == "id" and key[1] in removed and links_whole(removed[key[1]]):   # (0.11.8.2) removed by a
                 if key[1] not in seen:                 # person, its links kept with its removal: not fetched again;
                     seen.add(key[1])                   # the pages under it and the pages it links to still read
                     skipped += 1
@@ -1505,8 +1515,10 @@ def _read_confluence(doc: Doc, sign: SignIn | None) -> tuple[Pages, str, int]:
             linked += [x for x in (_href_target(h, url, t["web"], tuple(bases)) for h in read["links"]) if x]
             parents = [str(a["id"]) for a in item.get("ancestors") or [] if isinstance(a, dict) and a.get("id")]
             changed = day_of((item.get("version") or {}).get("when"))
+            said = list(dict.fromkeys(x[1] if x[0] == "id" else f"{x[2]}:{x[1]}" for x in linked))
             meta = {"id": pid, "space": space, "version": (item.get("version") or {}).get("number"),
-                    "links": [x[1] if x[0] == "id" else f"{x[2]}:{x[1]}" for x in linked][:200],
+                    "links": said[:LINKS_KEPT],         # (0.11.8.3) each once, and whether some were not kept
+                    **({"links_more": True} if len(said) > LINKS_KEPT else {}),
                     # (0.11.4) when it was last changed (version.when), and its parents, the top first: the Context
                     # compares the pages' dates and gives every branch of the tree its room
                     **({"modified": changed} if changed else {}), "ancestors": parents[:ANCESTORS],
@@ -1992,8 +2004,8 @@ def _join(found: list) -> tuple[str, list[dict[str, Any]]]:
             at += 2                                     # the blank line between two pages
         pages.append({"url": url, "title": title, "chars": len(block), "at": at,
                       **{k: v for k, v in (more[0] if more and isinstance(more[0], dict) else {}).items()
-                         if k in ("path", "commit", "scope", "id", "space", "version", "links", "diagram_edges",
-                                  "images", "modified", "ancestors")}})       # (0.11.4) its date, its parents
+                         if k in ("path", "commit", "scope", "id", "space", "version", "links", "links_more",
+                                  "diagram_edges", "images", "modified", "ancestors")}})   # (0.11.4) its date, parents
         texts.append(block)
         at += len(block)
     return "\n\n".join(texts), pages
@@ -2118,13 +2130,20 @@ def _keep_read_log(doc: Doc, reader: str, got: dict[str, Any]) -> None:
     if doc.id is None:
         return
     want = _max_pages(doc)
+    key = READ_LOG_KEY.format(doc.id)
+    row = db.session.get(Meta, key)
+    # (0.11.8.3) the pages kept were read by a version marking a page's links cut (links_more): this reading's when
+    # it succeeded, else the previous one's say
+    try:
+        before = json.loads(row.value).get("links_v") if row is not None and row.value else None
+    except ValueError:
+        before = None
+    links_v = LINKS_V if doc.status == "ok" else before
     value = json.dumps({"at": doc.fetched_at.isoformat() if doc.fetched_at else None, "reader": reader,
                         "status": doc.status, "read": int(got.get("read") or 0), "max_pages": want,
                         "limit_reached": int(got.get("read") or 0) >= want and reader != "bitbucket",
                         "left": int(got.get("left") or 0), "not_read": int(got.get("not_read") or 0),
-                        "skipped": got.get("skipped") or []})
-    key = READ_LOG_KEY.format(doc.id)
-    row = db.session.get(Meta, key)
+                        "skipped": got.get("skipped") or [], **({"links_v": links_v} if links_v else {})})
     if row is None:
         db.session.add(Meta(key=key, value=value))
     else:

@@ -24,7 +24,7 @@ import logging
 import os
 from typing import Any, Callable
 
-__version__ = "0.11.8.2"
+__version__ = "0.11.8.3"
 
 log = logging.getLogger(__name__)
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -119,6 +119,30 @@ def _dock_loader(inner: Any) -> Any:
     return DockLoader(inner)
 
 
+def _skip_empty_aggregates() -> None:
+    """(0.11.8.3) SQLAlchemy-Utils (Superset imports it) walks every object of the session after each flush, looking for
+    its aggregated attributes; neither Superset nor supagent declares one. A learning holding thousands of objects (a
+    wiki's facts, its values and links) spent most of its time there, one walk per link proposed: the walk is skipped
+    while no aggregated attribute is declared (the same work as before as soon as one is)."""
+    try:
+        import sqlalchemy as sa
+        from sqlalchemy.orm import Session
+        from sqlalchemy_utils import aggregates
+    except Exception:  # pylint: disable=broad-except   (another version, or not installed: nothing to skip)
+        return
+    manager = getattr(aggregates, "manager", None)
+    real = getattr(manager, "construct_aggregate_queries", None)
+    if real is None or not sa.event.contains(Session, "after_flush", real):
+        return
+
+    def construct_aggregate_queries(session: Any, ctx: Any) -> None:
+        if manager.generator_registry:
+            real(session, ctx)
+
+    sa.event.remove(Session, "after_flush", real)
+    sa.event.listen(Session, "after_flush", construct_aggregate_queries)
+
+
 def init_app(app: Any) -> None:
     """Superset's FLASK_APP_MUTATOR: views, API, Celery tasks, the daily schedule."""
     from flask import Blueprint
@@ -131,6 +155,7 @@ def init_app(app: Any) -> None:
     from supagent.views import NotFound, _not_found
 
     app.register_error_handler(NotFound, _not_found)
+    _skip_empty_aggregates()
     if _STATIC not in app.blueprints:
         app.register_blueprint(Blueprint(_STATIC, __name__, static_folder=os.path.join(HERE, "static", "supagent"),
                                          static_url_path="/supagent-static"))

@@ -33,9 +33,12 @@ import json
 import logging
 import posixpath
 import re
+import time
 from collections import defaultdict
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm.exc import ObjectDeletedError, StaleDataError
 from superset import db
 
 from supagent import __version__
@@ -3426,6 +3429,29 @@ def _page_owner(title: str, names: Names, own: dict[str, str]) -> str | None:
     return None
 
 
+UNITS_PER_COMMIT = 200   # (0.11.8.3) units understood per transaction (and one before each question to the LLM)
+LLM_SHARE = 0.5          # (0.11.8.3) the LLM's questions within this share of a run bounded by `until`
+
+
+class _Gone(Exception):
+    """(0.11.8.3) The document being understood was deleted meanwhile."""
+
+
+def _doc_gone(doc_id: int) -> bool:
+    """(0.11.8.3) Whether a document was deleted, asked by its id (its object, once committed, cannot be read)."""
+    from supagent.models import Doc
+
+    return db.session.query(Doc.id).filter(Doc.id == doc_id).scalar() is None
+
+
+def _still_there(row: Any) -> bool:
+    """(0.11.8.3) A unit read again after a commit: False when its row was deleted meanwhile (its page removed)."""
+    try:
+        return row.id is not None
+    except ObjectDeletedError:
+        return False
+
+
 class _Catalog:
     """The catalog's guides, notes, rules, definitions and glossaries, read as one more document (0.10: the user named
     the catalog with the wiki and the code): each entry a unit (entry:<id>)."""
@@ -3456,10 +3482,14 @@ def _catalog_units() -> list[dict[str, Any]]:
     return out
 
 
-def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
+def run(reason: str = "manual", llm: bool = False, until: float | None = None,
+        beat: Callable[..., None] | None = None) -> dict[str, Any]:
     """Read the units of every document whose text changed (all of them when the names known changed) and keep their
     facts; the units of a document gone are removed with it. With the LLM (`llm`, or knowledge.understand_llm): the
-    pages and prose documents read by it too (understand_llm.py), knowledge.llm_units of them per run at most."""
+    pages and prose documents read by it too (understand_llm.py), knowledge.llm_units of them per run at most.
+    (0.11.8.3) `until` (a time.time()): no unit begun after it, the units left read by the next run (each unit keeps the
+    names it was read with: a run stopped there goes on where it stopped, never from the start); `beat(detail=...)`
+    told how far it is every UNITS_PER_COMMIT units (the reading's step shows it, an admin's Stop is seen)."""
     from supagent import settings
     from supagent.knowledge import understand_llm as L
     from supagent.models import Doc, KFact, KUnit, Meta
@@ -3481,7 +3511,9 @@ def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
     doc_owner: dict[int, str | None] = {}
     stored = {(r.doc_id, r.ukey): (r.chash, (r.outline or {}).get("found"))
               for r in db.session.query(KUnit.doc_id, KUnit.ukey, KUnit.chash, KUnit.outline)}
-    for d in docs:
+    for n_doc, d in enumerate(docs):
+        if beat is not None:
+            beat(detail=f"reading document {n_doc + 1} of {len(docs)}")
         us = _catalog_units() if isinstance(d, _Catalog) else units_of(d)
         for u in us:                                 # a unit unchanged: what it declares, as read last time
             u["chash"] = _hash(u["text"])
@@ -3624,8 +3656,12 @@ def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
     def resolve(raw: str) -> str | None:
         return names.part(raw) or own.get(norm(raw))
 
-    def llm_facts(row: Any, u: dict[str, Any], before: dict[str, Any] | None) -> None:
-        """The links the LLM reads in the unit (read again only when its text changed), checked, kept as facts."""
+    llm_until: list[float | None] = [None]
+
+    def llm_facts(row: Any, u: dict[str, Any], before: dict[str, Any] | None, doc_id: int | None) -> None:
+        """The links the LLM reads in the unit (read again only when its text changed), checked, kept as facts.
+        (0.11.8.3) What was understood so far is committed before the LLM is asked: no transaction holds the
+        document's units while it answers; a document deleted meanwhile is not asked about (_Gone)."""
         from supagent.knowledge.projects import test_file
 
         if not use_llm or not L.eligible(u["kind"], u["found"]["lang"]) or \
@@ -3633,9 +3669,13 @@ def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
             return
         was = before if isinstance(before, dict) and before.get("hash") == u["chash"] else None
         if was is None:
-            if budget[0] <= 0:
-                stats["llm_left_for_next_run"] += 1
-                return
+            if budget[0] <= 0 or (llm_until[0] is not None and time.time() >= llm_until[0]):
+                stats["llm_left_for_next_run"] += 1     # (0.11.8.3) its share of the time used: the pages left at
+                return                                   # the next run (the rules read every unit meanwhile)
+            unit_id = row.id
+            settle(force=True)
+            if doc_id is not None and _doc_gone(doc_id):
+                raise _Gone(doc_id)
             budget[0] -= 1
             try:
                 links = L.read_links(u["text"] or "", known, data_names=data_names)
@@ -3644,6 +3684,11 @@ def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
                 return
             was = {"hash": u["chash"], "links": links}
             stats["llm_read"] += 1
+            row = db.session.get(KUnit, unit_id)
+            if row is None:                              # removed while the LLM read it (its page, its document)
+                if doc_id is not None and _doc_gone(doc_id):
+                    raise _Gone(doc_id)
+                return
         row.outline = {**(row.outline or {}), "llm": was}
         have = {(f.subject.lower(), f.verb, f.obj.lower()) for f in db.session.query(KFact).filter(
             KFact.unit_id == row.id, KFact.source != "llm")}
@@ -3660,66 +3705,115 @@ def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
                                  obj_kind=f["obj_kind"], line=line, quote=mask_secrets(f["quote"])[0][:400],
                                  source="llm", confidence=L.CONFIDENCE))
             stats["llm_facts"] += 1
-    for d in docs:
-        have = {u.ukey: u for u in db.session.query(KUnit).filter(KUnit.doc_id == d.id)}
-        names.placement = placement.get(d.id) or {}      # (0.10.9.1) this repository's hosts and groups
-        keep = set()
-        for u in per_doc[d.id]:
-            keep.add(u["ukey"][:512])
-            ch = u["chash"]
-            row = have.get(u["ukey"][:512])
-            across_hash = _hash(json.dumps([u.get("across") or [], u.get("speaks")] + ([u["built"]] if u.get("built")
-                                                                                     else []), sort_keys=True))
-            if row is not None and row.chash == ch and not everything and \
-                    (row.outline or {}).get("across") == across_hash:
-                stats["unchanged"] += 1
-                if use_llm and ((row.outline or {}).get("llm") or {}).get("hash") != ch:
-                    llm_facts(row, u, None)               # read by the LLM for the first time
-                continue
-            before = ((row.outline or {}).get("llm") if row is not None else None)
-            if row is None or row.chash != ch:
-                stats["texts_changed"] += 1               # (0.10.5) not a reading again for names: a text changed
-            owner = (u["found"]["workloads"][0]["name"] if len(u["found"]["workloads"]) == 1 else None) or \
-                u["found"]["tool"] or doc_owner.get(d.id)
-            if "speaks" in u:                              # (not the repository: a role's part, or nobody)
-                owner = u["speaks"] or None
-            elif u.get("built"):                           # (0.10.4) the service built from its folder (nginx.conf's
-                owner = u["built"]                         # proxy_pass is the reverse proxy's, not nginx's)
-            if u["kind"] == "page":
-                owner = _page_owner(u["title"], names, own) or owner
-            elif "speaks" not in u and not u.get("built") and len(u["found"]["workloads"]) != 1 and \
-                    (not owner or owner in (u["found"]["tool"], doc_owner.get(d.id))):
-                owner = file_part(u.get("path") or "", names, own) or owner   # (0.10.7) the part its name says
-            owner = (names.part(owner) or own.get(norm(owner)) or owner) if owner else None
-            if row is None:
-                row = KUnit(doc_id=d.id, ukey=u["ukey"][:512])
-                db.session.add(row)
+    doc_ids = [None if isinstance(d, _Catalog) else d.id for d in docs]   # (0.11.8.3) read before any commit
+    since = [0]
+
+    def settle(force: bool = False) -> None:
+        """(0.11.8.3) The units understood so far committed every UNITS_PER_COMMIT units and before each question
+        to the LLM: a document's units were held in one transaction until the whole document was understood, and its
+        Delete (a page's Remove) waited for it (14 s for a wiki of 3,001 pages, minutes with the LLM's reading)."""
+        since[0] += 1
+        if force or since[0] >= UNITS_PER_COMMIT:
+            db.session.commit()
+            since[0] = 0
+
+    total = sum(len(per_doc[i]) for i in doc_ids)
+    seen = [0]
+    cut = False
+    if until is not None:                                # (0.11.8.3) the LLM's questions within LLM_SHARE of the
+        llm_until[0] = time.time() + max(0.0, until - time.time()) * LLM_SHARE   # time: one slow answer after another
+        #                                                   left the rules no time for the other units, pass after pass
+    for doc_id in doc_ids:
+        if cut:
+            break
+        if doc_id is not None and _doc_gone(doc_id):     # (0.11.8.3) deleted since the run began
+            stats["documents_deleted"] += 1
+            seen[0] += len(per_doc[doc_id])
+            continue
+        try:
+            have = {u.ukey: u for u in db.session.query(KUnit).filter(KUnit.doc_id == doc_id)}
+            names.placement = placement.get(doc_id) or {}      # (0.10.9.1) this repository's hosts and groups
+            keep = {u["ukey"][:512] for u in per_doc[doc_id]}  # (0.11.8.3) every unit it has, read now or later
+            for u in per_doc[doc_id]:
+                if until is not None and time.time() >= until:  # (0.11.8.3) the time is up: the next run goes on
+                    cut = True
+                    break
+                seen[0] += 1
+                if beat is not None and seen[0] % UNITS_PER_COMMIT == 0:
+                    beat(detail=f"{seen[0]:,} of {total:,} units")
+                ch = u["chash"]
+                row = have.get(u["ukey"][:512])
+                if row is not None and not _still_there(row):   # (0.11.8.3) its page removed meanwhile: nothing
+                    stats["removed_meanwhile"] += 1              # kept of it, the document goes on
+                    continue
+                across_hash = _hash(json.dumps([u.get("across") or [], u.get("speaks")] +
+                                               ([u["built"]] if u.get("built") else []), sort_keys=True))
+                read_with = (row.outline or {}).get("names") if row is not None else None
+                if row is not None and row.chash == ch and (row.outline or {}).get("across") == across_hash and \
+                        (read_with == names_hash or (read_with is None and not everything)):   # (0.11.8.3) the
+                    #     names it was read with: a run stopped by `until` read the others, the next goes on
+                    stats["unchanged"] += 1
+                    if use_llm and ((row.outline or {}).get("llm") or {}).get("hash") != ch:
+                        llm_facts(row, u, None, doc_id)       # read by the LLM for the first time
+                    settle()
+                    continue
+                before = ((row.outline or {}).get("llm") if row is not None else None)
+                if row is None or row.chash != ch:
+                    stats["texts_changed"] += 1               # (0.10.5) not a reading again for names: a text changed
+                owner = (u["found"]["workloads"][0]["name"] if len(u["found"]["workloads"]) == 1 else None) or \
+                    u["found"]["tool"] or doc_owner.get(doc_id)
+                if "speaks" in u:                              # (not the repository: a role's part, or nobody)
+                    owner = u["speaks"] or None
+                elif u.get("built"):                       # (0.10.4) the service built from its folder (nginx.conf's
+                    owner = u["built"]                     # proxy_pass is the reverse proxy's, not nginx's)
+                if u["kind"] == "page":
+                    owner = _page_owner(u["title"], names, own) or owner
+                elif "speaks" not in u and not u.get("built") and len(u["found"]["workloads"]) != 1 and \
+                        (not owner or owner in (u["found"]["tool"], doc_owner.get(doc_id))):
+                    owner = file_part(u.get("path") or "", names, own) or owner   # (0.10.7) the part its name says
+                owner = (names.part(owner) or own.get(norm(owner)) or owner) if owner else None
+                if row is None:
+                    row = KUnit(doc_id=doc_id, ukey=u["ukey"][:512])
+                    db.session.add(row)
+                    db.session.flush()
+                row.kind, row.title, row.url = u["kind"], (u["title"] or "")[:512], (u["url"] or "")[:2000]
+                row.lang, row.owner, row.chash = u["found"]["lang"], (owner or "")[:255] or None, ch
+                row.outline = {"symbols": _outline(u["text"], u["found"]["lang"]), "found": u["found"],
+                               "links": (u["meta"] or {}).get("links") or [], "page_id": (u["meta"] or {}).get("id"),
+                               "space": (u["meta"] or {}).get("space"), "across": across_hash, "names": names_hash}
+                row.analysed_at = dt.datetime.utcnow()
+                db.session.query(KFact).filter(KFact.unit_id == row.id).delete(synchronize_session=False)
+                mine = facts_of(u, owner, names, own)
+                said = {(norm(f["subject"]), f["verb"], norm(f["obj"])) for f in mine}
+                for f in mine + [f for f in u.get("across") or [] if (norm(f["subject"]), f["verb"], norm(f["obj"]))
+                                 not in said]:
+                    db.session.add(KFact(unit_id=row.id, subject=f["subject"][:255], verb=f["verb"], obj=f["obj"][:512],
+                                         obj_kind=f["obj_kind"], line=f["line"], quote=f["quote"][:400],
+                                         source=f["source"], confidence=f["confidence"]))
+                    stats["facts"] += 1
                 db.session.flush()
-            row.kind, row.title, row.url = u["kind"], (u["title"] or "")[:512], (u["url"] or "")[:2000]
-            row.lang, row.owner, row.chash = u["found"]["lang"], (owner or "")[:255] or None, ch
-            row.outline = {"symbols": _outline(u["text"], u["found"]["lang"]), "found": u["found"],
-                           "links": (u["meta"] or {}).get("links") or [], "page_id": (u["meta"] or {}).get("id"),
-                           "space": (u["meta"] or {}).get("space"), "across": across_hash}
-            row.analysed_at = dt.datetime.utcnow()
-            db.session.query(KFact).filter(KFact.unit_id == row.id).delete(synchronize_session=False)
-            mine = facts_of(u, owner, names, own)
-            said = {(norm(f["subject"]), f["verb"], norm(f["obj"])) for f in mine}
-            for f in mine + [f for f in u.get("across") or [] if (norm(f["subject"]), f["verb"], norm(f["obj"]))
-                             not in said]:
-                db.session.add(KFact(unit_id=row.id, subject=f["subject"][:255], verb=f["verb"], obj=f["obj"][:512],
-                                     obj_kind=f["obj_kind"], line=f["line"], quote=f["quote"][:400],
-                                     source=f["source"], confidence=f["confidence"]))
-                stats["facts"] += 1
-            db.session.flush()
-            llm_facts(row, u, before)                     # (what the LLM read last time, placed again)
-            stats["analysed"] += 1
-        for key, row in have.items():
-            if key not in keep:
-                db.session.delete(row)
-                stats["removed"] += 1
-                stats["texts_changed"] += 1
-        db.session.commit()
-    ids = [d.id for d in docs if not isinstance(d, _Catalog)]
+                llm_facts(row, u, before, doc_id)             # (what the LLM read last time, placed again)
+                stats["analysed"] += 1
+                settle()
+            for key, row in have.items():
+                if key not in keep:
+                    db.session.delete(row)
+                    stats["removed"] += 1
+                    stats["texts_changed"] += 1
+            db.session.commit()
+        except (_Gone, ObjectDeletedError, StaleDataError, IntegrityError) as ex:
+            db.session.rollback()                        # (0.11.8.3) deleted, or a page of it removed, while it was
+            since[0] = 0                                 # understood: what it stated since the last commit is not
+            if doc_id is None:                           # kept, the next documents are understood
+                raise
+            if _doc_gone(doc_id):
+                stats["documents_deleted"] += 1
+                log.info("supagent understand: document %s deleted while it was understood", doc_id)
+            else:
+                stats["documents_changed"] += 1
+                log.warning("supagent understand: document %s changed while it was understood (%s): the rest of it "
+                            "at the next run", doc_id, str(ex)[:200])
+    ids = [i for i in doc_ids if i is not None]
     if stats["texts_changed"] or db.session.query(KUnit.id).filter(KUnit.doc_id.isnot(None),
                                                                      KUnit.doc_id.notin_(ids or [-1])).first():
         row = db.session.get(Meta, TEXTS_KEY)            # (0.10.5) when a document's text last changed: a learned
@@ -3729,13 +3823,17 @@ def run(reason: str = "manual", llm: bool = False) -> dict[str, Any]:
         else:
             row.value = now
     for doc_id, k in kinds_of.items():                  # what each repository is (its Context page)
+        if _doc_gone(doc_id):                            # (0.11.8.3) deleted meanwhile
+            continue
         row = db.session.get(Meta, f"repo_kinds:{doc_id}")
         value = json.dumps(k, sort_keys=True)
         if row is None:
             db.session.add(Meta(key=f"repo_kinds:{doc_id}", value=value))
         elif row.value != value:
             row.value = value
-    if meta is None:
+    if cut:                                              # (0.11.8.3) read with these names: the units done
+        stats["left_for_next_run"] = total - seen[0]     # (each keeps them), the others at the next run
+    elif meta is None:
         db.session.add(Meta(key="understand_names", value=names_hash))
     else:
         meta.value = names_hash

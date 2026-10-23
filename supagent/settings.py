@@ -539,7 +539,8 @@ SPECS: list[Spec] = [
     Spec("embed.base_url", "", "str", "Embedding API base (what comes before /embeddings); empty: the LLM's "
          "(llm.base_url), with the LLM's authentication (token or middleware)"),
     Spec("embed.batch", 16, "int", "Texts per embedding request"),
-    Spec("embed.per_run", 2000, "int", "Pieces embedded per indexing run at most (the next run continues)"),
+    Spec("embed.per_run", 2000, "int", "Pieces embedded per round: a reading goes round after round until its time "
+         "(embed.max_minutes) is up (0.11.8.3; before: per reading, the next one went on)"),
     Spec("embed.max_minutes", 45, "int", "Minutes a reading of the documents and the search's pieces may take (hourly, "
          "after a document is read, the learning's step): its embeddings stop there, the next reading continues"),
     Spec("search.vector_store", "database", "choice", "Where the vectors are searched: database (Superset's "

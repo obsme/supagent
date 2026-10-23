@@ -99,6 +99,23 @@ def _sync_chunks(prefix: str) -> None:
         log.warning("supagent: the search pieces of %s: not written", prefix, exc_info=True)
 
 
+LOCK_WAIT = "15s"   # (0.11.8.3) how long a document's Delete or a page's Remove waits for the rows a learning holds
+BUSY = "a learning is writing what this document states right now; nothing was {}: try again in a minute"
+
+
+def _lock_wait() -> None:
+    """(0.11.8.3) This transaction's wait for a lock bounded (PostgreSQL): a Delete waited for the whole understanding
+    of its document (minutes, hours with the LLM's reading), the browser or a proxy gave up first, nothing was said."""
+    from superset import db
+
+    if db.engine.dialect.name == "postgresql":
+        db.session.execute(sa.text(f"SET LOCAL lock_timeout = '{LOCK_WAIT}'"))
+
+
+def _lock_timed_out(ex: Exception) -> bool:
+    return getattr(getattr(ex, "orig", None), "pgcode", None) == "55P03"     # lock_not_available
+
+
 def _apply(kind: str, **kw: Any) -> dict:
     from supagent import settings
     from supagent.knowledge import apply
@@ -2237,7 +2254,9 @@ class AdminView(BaseView):
         return _json({"id": d.id, "title": d.title, "url": d.url, "status": d.status, "error": d.error,
                       "fetched_at": d.fetched_at, "max_pages": d.max_pages, "pages": pages,
                       "last_reading": read_log(d.id) if d.kind == "url" else {},
-                      "excluded": excluded_pages(d), "can_remove": _can_delete()})
+                      "excluded": [{k: e.get(k) for k in ("key", "url", "title", "by", "at")}   # (0.11.8.3) not
+                                   for e in excluded_pages(d)],          # the links a removal keeps (KBs each)
+                      "can_remove": _can_delete()})
 
     @expose("/api/docs/<int:doc_id>/pages/remove", methods=("POST",))
     @has_access_api
@@ -2259,20 +2278,33 @@ class AdminView(BaseView):
             from supagent.knowledge.docs import exclude_pages
 
             refs = [r for r in body["pages"] if isinstance(r, dict)][:MAX_DOC_PAGES]
-            out = exclude_pages(d, g.user.username, refs)
-            if not out["removed"]:
+            try:
+                _lock_wait()
+                out = exclude_pages(d, g.user.username, refs)
+                if not out["removed"]:
+                    db.session.rollback()
+                    return _json({"error": "none of these pages is in this document", **out}, 400)
+                db.session.commit()
+            except sa.exc.OperationalError as ex:
                 db.session.rollback()
-                return _json({"error": "none of these pages is in this document", **out}, 400)
-            db.session.commit()
+                if not _lock_timed_out(ex):
+                    raise
+                return _json({"error": BUSY.format("removed")}, 409)
             _sync_chunks(f"doc:{d.id}#")
             return _json(out)
         try:
+            _lock_wait()
             out = exclude_page(d, g.user.username, url=str(body.get("url") or ""),
                                page_id=str(body.get("page_id") or ""), path=str(body.get("path") or ""))
+            db.session.commit()
         except ValueError as ex:
             db.session.rollback()
             return _json({"error": str(ex)}, 400)
-        db.session.commit()
+        except sa.exc.OperationalError as ex:
+            db.session.rollback()
+            if not _lock_timed_out(ex):
+                raise
+            return _json({"error": BUSY.format("removed")}, 409)
         _sync_chunks(f"doc:{d.id}#")                     # (0.10.9.2) this document's pieces only, never every one
         return _json(out)
 
@@ -2321,9 +2353,16 @@ class AdminView(BaseView):
         from supagent.knowledge.docs import READ_LOG_KEY
         from supagent.models import Meta
 
-        db.session.query(Meta).filter(Meta.key == READ_LOG_KEY.format(doc_id)).delete(synchronize_session=False)
-        db.session.delete(d)
-        db.session.commit()
+        try:
+            _lock_wait()
+            db.session.query(Meta).filter(Meta.key == READ_LOG_KEY.format(doc_id)).delete(synchronize_session=False)
+            db.session.delete(d)
+            db.session.commit()
+        except sa.exc.OperationalError as ex:
+            db.session.rollback()
+            if not _lock_timed_out(ex):
+                raise
+            return _json({"error": BUSY.format("deleted")}, 409)
         _sync_chunks(f"doc:{doc_id}#")                   # (0.10.9.2) this document's pieces only
         return _json({"deleted": doc_id})
 

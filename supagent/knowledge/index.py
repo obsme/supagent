@@ -831,35 +831,41 @@ def embed_pending(limit: int | None = None, deadline: float | None = None, beat:
     if not E.enabled():
         return {"embedded": 0, "note": "no embedding model (embed.model): search by words only"}
     model = E.model()
+    rounds = limit is None and deadline is not None    # (0.11.8.3) a reading: round after round until its time is up
     limit = int(limit or settings.get("embed.per_run"))
-    todo = (db.session.query(Chunk).filter((Chunk.vector.is_(None)) | (Chunk.embed_model != model))
-            .order_by(Chunk.updated_at.desc(), Chunk.id).limit(limit).all())
+    pending = (Chunk.vector.is_(None)) | (Chunk.embed_model != model)
+    waiting = db.session.query(Chunk.id).filter(pending).count() if rounds else None
     done, batch = 0, max(1, int(settings.get("embed.batch")))
     qdrant = settings.get("search.vector_store") == "qdrant"
     timed_out = yielded = False
     started = time.time()
     from supagent.knowledge.stopping import check
 
-    for i in range(0, len(todo), batch):
-        check()                                    # an admin stopped the learning run
-        if deadline is not None and time.time() >= deadline:
-            timed_out = True
-            break
-        part = todo[i:i + batch]
-        vectors = E.embed([f"{c.title}\n{c.text}" for c in part])
-        for c, v in zip(part, vectors):
-            c.vector = E.to_bytes(v)
-            c.embed_model = model
-        if qdrant:
-            E.qdrant_upsert([(c.id, v) for c, v in zip(part, vectors)])
-        db.session.commit()
-        done += len(part)
-        if beat is not None:
-            beat(detail=f"{done:,} of {len(todo):,}")
-        if yield_to is not None and done < len(todo) and time.time() - started >= YIELD_AFTER_S and yield_to():
-            yielded = True
-            break
-    left = db.session.query(Chunk).filter((Chunk.vector.is_(None)) | (Chunk.embed_model != model)).count()
+    while True:
+        todo = (db.session.query(Chunk).filter(pending).order_by(Chunk.updated_at.desc(), Chunk.id).limit(limit).all())
+        of = waiting or len(todo)
+        for i in range(0, len(todo), batch):
+            check()                                # an admin stopped the learning run
+            if deadline is not None and time.time() >= deadline:
+                timed_out = True
+                break
+            part = todo[i:i + batch]
+            vectors = E.embed([f"{c.title}\n{c.text}" for c in part])
+            for c, v in zip(part, vectors):
+                c.vector = E.to_bytes(v)
+                c.embed_model = model
+            if qdrant:
+                E.qdrant_upsert([(c.id, v) for c, v in zip(part, vectors)])
+            db.session.commit()
+            done += len(part)
+            if beat is not None:
+                beat(detail=f"{done:,} of {of:,}")
+            if yield_to is not None and done < of and time.time() - started >= YIELD_AFTER_S and yield_to():
+                yielded = True
+                break
+        if not rounds or timed_out or yielded or len(todo) < limit:   # (0.11.8.3) embed.per_run pieces a round
+            break                                  # (0.11.1.1: a reading; a wiki of 40,000 pieces took 20 hours)
+    left = db.session.query(Chunk).filter(pending).count()
     if done:
         _store_sync(None)                          # the new vectors into the store
     out: dict[str, Any] = {"embedded": done, "left": left}
@@ -871,6 +877,9 @@ def embed_pending(limit: int | None = None, deadline: float | None = None, beat:
 
 
 INDEX_LEASE, INDEX_AGAIN = "index:lease", "index:again"
+DOC_PIECES = "doc_pieces:{}"   # (0.11.8.3) supagent_meta: the text (content_hash) a document's search pieces were made of
+UNDERSTAND_SHARE = 0.5         # (0.11.8.3) the understanding's share of a reading's time (the rest: pieces, embeddings)
+UNDERSTAND_MIN_S = 300         # and at least this (a reading of 10 minutes: 5 for the understanding)
 LEASE_S = 1800                 # a reading's lease (a process that died with it: free after this many seconds)
 RENEW_S = 300                  # (0.11.1.1) the lease renewed this often while the reading runs
 BEAT_PIECES = 2000             # the pieces written between two beats of a reading
@@ -1054,12 +1063,24 @@ def _again(value: bool | None = None) -> bool:
 def _index_once(deadline: float | None = None, progress: Callable[[str], None] | None = None) -> dict[str, Any]:
     beat = _beat(progress)
     out: dict[str, Any] = {}
+    try:                                       # (0.11.8.3) the pieces of the documents read since theirs were made,
+        fresh = _docs_read_since()             # first: found by their words at once (a wiki of 8,390 pages waited
+        if fresh:                              # for the understanding of every page, hours: "In the search: not yet")
+            beat("the search's pieces of the documents read", f"{len(fresh)} document(s)")
+            out["sync_read"] = sync(prefixes=tuple(f"doc:{i}#" for i in fresh), beat=beat)
+            _pieces_made(fresh)
+    except Exception as ex:  # pylint: disable=broad-except   (the whole sync below writes them)
+        _time_limit(ex)
+        db.session.rollback()
+        log.warning("supagent: the pieces of the documents read: %s", ex)
     try:                                       # what the documents state (0.10): the units whose text changed
         from supagent.knowledge import understand
 
         if settings.get("knowledge.understand"):
             beat("what the documents state")
-            out["understand"] = understand.run(reason="index")
+            now = time.time()                  # (0.11.8.3) within its share of the reading's time: the units left
+            until = now + max(UNDERSTAND_MIN_S, UNDERSTAND_SHARE * ((deadline or now) - now)) if deadline else None
+            out["understand"] = understand.run(reason="index", until=until, beat=beat)   # read at the next one
             if settings.get("knowledge.propose"):    # what they state, proposed for the categories and the map
                 from supagent.knowledge.proposals import propose
 
@@ -1078,6 +1099,11 @@ def _index_once(deadline: float | None = None, progress: Callable[[str], None] |
     beat("the search's pieces")
     out["sync"] = sync(beat=beat)
     try:
+        _pieces_made(None)                     # (0.11.8.3) every document's pieces as its text is now
+    except Exception as ex:  # pylint: disable=broad-except
+        db.session.rollback()
+        log.warning("supagent: the documents' pieces not marked made: %s", ex)
+    try:
         beat("embeddings")
         out["embed"] = embed_pending(deadline=deadline, beat=beat, yield_to=_again)
     except Exception as ex:  # pylint: disable=broad-except
@@ -1085,6 +1111,34 @@ def _index_once(deadline: float | None = None, progress: Callable[[str], None] |
         db.session.rollback()
         out["embed"] = {"error": str(ex)[:300]}
     return out
+
+
+def _docs_read_since() -> list[int]:
+    """(0.11.8.3) The documents whose text is not the one their search pieces were made of (read since, a page
+    removed): their pieces are written first, before the understanding."""
+    from supagent.models import Meta
+
+    made = {k: v for k, v in db.session.query(Meta.key, Meta.value).filter(Meta.key.like("doc_pieces:%"))}
+    return [i for i, h in db.session.query(Doc.id, Doc.content_hash).filter(Doc.enabled.is_(True),
+                                                                            Doc.content.isnot(None))
+            if made.get(DOC_PIECES.format(i)) != (h or "")]
+
+
+def _pieces_made(ids: list[int] | None) -> None:
+    """(0.11.8.3) These documents' pieces (None: every document's) made of their text as it is now."""
+    from supagent.models import Meta
+
+    q = db.session.query(Doc.id, Doc.content_hash).filter(Doc.enabled.is_(True), Doc.content.isnot(None))
+    texts = {i: h or "" for i, h in (q if ids is None else q.filter(Doc.id.in_(ids or [-1])))}
+    rows = {r.key: r for r in db.session.query(Meta).filter(Meta.key.in_([DOC_PIECES.format(i) for i in texts] or
+                                                                         ["-"]))}
+    for i, h in texts.items():
+        key = DOC_PIECES.format(i)
+        if key not in rows:
+            db.session.add(Meta(key=key, value=h))
+        elif rows[key].value != h:
+            rows[key].value = h
+    db.session.commit()
 
 
 def _beat(progress: Callable[[str], None] | None) -> Callable[..., None]:
